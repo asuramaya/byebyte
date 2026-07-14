@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 asuramaya and byebyte contributors
+"""byebyte-update — is a newer byebyte release out? (check-only for now)
+
+Queries the repo's latest GitHub release and compares it to the installed
+version. This is deliberately a SEPARATE program from the daemon: byebyted
+never touches the network at all, so the one component that reaches the
+internet is this small, unprivileged-when-checking updater — never the
+privileged control loop (phanspeed's split, inherited verbatim).
+
+  byebyte-update --check          human-readable: newer release or not
+  byebyte-update --check --json   {"available": bool, "latest": str|null,
+                                   "current": str}
+  byebyte-update                  (as root) would install a newer release —
+                                  but installing from GitHub releases lands
+                                  when releases exist; until then this is an
+                                  explicit stub that installs NOTHING.
+
+The daily byebyte-update.timer runs --check only: it notifies, it never
+installs unattended (family doctrine: updates are click-to-install). The
+repo has no published releases yet, so a 404 from the API is the expected
+steady state and is reported calmly, not as an error. stdlib only.
+"""
+
+import json
+import os
+import re
+import sys
+import urllib.error
+import urllib.request
+
+REPO = "asuramaya/ByeByte"
+API = f"https://api.github.com/repos/{REPO}/releases/latest"
+VERSION_FILE = "/usr/local/share/byebyte/VERSION"
+# Installed location first, falling back to the repo-relative path for a
+# source checkout / dev testing.
+_SRC_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+VERSION_CANDIDATES = (VERSION_FILE, os.path.join(_SRC_DIR, "VERSION"))
+TIMEOUT = 5           # seconds — a daily check has no business hanging
+MAX_BYTES = 1 << 20   # the release API answer is a few KB; cap it anyway
+
+
+def installed_version():
+    for path in VERSION_CANDIDATES:
+        try:
+            with open(path) as f:
+                v = f.read().strip()
+            if v:
+                return v
+        except OSError:
+            continue
+    return None
+
+
+def vtuple(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v or "")[:3])
+
+
+def fetch(url):
+    # Bounded read so a compromised/MITM endpoint can't balloon memory.
+    req = urllib.request.Request(url, headers={"User-Agent": "byebyte-update"})
+    with urllib.request.urlopen(req, timeout=TIMEOUT) as r:  # noqa: S310 (https)
+        data = r.read(MAX_BYTES + 1)
+    if len(data) > MAX_BYTES:
+        raise ValueError("response too large")
+    return data.decode()
+
+
+def main():
+    json_out = "--json" in sys.argv
+    check_only = "--check" in sys.argv or json_out   # --json implies check-only
+    cur = installed_version() or "unknown"
+
+    def emit(available, latest=None, note=None):
+        if json_out:
+            print(json.dumps({"available": bool(available), "latest": latest,
+                              "current": cur}))
+        elif note:
+            print(note)
+
+    try:
+        rel = json.loads(fetch(API))
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            # Expected until the repo/release is published — degrade calmly.
+            emit(False, note="no published byebyte release yet (the GitHub "
+                             "repo isn't public/released) — nothing to check "
+                             f"against; installed {cur}.")
+        else:
+            emit(False, note=f"update check failed (GitHub said {e.code}) — "
+                             "will try again next run.")
+        return 0
+    except Exception as e:
+        emit(False, note=f"update check failed (offline?): {e}")
+        return 0
+
+    tag = (rel.get("tag_name") or "").lstrip("v") if isinstance(rel, dict) else ""
+    if not tag:
+        emit(False, note="no release tag found.")
+        return 0
+    if vtuple(tag) <= vtuple(cur):
+        emit(False, latest=tag,
+             note=f"up to date (installed {cur}, latest {tag}).")
+        return 0
+
+    emit(True, latest=tag, note=f"update available: {cur} -> {tag}")
+    if check_only:
+        return 0
+
+    # ---- install path: an explicit, honest stub ---------------------------
+    # TODO(releases): once byebyte publishes release assets (tarball +
+    # SHA256SUMS, phanspeed-style fail-closed verification), root runs here
+    # download+verify+install. Until then this version NEVER installs
+    # anything — saying so beats pretending.
+    if os.geteuid() != 0:
+        print("installing needs root (sudo byebyte-update) — but see below:")
+    print(f"a newer release ({tag}) exists, but installing from GitHub "
+          "releases lands when byebyte publishes release assets — this "
+          "version installs NOTHING. Update from a checkout instead:\n"
+          "  git pull && sudo ./install.sh")
+    return 1  # asked to install, installed nothing: fail closed (family shape)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

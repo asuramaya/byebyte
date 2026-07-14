@@ -1,0 +1,5 @@
+{
+  "poll_interval": 30,
+  "owner_uid": 1000,
+  "tmpfs_mounts": ["/tmp", "/dev/shm"]
+}

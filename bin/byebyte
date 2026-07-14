@@ -1,0 +1,224 @@
+#!/usr/bin/env python3
+"""byebyte — verb CLI over the byebyted control socket.
+
+Talks to the daemon's socket; `status` falls back to reading status.json
+so it still answers even mid-daemon-restart.
+"""
+
+import json
+import os
+import socket
+import sys
+import time
+
+RUNTIME_DIR = os.environ.get("BYEBYTE_RUNTIME_DIR", "/run/byebyte")
+
+PLANNED = {
+    "purge": "M3 — allowlist-only cache eviction, dry-run by default",
+    "advise": "M3 — nudges: leaks, hoards, runaway logs",
+    "ghosts": "M3 — deleted-but-open files holding blocks",
+    "kernels": "M3 — /boot cleanup that works at 0 bytes free",
+    "ballast": "M3 — emergency reserve release",
+    "burn": "M4 — live per-process writes",
+}
+
+
+def request(payload):
+    """One JSON command to the daemon; None if the socket is unreachable."""
+    sock_path = os.path.join(RUNTIME_DIR, "control.sock")
+    try:
+        conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        conn.settimeout(30)
+        conn.connect(sock_path)
+        conn.sendall(json.dumps(payload).encode() + b"\n")
+        buf = b""
+        while b"\n" not in buf:
+            chunk = conn.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+        conn.close()
+        return json.loads(buf.decode())
+    except (OSError, ValueError):
+        return None
+
+
+def request_or_die(payload):
+    doc = request(payload)
+    if doc is None:
+        sys.exit("byebyte: daemon unreachable — is byebyted running?")
+    if isinstance(doc, dict) and "error" in doc:
+        sys.exit(f"byebyte: {doc['error']}")
+    return doc
+
+
+def fetch():
+    doc = request({"cmd": "status"})
+    if isinstance(doc, dict) and "mounts" in doc:
+        return doc
+    try:
+        with open(os.path.join(RUNTIME_DIR, "status.json")) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        sys.exit("byebyte: no daemon and no status.json — is byebyted running?")
+
+
+def human_bytes(n):
+    for unit in ("B", "K", "M", "G", "T"):
+        if abs(n) < 1024 or unit == "T":
+            return f"{n:.0f}{unit}" if unit == "B" else f"{n / 1.0:.1f}{unit}"
+        n /= 1024
+    return f"{n:.1f}T"
+
+
+def human_burn(bps):
+    per_day = bps * 86400
+    if abs(per_day) < 1024 * 1024:
+        return "quiet"
+    return f"{human_bytes(per_day)}/day"
+
+
+def human_eta(seconds):
+    if seconds is None:
+        return "—"
+    if seconds >= 14 * 86400:
+        return f"~{seconds // (7 * 86400)}w"
+    if seconds >= 2 * 86400:
+        return f"~{seconds // 86400}d"
+    if seconds >= 2 * 3600:
+        return f"~{seconds // 3600}h"
+    return f"~{max(1, seconds // 60)}m"
+
+
+FLAGS = {"ok": " ", "warn": "!", "hot": "‼", "edquot": "✗"}
+
+
+def cmd_status(argv):
+    doc = fetch()
+    if "--json" in argv:
+        print(json.dumps(doc, indent=2))
+        return
+    age = int(time.time() - doc["ts"])
+    print(f"byebyte v{doc['daemon']['version']}   (status {age}s old)")
+    for m in doc["mounts"]:
+        flag = FLAGS.get(m["state"], "?")
+        line = (f" {flag} {m['mountpoint']:<12} "
+                f"{human_bytes(m['effective_free']):>8} free "
+                f"of {human_bytes(m['total']):>8}   "
+                f"burn {human_burn(m['burn_bps']):<12} "
+                f"full {human_eta(m['eta_seconds'])}")
+        if m.get("quota"):
+            q = m["quota"]
+            line += (f"   [quota: {human_bytes(q['remaining'])}"
+                     f" of {human_bytes(q['limit'])} left]")
+        print(line)
+
+
+def _flag_val(argv, name, default):
+    if name in argv:
+        i = argv.index(name)
+        if i + 1 < len(argv):
+            return argv[i + 1]
+    return default
+
+
+def _age_tag(newest_mtime, now):
+    if not newest_mtime:
+        return "?"
+    days = (now - newest_mtime) / 86400
+    if days < 1:
+        return "hot"
+    if days < 30:
+        return f"{int(days)}d"
+    if days < 90:
+        return f"{int(days / 30)}mo"
+    return f"cold {int(days / 30)}mo"
+
+
+def parse_since(text, now):
+    """'2h', '3d', '1w' or 'YYYY-MM-DD' -> epoch seconds."""
+    units = {"h": 3600, "d": 86400, "w": 7 * 86400}
+    if text and text[-1] in units:
+        try:
+            return now - float(text[:-1]) * units[text[-1]]
+        except ValueError:
+            pass
+    try:
+        return time.mktime(time.strptime(text, "%Y-%m-%d"))
+    except ValueError:
+        sys.exit(f"byebyte: bad --since '{text}' (want 2h / 3d / 1w"
+                 " or YYYY-MM-DD)")
+
+
+def cmd_scan(argv):
+    doc = request_or_die({"cmd": "scan"})
+    if doc.get("running") and not doc.get("started"):
+        print("scan already running")
+    else:
+        print("scan started")
+    if "--wait" in argv:
+        while True:
+            time.sleep(1)
+            st = request_or_die({"cmd": "status"})
+            idx = st.get("index") or {}
+            if not idx.get("scanning"):
+                age = int(time.time() - (idx.get("last_scan") or 0))
+                print(f"scan done ({age}s ago)")
+                return
+
+
+def cmd_why(argv):
+    path = next((a for a in argv if not a.startswith("-")
+                 and a != _flag_val(argv, "--limit", None)), "/")
+    limit = int(_flag_val(argv, "--limit", "15"))
+    doc = request_or_die({"cmd": "why", "path": path, "limit": limit})
+    if "--json" in argv:
+        print(json.dumps(doc, indent=2))
+        return
+    now = time.time()
+    age = human_eta(int(now - doc["scan_ts"])).lstrip("~")
+    total = doc.get("total")
+    head = f"{human_bytes(total)} in " if total is not None else ""
+    print(f"{head}{doc['path']}   (scanned {age} ago)")
+    for r in doc["rows"]:
+        print(f"  {human_bytes(r['bytes']):>8}  {_age_tag(r['newest_mtime'], now):<10}"
+              f"  {r['path']}")
+    if not doc["rows"]:
+        print("  (nothing above the index threshold here)")
+
+
+def cmd_blame(argv):
+    now = time.time()
+    since = parse_since(_flag_val(argv, "--since", "1d"), now)
+    limit = int(_flag_val(argv, "--limit", "15"))
+    doc = request_or_die({"cmd": "blame", "since": since, "limit": limit})
+    if "--json" in argv:
+        print(json.dumps(doc, indent=2))
+        return
+    span = human_eta(int(doc["head_ts"] - doc["base_ts"])).lstrip("~")
+    print(f"grew over the last {span} (parents include their children):")
+    for r in doc["rows"]:
+        sign = "+" if r["delta"] >= 0 else ""
+        print(f"  {sign}{human_bytes(r['delta']):>8}  {r['path']}"
+              f"  (now {human_bytes(r['bytes'])})")
+    if not doc["rows"]:
+        print("  nothing moved above the index threshold")
+
+
+def main():
+    argv = sys.argv[1:]
+    verb = argv[0] if argv and not argv[0].startswith("-") else "status"
+    rest = argv[1:] if argv and not argv[0].startswith("-") else argv
+    verbs = {"status": cmd_status, "scan": cmd_scan,
+             "why": cmd_why, "blame": cmd_blame}
+    if verb in verbs:
+        verbs[verb](rest)
+    elif verb in PLANNED:
+        sys.exit(f"byebyte {verb}: not yet — {PLANNED[verb]}")
+    else:
+        known = ", ".join(list(verbs) + list(PLANNED))
+        sys.exit(f"byebyte: unknown verb '{verb}' (verbs: {known})")
+
+
+if __name__ == "__main__":
+    main()

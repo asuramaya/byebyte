@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  static-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Python compiles
+        run: python3 -m py_compile bin/byebyted bin/byebyte bin/byebyte-healthcheck bin/byebyte-update
+
+      - name: Shell scripts parse
+        run: |
+          find . -name '*.sh' -not -path './.git/*' -print0 \
+            | xargs -0 -n1 bash -n
+
+      - name: Smoke (real daemon, real mounts, hostile socket input)
+        run: make smoke
+
+      - name: Extension JS syntax
+        # GJS extensions are ESM; node only parses import/export from a .mjs
+        # file, so check a renamed copy.
+        run: |
+          cp 'extension/byebyte@asuramaya/extension.js' /tmp/byebyte-extension.mjs
+          node --check /tmp/byebyte-extension.mjs
+
+      - name: metadata.json is valid
+        run: python3 -c "import json; json.load(open('extension/byebyte@asuramaya/metadata.json'))"

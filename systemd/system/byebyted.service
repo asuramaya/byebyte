@@ -1,0 +1,23 @@
+[Unit]
+Description=byebyte storage daemon — owns the truth about bytes at rest
+Documentation=https://github.com/asuramaya/byebyte
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/byebyted
+Restart=on-failure
+RestartSec=5
+
+RuntimeDirectory=byebyte
+RuntimeDirectoryMode=0755
+StateDirectory=byebyte
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/run/byebyte /var/lib/byebyte
+ProtectHome=read-only
+# PrivateTmp would hide the real /tmp — the exact mount whose quota
+# ghosts caused the 2026-07-13 outage this daemon exists to see.
+PrivateTmp=no
+
+[Install]
+WantedBy=multi-user.target

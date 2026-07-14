@@ -1,0 +1,19 @@
+[Unit]
+Description=byebyte daily update check (notify-only, never installs)
+Documentation=https://github.com/asuramaya/byebyte
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Short-lived oneshot; the ONLY byebyte component that reaches the internet —
+# byebyted itself is networkless. --check makes the daily timer notify-only:
+# it CHECKS and logs but never installs unattended (family doctrine: updates
+# are click-to-install). Runs as an unprivileged dynamic user because a check
+# needs no privilege at all.
+DynamicUser=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ExecStart=/usr/local/bin/byebyte-update --check

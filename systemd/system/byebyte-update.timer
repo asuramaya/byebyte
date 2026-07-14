@@ -1,0 +1,14 @@
+[Unit]
+Description=byebyte daily update check
+
+# Safe to leave enabled: it triggers byebyte-update.service, which runs
+# --check only — it notifies, it NEVER installs unattended. Actually
+# updating stays a deliberate act (git pull && sudo ./install.sh until
+# releases are published).
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1d
+Persistent=true
+
+[Install]
+WantedBy=timers.target

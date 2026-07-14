@@ -1,0 +1,603 @@
+#!/usr/bin/env python3
+"""byebyted — the storage demon: owns the truth about bytes at rest.
+
+Polls every real filesystem (tmpfs included — quotas live there too),
+computes burn rate and time-to-full, and publishes status.json for the
+CLI and the GNOME pill. The daemon is the only privileged actor; the
+CLI and pill only read status and poke the control socket.
+
+stdlib only, by constitution.
+"""
+
+import argparse
+import ctypes
+import json
+import math
+import os
+import platform
+import signal
+import socket
+import sqlite3
+import struct
+import sys
+import threading
+import time
+
+VERSION = "0.3.0"
+
+RUNTIME_DIR = os.environ.get("BYEBYTE_RUNTIME_DIR", "/run/byebyte")
+STATUS_PATH = os.path.join(RUNTIME_DIR, "status.json")
+SOCKET_PATH = os.path.join(RUNTIME_DIR, "control.sock")
+
+# Config is the seed, never the master: it can tune numbers within clamps
+# and disable mounts, but it cannot grant anything the daemon doesn't
+# already do. Unknown keys are ignored, bad types fall back to defaults.
+DEFAULTS = {
+    "poll_interval": 30,
+    "burn_tau": 1800,          # EWMA time constant for burn rate (s)
+    "eta_cap_days": 365,       # ETAs beyond this are noise -> omitted
+    "warn_eta_days": 7.0,
+    "hot_eta_hours": 24.0,
+    "warn_free_pct": 10.0,
+    "hot_free_pct": 5.0,
+    "owner_uid": 1000,         # status/socket are chowned here when root
+    "include_fstypes": ["ext4", "xfs", "btrfs", "vfat"],
+    "tmpfs_mounts": ["/tmp", "/dev/shm"],
+    "exclude_mounts": [],
+    "scan_roots": ["/"],       # each root is walked on its own filesystem
+    "scan_hour": 3,            # nightly scan kicks off in this local hour
+    "index_min_bytes": 1048576,  # dirs below this don't earn an index row
+    "snapshot_ring": 30,       # scans kept per root; older ones are pruned
+}
+
+CLAMPS = {
+    "poll_interval": (2, 3600),
+    "burn_tau": (60, 86400),
+    "eta_cap_days": (1, 3650),
+    "warn_eta_days": (0.1, 3650),
+    "hot_eta_hours": (0.1, 8760),
+    "warn_free_pct": (0.0, 100.0),
+    "hot_free_pct": (0.0, 100.0),
+    "owner_uid": (0, 2 ** 31),
+    "scan_hour": (0, 23),
+    "index_min_bytes": (4096, 1 << 40),
+    "snapshot_ring": (2, 365),
+}
+
+
+def load_config(path):
+    cfg = dict(DEFAULTS)
+    try:
+        with open(path) as f:
+            raw = json.load(f)
+    except (OSError, ValueError):
+        return cfg
+    if not isinstance(raw, dict):
+        return cfg
+    for key, default in DEFAULTS.items():
+        if key not in raw:
+            continue
+        val = raw[key]
+        if isinstance(default, list):
+            if isinstance(val, list) and all(isinstance(x, str) for x in val):
+                cfg[key] = val
+        elif isinstance(default, (int, float)) and isinstance(val, (int, float)):
+            lo, hi = CLAMPS[key]
+            cfg[key] = type(default)(min(hi, max(lo, val)))
+    return cfg
+
+
+def discover_mounts(cfg):
+    mounts, seen = [], set()
+    with open("/proc/self/mounts") as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) < 3:
+                continue
+            dev, mp, fstype = parts[0], parts[1], parts[2]
+            # /proc/mounts octal-escapes spaces etc. as \040
+            mp = mp.encode("ascii", "replace").decode("unicode_escape")
+            # a device mounted twice (e.g. / and /snap) is one filesystem;
+            # tmpfs all share the device name, so those dedupe by mountpoint
+            key = mp if fstype == "tmpfs" else dev
+            if key in seen:
+                continue
+            if any(mp == ex or mp.startswith(ex.rstrip("/") + "/")
+                   for ex in cfg["exclude_mounts"]):
+                continue
+            if fstype == "tmpfs":
+                if mp not in cfg["tmpfs_mounts"]:
+                    continue
+            elif fstype not in cfg["include_fstypes"]:
+                continue
+            seen.add(key)
+            mounts.append({"mountpoint": mp, "fstype": fstype, "device": dev})
+    return mounts
+
+
+# --- quota: effective headroom is min(fs free, quota remaining) ------------
+# quotactl_fd(2) queries by an fd on the filesystem, which is the only sane
+# way to reach tmpfs usrquota. Syscall number is arch-specific; only wired
+# for x86_64 here, everything else just reports no quota.
+_SYS_QUOTACTL_FD = 443 if platform.machine() == "x86_64" else None
+_Q_GETQUOTA = 0x800007
+_USRQUOTA = 0
+
+
+class _IfDqblk(ctypes.Structure):
+    _fields_ = [
+        ("dqb_bhardlimit", ctypes.c_uint64),  # 1 KiB blocks
+        ("dqb_bsoftlimit", ctypes.c_uint64),
+        ("dqb_curspace", ctypes.c_uint64),    # bytes
+        ("dqb_ihardlimit", ctypes.c_uint64),
+        ("dqb_isoftlimit", ctypes.c_uint64),
+        ("dqb_curinodes", ctypes.c_uint64),
+        ("dqb_btime", ctypes.c_uint64),
+        ("dqb_itime", ctypes.c_uint64),
+        ("dqb_valid", ctypes.c_uint32),
+    ]
+
+
+_libc = ctypes.CDLL(None, use_errno=True)
+
+
+def quota_headroom(mountpoint, uid):
+    if _SYS_QUOTACTL_FD is None:
+        return None
+    try:
+        fd = os.open(mountpoint, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return None
+    try:
+        dq = _IfDqblk()
+        cmd = (_Q_GETQUOTA << 8) | _USRQUOTA
+        ret = _libc.syscall(_SYS_QUOTACTL_FD, fd, cmd, uid, ctypes.byref(dq))
+        if ret != 0:
+            return None
+        limit = dq.dqb_bhardlimit * 1024
+        if limit == 0:
+            return None  # quota enabled but no limit set for this uid
+        used = dq.dqb_curspace
+        return {"limit": limit, "used": used,
+                "remaining": max(0, limit - used)}
+    finally:
+        os.close(fd)
+
+
+# --- polling ----------------------------------------------------------------
+
+def poll_mount(m, state, cfg, uid, now):
+    try:
+        sv = os.statvfs(m["mountpoint"])
+    except OSError:
+        return None
+    total = sv.f_blocks * sv.f_frsize
+    free = sv.f_bavail * sv.f_frsize
+    used = total - free
+    quota = quota_headroom(m["mountpoint"], uid)
+    eff_free = free if quota is None else min(free, quota["remaining"])
+
+    prev = state.get(m["mountpoint"])
+    ewma = 0.0
+    if prev is not None:
+        dt = max(1e-3, now - prev["t"])
+        rate = (used - prev["used"]) / dt  # bytes/s, positive = filling
+        alpha = 1.0 - math.exp(-dt / cfg["burn_tau"])
+        ewma = alpha * rate + (1.0 - alpha) * prev["ewma"]
+    state[m["mountpoint"]] = {"t": now, "used": used, "ewma": ewma}
+
+    eta = None
+    if ewma > 1.0:  # below 1 B/s the ETA is astrology
+        eta = eff_free / ewma
+        if eta > cfg["eta_cap_days"] * 86400:
+            eta = None
+
+    return {
+        "mountpoint": m["mountpoint"],
+        "fstype": m["fstype"],
+        "total": total,
+        "free": free,
+        "effective_free": eff_free,
+        "quota": quota,
+        "burn_bps": round(ewma, 1),
+        "eta_seconds": None if eta is None else int(eta),
+        "state": classify(total, eff_free, eta, quota, cfg),
+    }
+
+
+def classify(total, eff_free, eta, quota, cfg):
+    if quota is not None and quota["remaining"] <= 0:
+        return "edquot"
+    pct = 100.0 * eff_free / total if total else 0.0
+    if (eta is not None and eta < cfg["hot_eta_hours"] * 3600) \
+            or pct < cfg["hot_free_pct"]:
+        return "hot"
+    if (eta is not None and eta < cfg["warn_eta_days"] * 86400) \
+            or pct < cfg["warn_free_pct"]:
+        return "warn"
+    return "ok"
+
+
+def write_status(doc, cfg):
+    tmp = STATUS_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(doc, f, separators=(",", ":"))
+        f.write("\n")
+    os.chmod(tmp, 0o640)
+    if os.getuid() == 0:
+        os.chown(tmp, cfg["owner_uid"], -1)
+    os.replace(tmp, STATUS_PATH)
+
+
+# --- index: the persistent truth about where the bytes are ------------------
+# One scan is one snapshot: cumulative bytes/files/newest-mtime per directory
+# (dirs under index_min_bytes earn no row), paths interned once, snapshots
+# ring-buffered per root. `why` reads the latest snapshot; `blame` diffs two.
+# The scanner writes in one connection on its own thread; every query opens
+# a short-lived read connection, so the poll loop never blocks on a walk.
+
+STATE_DIR = os.environ.get("BYEBYTE_STATE_DIR", "/var/lib/byebyte")
+DB_PATH = os.path.join(STATE_DIR, "index.db")
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS paths(
+    id INTEGER PRIMARY KEY,
+    path TEXT UNIQUE NOT NULL);
+CREATE TABLE IF NOT EXISTS scans(
+    id INTEGER PRIMARY KEY,
+    ts REAL NOT NULL,
+    root TEXT NOT NULL,
+    status TEXT NOT NULL,
+    total_bytes INTEGER);
+CREATE TABLE IF NOT EXISTS dir_stats(
+    scan_id INTEGER NOT NULL,
+    path_id INTEGER NOT NULL,
+    bytes INTEGER NOT NULL,
+    files INTEGER NOT NULL,
+    newest_mtime REAL NOT NULL,
+    PRIMARY KEY(scan_id, path_id)) WITHOUT ROWID;
+"""
+
+
+class Indexer:
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self._start_lock = threading.Lock()
+        self.scanning = False
+        os.makedirs(STATE_DIR, exist_ok=True)
+        con = self._connect()
+        try:
+            con.executescript(_SCHEMA)
+            con.commit()
+            row = con.execute(
+                "SELECT MAX(ts) FROM scans WHERE status='done'").fetchone()
+            self.last_scan_ts = row[0]
+        finally:
+            con.close()
+
+    def _connect(self):
+        con = sqlite3.connect(DB_PATH, timeout=30)
+        con.execute("PRAGMA journal_mode=WAL")
+        return con
+
+    # -- writing ------------------------------------------------------------
+
+    def scan(self):
+        with self._start_lock:
+            if self.scanning:
+                return False
+            self.scanning = True
+        threading.Thread(target=self._scan_all, daemon=True).start()
+        return True
+
+    def _scan_all(self):
+        try:
+            for root in self.cfg["scan_roots"]:
+                self._scan_root(os.path.abspath(root))
+        finally:
+            self.scanning = False
+
+    def _scan_root(self, root):
+        con = self._connect()
+        try:
+            try:
+                dev = os.stat(root).st_dev
+            except OSError:
+                return
+            ts = time.time()
+            cur = con.execute(
+                "INSERT INTO scans(ts, root, status) VALUES(?,?,?)",
+                (ts, root, "running"))
+            scan_id = cur.lastrowid
+            con.commit()
+            # filesystem depth outruns Python's default recursion budget
+            # long before it outruns a real tree
+            sys.setrecursionlimit(20000)
+            total, _files, _newest = self._walk(con, scan_id, dev, root)
+            con.execute(
+                "UPDATE scans SET status='done', total_bytes=? WHERE id=?",
+                (total, scan_id))
+            self._prune(con, root)
+            con.commit()
+            self.last_scan_ts = ts
+        finally:
+            con.close()
+
+    def _walk(self, con, scan_id, dev, path):
+        total = files = 0
+        newest = 0.0
+        try:
+            entries = os.scandir(path)
+        except OSError:
+            return 0, 0, 0.0
+        with entries:
+            for e in entries:
+                try:
+                    if e.is_symlink():
+                        continue
+                    st = e.stat(follow_symlinks=False)
+                    if e.is_dir(follow_symlinks=False):
+                        if st.st_dev != dev:
+                            continue  # another filesystem: not this root's bytes
+                        b, f, m = self._walk(con, scan_id, dev, e.path)
+                        total += b
+                        files += f
+                        newest = max(newest, m)
+                    elif e.is_file(follow_symlinks=False):
+                        total += st.st_blocks * 512
+                        files += 1
+                        newest = max(newest, st.st_mtime)
+                except OSError:
+                    continue
+        if total >= self.cfg["index_min_bytes"]:
+            con.execute("INSERT INTO paths(path) VALUES(?) "
+                        "ON CONFLICT(path) DO NOTHING", (path,))
+            pid = con.execute("SELECT id FROM paths WHERE path=?",
+                              (path,)).fetchone()[0]
+            con.execute("INSERT OR REPLACE INTO dir_stats VALUES(?,?,?,?,?)",
+                        (scan_id, pid, total, files, newest))
+        return total, files, newest
+
+    def _prune(self, con, root):
+        old = [r[0] for r in con.execute(
+            "SELECT id FROM scans WHERE root=? ORDER BY ts DESC",
+            (root,)).fetchall()[self.cfg["snapshot_ring"]:]]
+        if old:
+            marks = ",".join("?" * len(old))
+            con.execute(f"DELETE FROM dir_stats WHERE scan_id IN ({marks})", old)
+            con.execute(f"DELETE FROM scans WHERE id IN ({marks})", old)
+
+    # -- reading ------------------------------------------------------------
+
+    def _scan_for(self, con, path, at_or_before=None):
+        """Latest done scan whose root covers `path` (longest root wins)."""
+        rows = con.execute(
+            "SELECT id, ts, root FROM scans WHERE status='done'"
+            + ("" if at_or_before is None else " AND ts <= ?")
+            + " ORDER BY ts DESC",
+            () if at_or_before is None else (at_or_before,)).fetchall()
+        best = None
+        for sid, ts, root in rows:
+            base = root.rstrip("/")
+            if path == root or path.startswith(base + "/") or root == "/":
+                if best is None or len(root) > len(best[2]):
+                    best = (sid, ts, root)
+        return best
+
+    def why(self, path, limit):
+        path = os.path.abspath(path or "/")
+        con = self._connect()
+        try:
+            scan = self._scan_for(con, path)
+            if scan is None:
+                return {"error": "no scan yet — run: byebyte scan"}
+            sid, ts, _root = scan
+            parent = path.rstrip("/")
+            rows = con.execute(
+                "SELECT p.path, d.bytes, d.files, d.newest_mtime"
+                " FROM dir_stats d JOIN paths p ON p.id = d.path_id"
+                " WHERE d.scan_id=? AND p.path LIKE ? || '/%'"
+                "   AND p.path NOT LIKE ? || '/%/%'"
+                " ORDER BY d.bytes DESC LIMIT ?",
+                (sid, parent, parent, limit)).fetchall()
+            here = con.execute(
+                "SELECT d.bytes FROM dir_stats d JOIN paths p"
+                " ON p.id = d.path_id WHERE d.scan_id=? AND p.path=?",
+                (sid, path)).fetchone()
+            return {"scan_ts": ts, "path": path,
+                    "total": here[0] if here else None,
+                    "rows": [{"path": r[0], "bytes": r[1], "files": r[2],
+                              "newest_mtime": r[3]} for r in rows]}
+        finally:
+            con.close()
+
+    def blame(self, since, limit):
+        con = self._connect()
+        try:
+            head = con.execute(
+                "SELECT id, ts, root FROM scans WHERE status='done'"
+                " ORDER BY ts DESC LIMIT 1").fetchone()
+            if head is None:
+                return {"error": "no scan yet — run: byebyte scan"}
+            base = con.execute(
+                "SELECT id, ts FROM scans WHERE status='done' AND root=?"
+                " AND ts <= ? ORDER BY ts DESC LIMIT 1",
+                (head[2], since)).fetchone()
+            if base is None:
+                # every snapshot is newer than --since: diff from the oldest
+                # one we have — the output reports the real span, so this
+                # stays honest rather than refusing
+                base = con.execute(
+                    "SELECT id, ts FROM scans WHERE status='done' AND root=?"
+                    " ORDER BY ts ASC LIMIT 1", (head[2],)).fetchone()
+            if base is None or base[0] == head[0]:
+                return {"error": "no earlier snapshot to diff against"
+                                 " — need two scans spanning --since"}
+            rows = con.execute(
+                "SELECT p.path, h.bytes - COALESCE(b.bytes, 0), h.bytes"
+                " FROM dir_stats h JOIN paths p ON p.id = h.path_id"
+                " LEFT JOIN dir_stats b"
+                "   ON b.scan_id=? AND b.path_id = h.path_id"
+                " WHERE h.scan_id=? ORDER BY 2 DESC LIMIT ?",
+                (base[0], head[0], limit)).fetchall()
+            return {"base_ts": base[1], "head_ts": head[1],
+                    "rows": [{"path": r[0], "delta": r[1], "bytes": r[2]}
+                             for r in rows if r[1] != 0]}
+        finally:
+            con.close()
+
+
+def _limit(req):
+    lim = req.get("limit", 15)
+    if not isinstance(lim, int) or not 1 <= lim <= 1000:
+        raise ValueError("limit must be an int in 1..1000")
+    return lim
+
+
+# --- control socket ---------------------------------------------------------
+# Input is hostile by default: SO_PEERCRED-gated (root or the owner, on top
+# of the 0660 file mode — family ruling 2026-07-14), bounded reads, JSON
+# only, a fixed command set, anything else answers {"error": ...} and the
+# connection dies.
+
+class Control(threading.Thread):
+    MAX_LINE = 4096
+
+    def __init__(self, cfg, get_status, indexer):
+        super().__init__(daemon=True)
+        self.get_status = get_status
+        self.indexer = indexer
+        self._allowed = {0, os.getuid(), cfg["owner_uid"]}
+        try:
+            os.unlink(SOCKET_PATH)
+        except FileNotFoundError:
+            pass
+        self.srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.srv.bind(SOCKET_PATH)
+        os.chmod(SOCKET_PATH, 0o660)
+        if os.getuid() == 0:
+            os.chown(SOCKET_PATH, cfg["owner_uid"], -1)
+        self.srv.listen(4)
+
+    def run(self):
+        while True:
+            try:
+                conn, _ = self.srv.accept()
+            except OSError:
+                return
+            threading.Thread(target=self.handle, args=(conn,),
+                             daemon=True).start()
+
+    def handle(self, conn):
+        try:
+            creds = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
+                                    struct.calcsize("3i"))
+            _pid, peer_uid, _gid = struct.unpack("3i", creds)
+            if peer_uid not in self._allowed:
+                raise PermissionError("peer not allowed")
+            conn.settimeout(5)
+            data = b""
+            while b"\n" not in data:
+                chunk = conn.recv(1024)
+                if not chunk:
+                    break
+                data += chunk
+                if len(data) > self.MAX_LINE:
+                    raise ValueError("line too long")
+            req = json.loads(data.decode("utf-8").splitlines()[0] or "{}")
+            if not isinstance(req, dict):
+                raise ValueError("not an object")
+            cmd = req.get("cmd")
+            if cmd == "ping":
+                resp = {"ok": True, "version": VERSION}
+            elif cmd == "status":
+                resp = self.get_status()
+            elif cmd == "scan":
+                started = self.indexer.scan()
+                resp = {"ok": True, "started": started,
+                        "running": not started}
+            elif cmd == "why":
+                path = req.get("path", "/")
+                if path is not None and not isinstance(path, str):
+                    raise ValueError("path must be a string")
+                resp = self.indexer.why(path, _limit(req))
+            elif cmd == "blame":
+                since = req.get("since")
+                if not isinstance(since, (int, float)) or since <= 0:
+                    raise ValueError("since must be an epoch timestamp")
+                resp = self.indexer.blame(float(since), _limit(req))
+            else:
+                resp = {"error": "unknown command"}
+        except Exception as exc:  # noqa: BLE001 — hostile input, never crash
+            resp = {"error": type(exc).__name__}
+        try:
+            conn.sendall((json.dumps(resp, separators=(",", ":")) + "\n")
+                         .encode())
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+
+# --- main -------------------------------------------------------------------
+
+def main():
+    ap = argparse.ArgumentParser(prog="byebyted")
+    ap.add_argument("--config", default="/etc/byebyte/config.json")
+    ap.add_argument("--once", action="store_true",
+                    help="single poll, write status, exit")
+    args = ap.parse_args()
+
+    cfg = load_config(args.config)
+    os.makedirs(RUNTIME_DIR, exist_ok=True)
+    uid = cfg["owner_uid"] if os.getuid() == 0 else os.getuid()
+
+    stop = threading.Event()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, lambda *_: stop.set())
+
+    state = {}
+    latest = {"doc": {"error": "no status yet"}}
+    indexer = Indexer(cfg)
+
+    def live_status():
+        # the cached doc is up to one poll old — fine for mounts, but the
+        # index flags must be LIVE or `scan` followed by `status` races
+        doc = dict(latest["doc"])
+        if "mounts" in doc:
+            doc["index"] = {"last_scan": indexer.last_scan_ts,
+                            "scanning": indexer.scanning}
+        return doc
+
+    ctl = Control(cfg, live_status, indexer)
+    ctl.start()
+
+    while not stop.is_set():
+        now = time.time()
+        rows = [r for r in (poll_mount(m, state, cfg, uid, now)
+                            for m in discover_mounts(cfg)) if r]
+        doc = {
+            "v": 1,
+            "ts": now,
+            "daemon": {"version": VERSION, "pid": os.getpid(),
+                       "poll_interval": cfg["poll_interval"]},
+            "index": {"last_scan": indexer.last_scan_ts,
+                      "scanning": indexer.scanning},
+            "mounts": rows,
+        }
+        latest["doc"] = doc
+        write_status(doc, cfg)
+        # nightly scan: fires once inside the configured hour (20h guard
+        # so a restart mid-hour doesn't double-walk the disk)
+        if (not indexer.scanning
+                and time.localtime(now).tm_hour == cfg["scan_hour"]
+                and (indexer.last_scan_ts is None
+                     or now - indexer.last_scan_ts > 20 * 3600)):
+            indexer.scan()
+        if args.once:
+            break
+        stop.wait(cfg["poll_interval"])
+
+
+if __name__ == "__main__":
+    main()
