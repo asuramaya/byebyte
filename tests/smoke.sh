@@ -221,4 +221,59 @@ out=$(BYEBYTE_RUNTIME_DIR=$RD python3 bin/byebyte purge --all 2>&1) || true
 echo "$out" | grep -q "one category per act" \
     || { echo "SMOKE FAIL: purge --all not refused"; exit 1; }
 
+# --- M3: ghosts — a child holds an unlinked fd open, ghosts names it, then it's gone
+python3 - "$RD" <<'PY'
+import json, os, socket, subprocess, sys, time
+
+rd = sys.argv[1]
+
+def ask(obj):
+    c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    c.settimeout(10)
+    c.connect(os.path.join(rd, "control.sock"))
+    c.sendall(json.dumps(obj).encode() + b"\n")
+    buf = b""
+    while b"\n" not in buf:
+        chunk = c.recv(65536)
+        if not chunk:
+            break
+        buf += chunk
+    c.close()
+    return json.loads(buf.decode())
+
+child = subprocess.Popen([sys.executable, "-c", (
+    "import os, tempfile, time\n"
+    f"f = tempfile.NamedTemporaryFile(delete=False, dir={rd!r})\n"
+    "f.write(b'\\0' * 123456)\n"
+    "f.flush()\n"
+    "os.unlink(f.name)\n"
+    "time.sleep(30)\n"
+)])
+try:
+    holder = None
+    for _ in range(40):
+        doc = ask({"cmd": "ghosts"})
+        holder = next((h for h in doc["holders"] if h["pid"] == child.pid), None)
+        if holder:
+            break
+        time.sleep(0.25)
+    assert holder is not None, f"ghosts never saw pid {child.pid}: {doc}"
+    assert holder["bytes"] >= 123456 * 0.9, holder
+    assert holder["fds"] >= 1, holder
+finally:
+    child.kill()
+    child.wait()
+
+gone = False
+for _ in range(40):
+    doc = ask({"cmd": "ghosts"})
+    if not any(h["pid"] == child.pid for h in doc["holders"]):
+        gone = True
+        break
+    time.sleep(0.25)
+assert gone, f"ghost for pid {child.pid} outlived the killed process"
+assert ask({"cmd": "ping"})["ok"] is True, "daemon died during ghosts test"
+print(f"ghosts ok: named pid {child.pid} holding {holder['bytes']}B, gone after kill")
+PY
+
 echo "SMOKE OK"

@@ -809,6 +809,71 @@ def purge(category, dry_run, cfg, indexer):
             "results": results}
 
 
+# --- ghosts: deleted-but-open files still holding blocks --------------------
+# Report-only in M3: name the holder, print its pid, never signal it.
+
+def _read_comm(pid):
+    try:
+        with open(f"/proc/{pid}/comm") as f:
+            return f.read().strip()
+    except OSError:
+        return "?"
+
+
+def _mountinfo_map():
+    """major:minor -> mountpoint, so a tmpfs-quota ghost names its mount."""
+    m = {}
+    try:
+        with open("/proc/self/mountinfo") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) > 4:
+                    m[parts[2]] = parts[4]
+    except OSError:
+        pass
+    return m
+
+
+def ghosts():
+    mounts_by_dev = _mountinfo_map()
+    holders = {}
+    try:
+        pids = [d for d in os.listdir("/proc") if d.isdigit()]
+    except OSError:
+        pids = []
+    for pid in pids:
+        fd_dir = f"/proc/{pid}/fd"
+        try:
+            fds = os.listdir(fd_dir)
+        except OSError:
+            continue
+        for fd in fds:
+            fd_path = os.path.join(fd_dir, fd)
+            try:
+                target = os.readlink(fd_path)
+            except OSError:
+                continue
+            if not target.endswith(" (deleted)"):
+                continue
+            try:
+                st = os.stat(fd_path)  # follows the magic symlink to the inode
+            except OSError:
+                continue
+            key = (pid, _read_comm(pid))
+            h = holders.setdefault(key, {"bytes": 0, "fds": 0, "mounts": set()})
+            h["bytes"] += st.st_size
+            h["fds"] += 1
+            devno = f"{os.major(st.st_dev)}:{os.minor(st.st_dev)}"
+            mp = mounts_by_dev.get(devno)
+            if mp:
+                h["mounts"].add(mp)
+    rows = [{"pid": int(pid), "comm": comm, "bytes": h["bytes"],
+             "fds": h["fds"], "mounts": sorted(h["mounts"])}
+            for (pid, comm), h in holders.items()]
+    rows.sort(key=lambda r: -r["bytes"])
+    return {"total_bytes": sum(r["bytes"] for r in rows), "holders": rows}
+
+
 LEDGER_PATH = os.path.join(STATE_DIR, "ledger.jsonl")
 
 
@@ -902,6 +967,8 @@ class Control(threading.Thread):
                 if not isinstance(dry_run, bool):
                     raise ValueError("dry_run must be a bool")
                 resp = purge(category, dry_run, self.cfg, self.indexer)
+            elif cmd == "ghosts":
+                resp = ghosts()
             else:
                 resp = {"error": "unknown command"}
         except Exception as exc:  # noqa: BLE001 — hostile input, never crash
