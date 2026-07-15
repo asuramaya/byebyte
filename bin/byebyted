@@ -1048,6 +1048,118 @@ def _ledger_append(ts, category, path, nbytes, status):
         pass
 
 
+# --- advise: a rule engine over the index + live status ---------------------
+
+def _index_mtime_for(indexer, path):
+    if indexer is None or indexer.last_scan_ts is None:
+        return None
+    con = indexer._connect()
+    try:
+        row = con.execute(
+            "SELECT d.newest_mtime FROM dir_stats d JOIN paths p ON p.id=d.path_id"
+            " JOIN scans s ON s.id=d.scan_id WHERE s.status='done'"
+            " AND p.path=? ORDER BY s.ts DESC LIMIT 1", (path,)).fetchone()
+        return row[0] if row else None
+    finally:
+        con.close()
+
+
+def _category_totals(category, cfg, indexer):
+    """(total_bytes, newest_mtime) across a category's current candidates."""
+    detect, _ = REGISTRY[category]
+    candidates = detect(cfg, indexer)
+    total = sum(c["bytes"] for c in candidates)
+    newest = 0.0
+    for c in candidates:
+        m = _index_mtime_for(indexer, c["path"])
+        if m is None:
+            try:
+                m = os.stat(c["path"]).st_mtime
+            except OSError:
+                m = None
+        if m:
+            newest = max(newest, m)
+    return total, newest
+
+
+def _top_grower_rate(indexer):
+    """Compare the two most recent snapshots per root; return (path,
+    bytes_per_day) for the single biggest grower across all roots, if any."""
+    if indexer is None:
+        return None
+    con = indexer._connect()
+    try:
+        roots = [r[0] for r in con.execute(
+            "SELECT DISTINCT root FROM scans WHERE status='done'").fetchall()]
+        best = None
+        for root in roots:
+            rows = con.execute(
+                "SELECT id, ts FROM scans WHERE status='done' AND root=?"
+                " ORDER BY ts DESC LIMIT 2", (root,)).fetchall()
+            if len(rows) < 2:
+                continue
+            (head_id, head_ts), (base_id, base_ts) = rows
+            dt_days = (head_ts - base_ts) / 86400
+            if dt_days <= 0:
+                continue
+            # ties (an ancestor inherits its only child's whole delta) go to
+            # the deepest path — the most specific attribution wins
+            grow = con.execute(
+                "SELECT p.path, h.bytes - COALESCE(b.bytes, 0) AS delta"
+                " FROM dir_stats h JOIN paths p ON p.id = h.path_id"
+                " LEFT JOIN dir_stats b ON b.scan_id=? AND b.path_id=h.path_id"
+                " WHERE h.scan_id=? ORDER BY delta DESC, LENGTH(p.path) DESC LIMIT 1",
+                (base_id, head_id)).fetchone()
+            if grow is None:
+                continue
+            path, delta = grow
+            rate = delta / dt_days
+            if best is None or rate > best[1]:
+                best = (path, rate)
+        return best
+    finally:
+        con.close()
+
+
+_COLD_CACHE_BYTES = 5 * 1024 ** 3
+_COLD_CACHE_DAYS = 90
+_FAST_GROWER_BPS_DAY = 2 * 1024 ** 3
+_GHOSTS_HEAVY_BYTES = 1 * 1024 ** 3
+
+
+def advise(cfg, status_doc, indexer):
+    findings = []
+    for m in (status_doc or {}).get("mounts") or []:
+        eta = m.get("eta_seconds")
+        if eta is not None and eta < 14 * 86400:
+            findings.append({"rule": "eta_soon", "mount": m["mountpoint"],
+                              "eta_seconds": eta, "burn_bps": m.get("burn_bps", 0)})
+        q = m.get("quota")
+        if q and q.get("limit", 0) > 0 and q["remaining"] < 0.2 * q["limit"]:
+            findings.append({"rule": "quota_low", "mount": m["mountpoint"],
+                              "remaining": q["remaining"], "limit": q["limit"]})
+
+    grower = _top_grower_rate(indexer)
+    if grower is not None and grower[1] > _FAST_GROWER_BPS_DAY:
+        findings.append({"rule": "fast_grower", "path": grower[0],
+                          "bytes_per_day": grower[1]})
+
+    for category in REGISTRY:
+        if category in cfg.get("purge_disabled", []):
+            continue
+        total, newest = _category_totals(category, cfg, indexer)
+        if (total > _COLD_CACHE_BYTES and newest
+                and (time.time() - newest) > _COLD_CACHE_DAYS * 86400):
+            findings.append({"rule": "cold_cache", "category": category,
+                              "bytes": total, "newest_mtime": newest})
+
+    ghost_doc = ghosts()
+    if ghost_doc["total_bytes"] > _GHOSTS_HEAVY_BYTES:
+        findings.append({"rule": "ghosts_heavy", "bytes": ghost_doc["total_bytes"]})
+
+    return {"findings": findings}
+
+
 # --- control socket ---------------------------------------------------------
 # Input is hostile by default: SO_PEERCRED-gated (root or the owner, on top
 # of the 0660 file mode — family ruling 2026-07-14), bounded reads, JSON
@@ -1139,6 +1251,8 @@ class Control(threading.Thread):
                     raise ValueError("unknown ballast action")
             elif cmd == "kernels":
                 resp = kernels()
+            elif cmd == "advise":
+                resp = advise(self.cfg, self.get_status(), self.indexer)
             else:
                 resp = {"error": "unknown command"}
         except Exception as exc:  # noqa: BLE001 — hostile input, never crash

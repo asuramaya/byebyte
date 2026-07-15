@@ -365,4 +365,37 @@ print(f"kernels ok: running={doc['running']} newest={doc['newest']} "
       f"candidates={sorted(versions)}")
 PY
 
+# --- M3: advise — rule engine shape + the fast-grower rule, driven by the
+# M2 growth fixture (3MB added in ~1.1s reliably blows the 2G/day threshold)
+python3 - "$RD" <<'PY'
+import json, os, socket, sys
+
+rd = sys.argv[1]
+
+def ask(obj):
+    c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    c.settimeout(10)
+    c.connect(os.path.join(rd, "control.sock"))
+    c.sendall(json.dumps(obj).encode() + b"\n")
+    buf = b""
+    while b"\n" not in buf:
+        chunk = c.recv(65536)
+        if not chunk:
+            break
+        buf += chunk
+    c.close()
+    return json.loads(buf.decode())
+
+doc = ask({"cmd": "advise"})
+assert isinstance(doc.get("findings"), list), doc
+growers = [f for f in doc["findings"] if f["rule"] == "fast_grower"]
+assert growers and growers[0]["path"].endswith("/growth"), doc["findings"]
+assert ask({"cmd": "ping"})["ok"] is True, "daemon died during advise test"
+print(f"advise ok: {len(doc['findings'])} finding(s), fast_grower on "
+      f"{growers[0]['path']}")
+PY
+
+BYEBYTE_RUNTIME_DIR=$RD python3 bin/byebyte advise | grep -q "growth" \
+    || { echo "SMOKE FAIL: CLI advise missing growth grower"; exit 1; }
+
 echo "SMOKE OK"
