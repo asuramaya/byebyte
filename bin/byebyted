@@ -54,6 +54,7 @@ DEFAULTS = {
     "snapshot_ring": 30,       # scans kept per root; older ones are pruned
     "purge_disabled": [],     # category ids config may switch off — never add
     "journald_vacuum_size": "1G",
+    "ballast_gb": 2,          # pre-allocated emergency reserve; 0 = off
 }
 
 CLAMPS = {
@@ -68,6 +69,7 @@ CLAMPS = {
     "scan_hour": (0, 23),
     "index_min_bytes": (4096, 1 << 40),
     "snapshot_ring": (2, 365),
+    "ballast_gb": (0, 32),
 }
 
 
@@ -93,6 +95,13 @@ def load_config(path):
         elif isinstance(default, (int, float)) and isinstance(val, (int, float)):
             lo, hi = CLAMPS[key]
             cfg[key] = type(default)(min(hi, max(lo, val)))
+    # Test-only escape hatch, non-root only: lets smoke build a ballast sized
+    # in bytes instead of whole gigabytes. Root — the real daemon — never
+    # honors it, so a tampered config can't shrink the reserve below a GB.
+    if os.getuid() != 0:
+        bb = raw.get("ballast_bytes")
+        if isinstance(bb, int) and 0 <= bb <= (1 << 40):
+            cfg["ballast_bytes"] = bb
     return cfg
 
 
@@ -874,6 +883,90 @@ def ghosts():
     return {"total_bytes": sum(r["bytes"] for r in rows), "holders": rows}
 
 
+# --- ballast: pre-allocated emergency reserve --------------------------------
+# Built at daemon startup only (never mid-flight) when headroom is
+# comfortable. `release` must work at 0 bytes free: no allocation on that
+# path at all, ledgered only after every slab is already gone.
+
+BALLAST_DIR = os.path.join(STATE_DIR, "ballast")
+_BALLAST_SLAB_SIZE = 256 * 1024 * 1024  # 256MiB — coarse, easy to shed piecemeal
+
+
+def _ballast_target_bytes(cfg):
+    if os.getuid() != 0 and "ballast_bytes" in cfg:
+        return cfg["ballast_bytes"]
+    return int(cfg["ballast_gb"] * (1024 ** 3))
+
+
+def ballast_status():
+    try:
+        names = sorted(os.listdir(BALLAST_DIR))
+    except OSError:
+        names = []
+    slabs = []
+    for n in names:
+        try:
+            sz = os.stat(os.path.join(BALLAST_DIR, n)).st_size
+        except OSError:
+            continue
+        slabs.append({"name": n, "bytes": sz})
+    return {"slabs": slabs, "total_bytes": sum(s["bytes"] for s in slabs)}
+
+
+def ballast_build(cfg):
+    target = _ballast_target_bytes(cfg)
+    if target <= 0:
+        return
+    os.makedirs(BALLAST_DIR, exist_ok=True)
+    try:
+        sv = os.statvfs(BALLAST_DIR)
+        free = sv.f_bavail * sv.f_frsize
+    except OSError:
+        return
+    if free < target * 4:
+        return  # not comfortable enough — skip, retry next startup
+    have = ballast_status()
+    remaining = target - have["total_bytes"]
+    n = len(have["slabs"])
+    while remaining > 0:
+        size = min(_BALLAST_SLAB_SIZE, remaining)
+        path = os.path.join(BALLAST_DIR, f"slab.{n}")
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_WRONLY, 0o600)
+            try:
+                os.posix_fallocate(fd, 0, size)
+            finally:
+                os.close(fd)
+        except OSError:
+            break
+        remaining -= size
+        n += 1
+
+
+def ballast_release():
+    try:
+        names = sorted(os.listdir(BALLAST_DIR))
+    except OSError:
+        names = []
+    released = []
+    for n in names:
+        p = os.path.join(BALLAST_DIR, n)
+        try:
+            sz = os.stat(p).st_size  # read only — no allocation
+        except OSError:
+            continue
+        try:
+            os.unlink(p)  # frees space, needs none — this is the whole point
+        except OSError:
+            continue
+        released.append((n, sz))
+    for n, sz in released:  # ledger only after every slab is already gone
+        _ledger_append(time.time(), "ballast", os.path.join(BALLAST_DIR, n),
+                       sz, "released")
+    return {"released": [n for n, _ in released],
+            "freed_bytes": sum(sz for _, sz in released)}
+
+
 LEDGER_PATH = os.path.join(STATE_DIR, "ledger.jsonl")
 
 
@@ -969,6 +1062,14 @@ class Control(threading.Thread):
                 resp = purge(category, dry_run, self.cfg, self.indexer)
             elif cmd == "ghosts":
                 resp = ghosts()
+            elif cmd == "ballast":
+                action = req.get("action", "status")
+                if action == "status":
+                    resp = ballast_status()
+                elif action == "release":
+                    resp = ballast_release()
+                else:
+                    raise ValueError("unknown ballast action")
             else:
                 resp = {"error": "unknown command"}
         except Exception as exc:  # noqa: BLE001 — hostile input, never crash
@@ -1002,6 +1103,7 @@ def main():
     state = {}
     latest = {"doc": {"error": "no status yet"}}
     indexer = Indexer(cfg)
+    ballast_build(cfg)
 
     def live_status():
         # the cached doc is up to one poll old — fine for mounts, but the

@@ -30,7 +30,7 @@ dd if=/dev/zero of="$HOME_FIX/proj-without-marker/node_modules/dep/file.js" \
 
 cat > "$RD/config.json" <<EOF
 {"poll_interval": 1, "owner_uid": $(id -u),
- "scan_roots": ["$FIX"], "index_min_bytes": 4096}
+ "scan_roots": ["$FIX"], "index_min_bytes": 4096, "ballast_bytes": 1048576}
 EOF
 
 BYEBYTE_RUNTIME_DIR=$RD BYEBYTE_STATE_DIR=$RD/state BYEBYTE_TEST_HOME=$HOME_FIX \
@@ -274,6 +274,50 @@ for _ in range(40):
 assert gone, f"ghost for pid {child.pid} outlived the killed process"
 assert ask({"cmd": "ping"})["ok"] is True, "daemon died during ghosts test"
 print(f"ghosts ok: named pid {child.pid} holding {holder['bytes']}B, gone after kill")
+PY
+
+# --- M3: ballast — built at startup (test override: bytes, not gigabytes),
+# release frees it. "Zero writes before unlink" on the release path is
+# verified by code review (ballast_release() in byebyted: only os.stat reads
+# precede each os.unlink; the ledger — the only write — lands after every
+# slab is already gone), per the spec's code-review fallback.
+python3 - "$RD" <<'PY'
+import json, os, socket, sys
+
+rd = sys.argv[1]
+
+def ask(obj):
+    c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    c.settimeout(10)
+    c.connect(os.path.join(rd, "control.sock"))
+    c.sendall(json.dumps(obj).encode() + b"\n")
+    buf = b""
+    while b"\n" not in buf:
+        chunk = c.recv(65536)
+        if not chunk:
+            break
+        buf += chunk
+    c.close()
+    return json.loads(buf.decode())
+
+st = ask({"cmd": "ballast", "action": "status"})
+assert st["slabs"], f"ballast never built: {st}"
+assert st["total_bytes"] >= 1048576 * 0.9, st
+ballast_dir = os.path.join(rd, "state", "ballast")
+assert os.path.isdir(ballast_dir) and os.listdir(ballast_dir), "no slab files on disk"
+
+rel = ask({"cmd": "ballast", "action": "release"})
+assert rel["freed_bytes"] >= 1048576 * 0.9, rel
+assert not os.listdir(ballast_dir), "release left slab files behind"
+
+ledger_path = os.path.join(rd, "state", "ledger.jsonl")
+with open(ledger_path) as f:
+    lines = [json.loads(l) for l in f if l.strip()]
+assert any(l["category"] == "ballast" and l["status"] == "released"
+           for l in lines), lines
+
+assert ask({"cmd": "ping"})["ok"] is True, "daemon died during ballast test"
+print(f"ballast ok: built {st['total_bytes']}B, released {rel['freed_bytes']}B, ledgered")
 PY
 
 echo "SMOKE OK"
