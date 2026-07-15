@@ -28,12 +28,22 @@ mkdir -p "$HOME_FIX/proj-without-marker/node_modules/dep"
 dd if=/dev/zero of="$HOME_FIX/proj-without-marker/node_modules/dep/file.js" \
     bs=1024 count=64 2>/dev/null
 
+# fixture /boot for the kernels verb — NEVER the real /boot. Includes the
+# actually-running kernel (so we can prove it's still refused as a
+# candidate even though it's "installed") plus a fake newest and a fake old.
+BOOT_FIX=$RD/boot
+mkdir -p "$BOOT_FIX"
+touch "$BOOT_FIX/vmlinuz-$(uname -r)"
+touch "$BOOT_FIX/vmlinuz-1.0.0-fakeold-generic"
+touch "$BOOT_FIX/vmlinuz-9.9.9-fakenew-generic"
+
 cat > "$RD/config.json" <<EOF
 {"poll_interval": 1, "owner_uid": $(id -u),
  "scan_roots": ["$FIX"], "index_min_bytes": 4096, "ballast_bytes": 1048576}
 EOF
 
 BYEBYTE_RUNTIME_DIR=$RD BYEBYTE_STATE_DIR=$RD/state BYEBYTE_TEST_HOME=$HOME_FIX \
+    BYEBYTE_TEST_BOOT=$BOOT_FIX \
     python3 bin/byebyted --config "$RD/config.json" &
 DPID=$!
 
@@ -318,6 +328,41 @@ assert any(l["category"] == "ballast" and l["status"] == "released"
 
 assert ask({"cmd": "ping"})["ok"] is True, "daemon died during ballast test"
 print(f"ballast ok: built {st['total_bytes']}B, released {rel['freed_bytes']}B, ledgered")
+PY
+
+# --- M3: kernels — running kernel and newest are never candidates
+python3 - "$RD" <<'PY'
+import json, os, socket, sys
+
+rd = sys.argv[1]
+
+def ask(obj):
+    c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    c.settimeout(10)
+    c.connect(os.path.join(rd, "control.sock"))
+    c.sendall(json.dumps(obj).encode() + b"\n")
+    buf = b""
+    while b"\n" not in buf:
+        chunk = c.recv(65536)
+        if not chunk:
+            break
+        buf += chunk
+    c.close()
+    return json.loads(buf.decode())
+
+doc = ask({"cmd": "kernels"})
+versions = {c["version"] for c in doc["candidates"]}
+assert doc["running"] not in versions, doc
+assert doc["newest"] not in versions, doc
+assert doc["newest"] == "9.9.9-fakenew-generic", doc
+assert "1.0.0-fakeold-generic" in versions, doc
+assert "9.9.9-fakenew-generic" not in versions, doc
+assert doc["running"] not in versions, doc
+if doc["candidates"]:
+    assert "apt autoremove --purge" in (doc.get("apt_line") or ""), doc
+assert ask({"cmd": "ping"})["ok"] is True, "daemon died during kernels test"
+print(f"kernels ok: running={doc['running']} newest={doc['newest']} "
+      f"candidates={sorted(versions)}")
 PY
 
 echo "SMOKE OK"

@@ -15,7 +15,6 @@ RUNTIME_DIR = os.environ.get("BYEBYTE_RUNTIME_DIR", "/run/byebyte")
 
 PLANNED = {
     "advise": "M3 — nudges: leaks, hoards, runaway logs",
-    "kernels": "M3 — /boot cleanup that works at 0 bytes free",
     "burn": "M4 — live per-process writes",
 }
 
@@ -263,13 +262,30 @@ def cmd_ballast(argv):
         print(f"{human_bytes(doc['total_bytes'])} reserved")
 
 
+def cmd_kernels(argv):
+    doc = request_or_die({"cmd": "kernels"})
+    if "--json" in argv:
+        print(json.dumps(doc, indent=2))
+        return
+    print(f"running: {doc['running']}   newest: {doc['newest'] or '?'}")
+    cands = doc.get("candidates", [])
+    if not cands:
+        print("no removal candidates")
+        return
+    for c in cands:
+        pkg = c.get("package") or "(no dpkg package found)"
+        print(f"  {c['version']:<24} {pkg}")
+    if doc.get("apt_line"):
+        print(doc["apt_line"])
+
+
 def main():
     argv = sys.argv[1:]
     verb = argv[0] if argv and not argv[0].startswith("-") else "status"
     rest = argv[1:] if argv and not argv[0].startswith("-") else argv
     verbs = {"status": cmd_status, "scan": cmd_scan,
              "why": cmd_why, "blame": cmd_blame, "purge": cmd_purge,
-             "ghosts": cmd_ghosts, "ballast": cmd_ballast}
+             "ghosts": cmd_ghosts, "ballast": cmd_ballast, "kernels": cmd_kernels}
     if verb in verbs:
         verbs[verb](rest)
     elif verb in PLANNED:

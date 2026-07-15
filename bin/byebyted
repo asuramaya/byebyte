@@ -967,6 +967,73 @@ def ballast_release():
             "freed_bytes": sum(sz for _, sz in released)}
 
 
+# --- kernels: /boot cleanup that works even at 0 bytes free -----------------
+# Report + print the apt line only — never runs apt. Never lists the running
+# or newest kernel as a candidate, full stop.
+
+def _boot_dir():
+    if os.getuid() != 0:
+        override = os.environ.get("BYEBYTE_TEST_BOOT")
+        if override:
+            return override
+    return "/boot"
+
+
+def _installed_kernel_versions():
+    try:
+        return [n[len("vmlinuz-"):] for n in os.listdir(_boot_dir())
+                if n.startswith("vmlinuz-")]
+    except OSError:
+        return []
+
+
+def _dpkg_kernel_packages():
+    """linux-image-* package names via dpkg, or None if dpkg is unavailable."""
+    if shutil.which("dpkg") is None:
+        return None
+    try:
+        out = subprocess.run(["dpkg", "-l", "linux-image-*"], capture_output=True,
+                              text=True, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    return [line.split()[1] for line in out.stdout.splitlines()
+            if line.startswith("ii") and len(line.split()) > 1]
+
+
+def _vsort_key(v):
+    nums = re.findall(r"\d+", v)[:3]
+    return tuple(int(n) for n in nums) if nums else (0, 0, 0)
+
+
+def kernels():
+    running = os.uname().release
+    versions = sorted(set(_installed_kernel_versions()), key=_vsort_key)
+    pkgs = _dpkg_kernel_packages()
+    source = "dpkg" if pkgs is not None else "/boot"
+    if not versions:
+        return {"source": source, "running": running, "newest": None,
+                "candidates": [], "apt_line": None}
+    newest = versions[-1]
+    candidates = []
+    for v in versions:
+        if v == running or v == newest:
+            continue  # never the running or newest kernel — full stop
+        entry = {"version": v}
+        if pkgs is not None:
+            entry["package"] = next(
+                (p for p in pkgs if p == f"linux-image-{v}"), None)
+        candidates.append(entry)
+    apt_line = None
+    if candidates:
+        names = [c["package"] for c in candidates if c.get("package")]
+        apt_line = "sudo apt autoremove --purge" + (
+            " " + " ".join(names) if names else "")
+    return {"source": source, "running": running, "newest": newest,
+            "candidates": candidates, "apt_line": apt_line}
+
+
 LEDGER_PATH = os.path.join(STATE_DIR, "ledger.jsonl")
 
 
@@ -1070,6 +1137,8 @@ class Control(threading.Thread):
                     resp = ballast_release()
                 else:
                     raise ValueError("unknown ballast action")
+            elif cmd == "kernels":
+                resp = kernels()
             else:
                 resp = {"error": "unknown command"}
         except Exception as exc:  # noqa: BLE001 — hostile input, never crash
