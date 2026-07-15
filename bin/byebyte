@@ -14,7 +14,6 @@ import time
 RUNTIME_DIR = os.environ.get("BYEBYTE_RUNTIME_DIR", "/run/byebyte")
 
 PLANNED = {
-    "purge": "M3 — allowlist-only cache eviction, dry-run by default",
     "advise": "M3 — nudges: leaks, hoards, runaway logs",
     "ghosts": "M3 — deleted-but-open files holding blocks",
     "kernels": "M3 — /boot cleanup that works at 0 bytes free",
@@ -205,12 +204,38 @@ def cmd_blame(argv):
         print("  nothing moved above the index threshold")
 
 
+def cmd_purge(argv):
+    positional = [a for a in argv if not a.startswith("-")]
+    if not positional or positional[0] == "all" or "--all" in argv:
+        sys.exit("byebyte purge: --all is refused — one category per act")
+    category = positional[0]
+    yes = "--yes" in argv
+    doc = request_or_die({"cmd": "purge", "category": category, "dry_run": not yes})
+    if "--json" in argv:
+        print(json.dumps(doc, indent=2))
+        return
+    if doc.get("dry_run"):
+        cands = doc.get("candidates", [])
+        if not cands:
+            print(f"{category}: nothing to purge")
+            return
+        for c in cands:
+            print(f"  {human_bytes(c['bytes']):>8}  {c['path']}")
+        print(f"{human_bytes(doc['total_bytes'])} would be freed"
+              " (dry-run — add --yes to execute)")
+    else:
+        freed = doc.get("freed_bytes", 0)
+        errors = [r for r in doc.get("results", []) if not r["ok"]]
+        tail = f" ({len(errors)} failed)" if errors else ""
+        print(f"{category}: freed {human_bytes(freed)}{tail}")
+
+
 def main():
     argv = sys.argv[1:]
     verb = argv[0] if argv and not argv[0].startswith("-") else "status"
     rest = argv[1:] if argv and not argv[0].startswith("-") else argv
     verbs = {"status": cmd_status, "scan": cmd_scan,
-             "why": cmd_why, "blame": cmd_blame}
+             "why": cmd_why, "blame": cmd_blame, "purge": cmd_purge}
     if verb in verbs:
         verbs[verb](rest)
     elif verb in PLANNED:

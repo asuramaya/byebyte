@@ -15,15 +15,19 @@ import json
 import math
 import os
 import platform
+import pwd
+import re
+import shutil
 import signal
 import socket
 import sqlite3
 import struct
+import subprocess
 import sys
 import threading
 import time
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 RUNTIME_DIR = os.environ.get("BYEBYTE_RUNTIME_DIR", "/run/byebyte")
 STATUS_PATH = os.path.join(RUNTIME_DIR, "status.json")
@@ -48,6 +52,8 @@ DEFAULTS = {
     "scan_hour": 3,            # nightly scan kicks off in this local hour
     "index_min_bytes": 1048576,  # dirs below this don't earn an index row
     "snapshot_ring": 30,       # scans kept per root; older ones are pruned
+    "purge_disabled": [],     # category ids config may switch off — never add
+    "journald_vacuum_size": "1G",
 }
 
 CLAMPS = {
@@ -80,6 +86,9 @@ def load_config(path):
         val = raw[key]
         if isinstance(default, list):
             if isinstance(val, list) and all(isinstance(x, str) for x in val):
+                cfg[key] = val
+        elif isinstance(default, str):
+            if isinstance(val, str) and re.match(r"^\d+[KMGT]?$", val):
                 cfg[key] = val
         elif isinstance(default, (int, float)) and isinstance(val, (int, float)):
             lo, hi = CLAMPS[key]
@@ -454,6 +463,366 @@ def _limit(req):
     return lim
 
 
+# --- registry: compiled-in category detectors for purge ---------------------
+# Purge can ONLY delete what a detector below positively matches. Config may
+# DISABLE a category (`purge_disabled`); no config key can ever add a path or
+# a category — a tampered config cannot weaken this invariant (FAMILY.md #5).
+
+def _owner_home(uid):
+    try:
+        return pwd.getpwuid(uid).pw_dir
+    except KeyError:
+        return None
+
+
+def _resolve_owner_home(cfg):
+    # Non-root only: lets smoke fixtures point detectors at a fake home. Root
+    # — the real daemon — always uses the real passwd entry; a test env var
+    # can never redirect where the privileged process touches disk.
+    if os.getuid() != 0:
+        override = os.environ.get("BYEBYTE_TEST_HOME")
+        if override:
+            return override
+    return _owner_home(cfg["owner_uid"])
+
+
+def _verify_inside(path, root):
+    real = os.path.realpath(path)
+    root_real = os.path.realpath(root)
+    return real == root_real or real.startswith(root_real.rstrip("/") + "/")
+
+
+def _dir_size(path):
+    """Live walk, disk-block bytes — same accounting as the Indexer."""
+    try:
+        dev = os.stat(path).st_dev
+    except OSError:
+        return 0
+    total = 0
+    stack = [path]
+    while stack:
+        p = stack.pop()
+        try:
+            entries = os.scandir(p)
+        except OSError:
+            continue
+        with entries:
+            for e in entries:
+                try:
+                    if e.is_symlink():
+                        continue
+                    st = e.stat(follow_symlinks=False)
+                    if st.st_dev != dev:
+                        continue
+                    if e.is_dir(follow_symlinks=False):
+                        stack.append(e.path)
+                    else:
+                        total += st.st_blocks * 512
+                except OSError:
+                    continue
+    return total
+
+
+def _index_bytes_for(indexer, path):
+    """Bytes for `path` from the freshest done scan, if it's an indexed dir."""
+    if indexer is None or indexer.last_scan_ts is None:
+        return None
+    con = indexer._connect()
+    try:
+        row = con.execute(
+            "SELECT d.bytes FROM dir_stats d JOIN paths p ON p.id=d.path_id"
+            " JOIN scans s ON s.id=d.scan_id WHERE s.status='done'"
+            " AND p.path=? ORDER BY s.ts DESC LIMIT 1", (path,)).fetchone()
+        return row[0] if row else None
+    finally:
+        con.close()
+
+
+def _sized(path, indexer):
+    b = _index_bytes_for(indexer, path)
+    return b if b is not None else _dir_size(path)
+
+
+def _rm_tree(path, keep_top=False):
+    """Delete a directory's contents (and the dir itself unless keep_top),
+    never following symlinks, never crossing devices."""
+    if os.path.islink(path):
+        raise ValueError("refusing to purge a symlink")
+    try:
+        dev = os.stat(path).st_dev
+    except OSError:
+        return
+
+    def _walk_delete(p):
+        try:
+            entries = list(os.scandir(p))
+        except OSError:
+            return
+        for e in entries:
+            try:
+                if e.is_symlink():
+                    os.unlink(e.path)
+                    continue
+                st = e.stat(follow_symlinks=False)
+                if st.st_dev != dev:
+                    continue  # never cross devices — leave it in place
+                if e.is_dir(follow_symlinks=False):
+                    _walk_delete(e.path)
+                    os.rmdir(e.path)
+                else:
+                    os.unlink(e.path)
+            except OSError:
+                continue
+
+    _walk_delete(path)
+    if not keep_top:
+        try:
+            os.rmdir(path)
+        except OSError:
+            pass
+
+
+def _rm_files(paths):
+    for p in paths:
+        try:
+            if not os.path.islink(p):
+                os.unlink(p)
+        except OSError:
+            continue
+
+
+# -- detectors: each returns [{"path", "bytes", ...}] — never touch disk -----
+
+def _detect_cache_dir(cfg, indexer, *segments):
+    home = _resolve_owner_home(cfg)
+    if not home:
+        return []
+    path = os.path.join(home, *segments)
+    if not os.path.isdir(path) or os.path.islink(path):
+        return []
+    if not _verify_inside(path, home):
+        return []
+    b = _sized(path, indexer)
+    return [{"path": path, "bytes": b}] if b else []
+
+
+def detect_hf_hub(cfg, indexer):
+    home = _resolve_owner_home(cfg)
+    if not home:
+        return []
+    hub = os.path.join(home, ".cache", "huggingface", "hub")
+    out = []
+    try:
+        children = list(os.scandir(hub))
+    except OSError:
+        return []
+    for e in children:
+        if not e.name.startswith("models--"):
+            continue
+        try:
+            if e.is_symlink() or not e.is_dir(follow_symlinks=False):
+                continue
+        except OSError:
+            continue
+        if not _verify_inside(e.path, hub):
+            continue
+        b = _sized(e.path, indexer)
+        if b:
+            out.append({"path": e.path, "bytes": b})
+    return out
+
+
+def detect_pip_cache(cfg, indexer):
+    return _detect_cache_dir(cfg, indexer, ".cache", "pip")
+
+
+def detect_uv_cache(cfg, indexer):
+    return _detect_cache_dir(cfg, indexer, ".cache", "uv")
+
+
+def detect_thumbnails(cfg, indexer):
+    return _detect_cache_dir(cfg, indexer, ".cache", "thumbnails")
+
+
+_PROJECT_MARKERS = {
+    "node_modules": ("package.json",),
+    ".venv": ("pyvenv.cfg",),
+    "venv": ("pyvenv.cfg",),
+    "target": ("Cargo.toml",),
+}
+
+
+def detect_project_artifacts(cfg, indexer):
+    """Kondo-style: node_modules/.venv/venv/target are only candidates beside
+    their marker file. Marker missing -> NOT a match, refuse (never recurse
+    into a matched dir either, so a node_modules nested in one can't double-count)."""
+    out = []
+    for root in cfg["scan_roots"]:
+        root = os.path.abspath(root)
+        try:
+            top_dev = os.stat(root).st_dev
+        except OSError:
+            continue
+        stack = [root]
+        while stack:
+            p = stack.pop()
+            try:
+                entries = list(os.scandir(p))
+            except OSError:
+                continue
+            for e in entries:
+                try:
+                    if e.is_symlink():
+                        continue
+                    st = e.stat(follow_symlinks=False)
+                    if st.st_dev != top_dev or not e.is_dir(follow_symlinks=False):
+                        continue
+                except OSError:
+                    continue
+                markers = _PROJECT_MARKERS.get(e.name)
+                if markers is not None:
+                    if any(os.path.exists(os.path.join(p, m)) for m in markers):
+                        if _verify_inside(e.path, root):
+                            b = _sized(e.path, indexer)
+                            if b:
+                                out.append({"path": e.path, "bytes": b})
+                    continue  # matched or not, don't recurse into it
+                stack.append(e.path)
+    return out
+
+
+_LOG_SUFFIX = re.compile(r"\.\d+(\.gz|\.xz)?$|\.old$")
+
+
+def detect_rotated_logs(cfg, indexer):
+    out = []
+    try:
+        entries = list(os.scandir("/var/log"))
+    except OSError:
+        return []
+    for e in entries:
+        try:
+            if e.is_symlink() or not e.is_file(follow_symlinks=False):
+                continue
+            if not _LOG_SUFFIX.search(e.name):
+                continue
+            st = e.stat(follow_symlinks=False)
+            out.append({"path": e.path, "bytes": st.st_size})
+        except OSError:
+            continue
+    return out
+
+
+def detect_journald(cfg, indexer):
+    return [{"path": "journald", "bytes": 0,
+             "vacuum_size": cfg["journald_vacuum_size"]}]
+
+
+def detect_snap_old(cfg, indexer):
+    if shutil.which("snap") is None:
+        return []
+    try:
+        out = subprocess.run(["snap", "list", "--all"], capture_output=True,
+                              text=True, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if out.returncode != 0:
+        return []
+    candidates = []
+    for line in out.stdout.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) < 6:
+            continue
+        name, rev, notes = parts[0], parts[2], parts[-1]
+        if "disabled" in notes:
+            candidates.append({"path": f"{name} (revision {rev})", "bytes": 0,
+                                "name": name, "revision": rev})
+    return candidates
+
+
+def _delete_tree_entry(candidate):
+    _rm_tree(candidate["path"])
+
+
+def _delete_cache_contents(candidate):
+    _rm_tree(candidate["path"], keep_top=True)
+
+
+def _delete_log_file(candidate):
+    _rm_files([candidate["path"]])
+
+
+def _delete_journald(candidate):
+    subprocess.run(["journalctl", f"--vacuum-size={candidate['vacuum_size']}"],
+                   capture_output=True, timeout=30, check=False)
+
+
+def _delete_snap_revision(candidate):
+    if os.getuid() != 0:
+        raise PermissionError("snap remove needs root")
+    subprocess.run(["snap", "remove", candidate["name"],
+                     f"--revision={candidate['revision']}"],
+                    capture_output=True, timeout=30, check=False)
+
+
+# id -> (detect(cfg, indexer) -> [candidate], delete(candidate) -> None).
+# Docker is deliberately ABSENT until API-based accounting lands (FAMILY.md
+# doctrine 4: generic walks lie about overlayfs).
+REGISTRY = {
+    "hf-hub": (detect_hf_hub, _delete_tree_entry),
+    "pip-cache": (detect_pip_cache, _delete_cache_contents),
+    "uv-cache": (detect_uv_cache, _delete_cache_contents),
+    "thumbnails": (detect_thumbnails, _delete_cache_contents),
+    "project-artifacts": (detect_project_artifacts, _delete_tree_entry),
+    "rotated-logs": (detect_rotated_logs, _delete_log_file),
+    "journald": (detect_journald, _delete_journald),
+    "snap-old": (detect_snap_old, _delete_snap_revision),
+}
+
+
+def purge(category, dry_run, cfg, indexer):
+    if not isinstance(category, str):
+        raise ValueError("category must be a string")
+    if category not in REGISTRY or category in cfg.get("purge_disabled", []):
+        raise ValueError("unknown or disabled category")
+    detect, delete = REGISTRY[category]
+    candidates = detect(cfg, indexer)
+    total = sum(c["bytes"] for c in candidates)
+    if dry_run:
+        return {"category": category, "dry_run": True,
+                "candidates": [{"path": c["path"], "bytes": c["bytes"]}
+                               for c in candidates],
+                "total_bytes": total}
+    freed = 0
+    results = []
+    for c in candidates:
+        ts = time.time()
+        try:
+            delete(c)
+            ok = True
+            freed += c["bytes"]
+        except (OSError, PermissionError):
+            ok = False
+        _ledger_append(ts, category, c["path"], c["bytes"], "ok" if ok else "error")
+        results.append({"path": c["path"], "bytes": c["bytes"], "ok": ok})
+    return {"category": category, "dry_run": False, "freed_bytes": freed,
+            "results": results}
+
+
+LEDGER_PATH = os.path.join(STATE_DIR, "ledger.jsonl")
+
+
+def _ledger_append(ts, category, path, nbytes, status):
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(LEDGER_PATH, "a") as f:
+            f.write(json.dumps({"ts": ts, "category": category, "path": path,
+                                 "bytes": nbytes, "status": status},
+                                separators=(",", ":")) + "\n")
+    except OSError:
+        pass
+
+
 # --- control socket ---------------------------------------------------------
 # Input is hostile by default: SO_PEERCRED-gated (root or the owner, on top
 # of the 0660 file mode — family ruling 2026-07-14), bounded reads, JSON
@@ -465,6 +834,7 @@ class Control(threading.Thread):
 
     def __init__(self, cfg, get_status, indexer):
         super().__init__(daemon=True)
+        self.cfg = cfg
         self.get_status = get_status
         self.indexer = indexer
         self._allowed = {0, os.getuid(), cfg["owner_uid"]}
@@ -526,6 +896,12 @@ class Control(threading.Thread):
                 if not isinstance(since, (int, float)) or since <= 0:
                     raise ValueError("since must be an epoch timestamp")
                 resp = self.indexer.blame(float(since), _limit(req))
+            elif cmd == "purge":
+                category = req.get("category")
+                dry_run = req.get("dry_run", True)
+                if not isinstance(dry_run, bool):
+                    raise ValueError("dry_run must be a bool")
+                resp = purge(category, dry_run, self.cfg, self.indexer)
             else:
                 resp = {"error": "unknown command"}
         except Exception as exc:  # noqa: BLE001 — hostile input, never crash

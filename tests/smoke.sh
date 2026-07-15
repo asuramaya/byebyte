@@ -14,12 +14,26 @@ mkdir -p "$FIX/big" "$FIX/small"
 dd if=/dev/zero of="$FIX/big/blob" bs=1024 count=2048 2>/dev/null
 dd if=/dev/zero of="$FIX/small/tiny" bs=1024 count=16 2>/dev/null
 
+# fixture "home" for the M3 registry — NEVER a real path, always $FIX/home,
+# fed to the daemon via BYEBYTE_TEST_HOME (honored only when non-root)
+HOME_FIX=$FIX/home
+mkdir -p "$HOME_FIX/.cache/huggingface/hub/models--test--x"
+dd if=/dev/zero of="$HOME_FIX/.cache/huggingface/hub/models--test--x/blob" \
+    bs=1024 count=1024 2>/dev/null
+mkdir -p "$HOME_FIX/proj-with-marker/node_modules/dep"
+: > "$HOME_FIX/proj-with-marker/package.json"
+dd if=/dev/zero of="$HOME_FIX/proj-with-marker/node_modules/dep/file.js" \
+    bs=1024 count=64 2>/dev/null
+mkdir -p "$HOME_FIX/proj-without-marker/node_modules/dep"
+dd if=/dev/zero of="$HOME_FIX/proj-without-marker/node_modules/dep/file.js" \
+    bs=1024 count=64 2>/dev/null
+
 cat > "$RD/config.json" <<EOF
 {"poll_interval": 1, "owner_uid": $(id -u),
  "scan_roots": ["$FIX"], "index_min_bytes": 4096}
 EOF
 
-BYEBYTE_RUNTIME_DIR=$RD BYEBYTE_STATE_DIR=$RD/state \
+BYEBYTE_RUNTIME_DIR=$RD BYEBYTE_STATE_DIR=$RD/state BYEBYTE_TEST_HOME=$HOME_FIX \
     python3 bin/byebyted --config "$RD/config.json" &
 DPID=$!
 
@@ -139,5 +153,72 @@ BYEBYTE_RUNTIME_DIR=$RD python3 bin/byebyte why "$FIX" | grep -q "/big" \
     || { echo "SMOKE FAIL: CLI why missing /big"; exit 1; }
 BYEBYTE_RUNTIME_DIR=$RD python3 bin/byebyte blame --since 1h | grep -q "growth" \
     || { echo "SMOKE FAIL: CLI blame missing growth"; exit 1; }
+
+# --- M3: purge — registry-gated, marker-gated, ledgered, hostile-input-proof
+python3 - "$RD" "$FIX" <<'PY'
+import json, os, socket, sys
+
+rd, fix = sys.argv[1], sys.argv[2]
+
+def ask(obj):
+    c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    c.settimeout(10)
+    c.connect(os.path.join(rd, "control.sock"))
+    c.sendall(json.dumps(obj).encode() + b"\n")
+    buf = b""
+    while b"\n" not in buf:
+        chunk = c.recv(65536)
+        if not chunk:
+            break
+        buf += chunk
+    c.close()
+    return json.loads(buf.decode())
+
+# dry-run: the marked node_modules shows up, the marker-less one never does
+dry = ask({"cmd": "purge", "category": "project-artifacts", "dry_run": True})
+assert "candidates" in dry, dry
+paths = [c["path"] for c in dry["candidates"]]
+assert any(p.endswith("proj-with-marker/node_modules") for p in paths), paths
+assert not any(p.endswith("proj-without-marker/node_modules") for p in paths), paths
+marked = next(c for c in dry["candidates"]
+              if c["path"].endswith("proj-with-marker/node_modules"))
+assert marked["bytes"] > 0, marked
+
+# hf-hub dry-run finds the fixture model dir too
+hf = ask({"cmd": "purge", "category": "hf-hub", "dry_run": True})
+hf_paths = [c["path"] for c in hf["candidates"]]
+assert any(p.endswith("models--test--x") for p in hf_paths), hf
+
+# execute: it's actually gone, ledger has the line, the unmarked one survives
+target = marked["path"]
+executed = ask({"cmd": "purge", "category": "project-artifacts", "dry_run": False})
+assert executed.get("freed_bytes", 0) > 0, executed
+assert not os.path.exists(target), "purge --yes left the directory behind"
+assert os.path.exists(os.path.join(fix, "home", "proj-without-marker",
+                                   "node_modules")), "purge touched the unmarked one"
+
+ledger_path = os.path.join(rd, "state", "ledger.jsonl")
+with open(ledger_path) as f:
+    lines = [json.loads(l) for l in f if l.strip()]
+line = next(l for l in lines if l["path"] == target)
+assert line["category"] == "project-artifacts" and line["status"] == "ok", line
+print(f"purge ledger: {line}")
+
+# hostile input: unknown category, a raw path, wrong type — all refused
+assert "error" in ask({"cmd": "purge", "category": "raw-path"}), "unknown category accepted"
+assert "error" in ask({"cmd": "purge", "category": "/etc/passwd"}), "raw path accepted"
+assert "error" in ask({"cmd": "purge", "category": 123}), "non-string category accepted"
+assert "error" in ask({"cmd": "purge", "category": "project-artifacts",
+                       "dry_run": "yes"}), "non-bool dry_run accepted"
+assert ask({"cmd": "ping"})["ok"] is True, "daemon died after purge abuse"
+print("purge ok: registry-gated, marker-gated, ledger written, hostile input survived")
+PY
+
+# purge --all exits non-zero by design (the refusal IS the success case),
+# so capture output first — piping straight into grep under pipefail would
+# report the CLI's expected exit(1) as a grep failure
+out=$(BYEBYTE_RUNTIME_DIR=$RD python3 bin/byebyte purge --all 2>&1) || true
+echo "$out" | grep -q "one category per act" \
+    || { echo "SMOKE FAIL: purge --all not refused"; exit 1; }
 
 echo "SMOKE OK"
