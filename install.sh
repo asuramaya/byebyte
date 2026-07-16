@@ -81,15 +81,10 @@ else
     echo "   owner_uid to 1000; edit /etc/byebyte/config.json if that's wrong."
   fi
   install -d -m 0755 /etc/byebyte
-  python3 - "$SRC/config/config.json" /etc/byebyte/config.json "$OWNER_UID" <<'PY'
-import json, sys
-src, dst, uid = sys.argv[1], sys.argv[2], int(sys.argv[3])
-cfg = json.load(open(src))
-cfg["owner_uid"] = uid
-with open(dst, "w") as f:
-    json.dump(cfg, f, indent=2)
-    f.write("\n")
-PY
+  # shared with the .deb's postinst (scripts/seed-owner-uid.py) so the two
+  # installers can't drift on what "seeding" means
+  python3 "$SRC/scripts/seed-owner-uid.py" \
+    "$SRC/config/config.json" /etc/byebyte/config.json "$OWNER_UID"
   chmod 0644 /etc/byebyte/config.json
 fi
 

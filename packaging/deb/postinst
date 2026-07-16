@@ -1,0 +1,31 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# byebyte postinst — shares the config-seed logic with install.sh via
+# /usr/share/byebyte/scripts/seed-owner-uid.py (packaged from scripts/ in
+# the source tree) so the two installers can't drift apart.
+set -e
+
+CONFIG=/etc/byebyte/config.json
+SEED=/usr/share/byebyte/scripts/seed-owner-uid.py
+
+case "$1" in
+  configure)
+    OLD_VERSION="$2"
+    if [ -z "$OLD_VERSION" ]; then
+      # Fresh install only: dpkg just unpacked the package's default
+      # config.json as a conffile. An upgrade means dpkg already decided
+      # whether the user's edited copy survives — never re-stamp then.
+      OWNER_UID="${SUDO_UID:-1000}"
+      python3 "$SEED" "$CONFIG" "$CONFIG" "$OWNER_UID"
+    fi
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl enable byebyted.service >/dev/null 2>&1 || true
+    if systemctl is-active --quiet byebyted.service 2>/dev/null; then
+      systemctl restart byebyted.service || true
+    else
+      systemctl start byebyted.service || true
+    fi
+    ;;
+esac
+
+exit 0

@@ -1,0 +1,13 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Stop the daemon before its binary disappears — dpkg runs prerm before
+# removing package files, unlike postrm which runs after.
+set -e
+
+case "$1" in
+  remove|deconfigure)
+    systemctl disable --now byebyted.service >/dev/null 2>&1 || true
+    ;;
+esac
+
+exit 0

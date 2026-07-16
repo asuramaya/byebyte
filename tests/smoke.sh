@@ -456,4 +456,21 @@ BYEBYTE_RUNTIME_DIR=$RD python3 bin/byebyte burn --seconds 1 --json | python3 -c
     "import json,sys; json.load(sys.stdin)" \
     || { echo "SMOKE FAIL: CLI burn json invalid"; exit 1; }
 
+# --- M4: make deb — builds a real .deb; contents include bins+units+man.
+# Builds and inspects only — never installed.
+make deb > /tmp/byebyte-deb-build.log 2>&1 \
+    || { echo "SMOKE FAIL: make deb failed"; cat /tmp/byebyte-deb-build.log; exit 1; }
+DEBFILE=$(ls -t build/deb/byebyte_*_all.deb | head -1)
+CONTENTS=$(dpkg-deb --contents "$DEBFILE")
+for want in usr/bin/byebyted usr/bin/byebyte usr/bin/byebyte-healthcheck \
+            usr/bin/byebyte-update lib/systemd/system/byebyted.service \
+            lib/systemd/system/byebyte-update.service \
+            lib/systemd/system/byebyte-update.timer \
+            usr/share/man/man1/byebyte.1 usr/share/man/man8/byebyted.8 \
+            etc/byebyte/config.json; do
+    echo "$CONTENTS" | grep -q "$want" \
+        || { echo "SMOKE FAIL: deb missing $want"; exit 1; }
+done
+echo "deb ok: $DEBFILE built, contents verified (never installed)"
+
 echo "SMOKE OK"
