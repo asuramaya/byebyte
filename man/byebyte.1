@@ -1,0 +1,125 @@
+.TH BYEBYTE 1 "2026-07-16" "byebyte 0.5.0" "byebyte manual"
+.SH NAME
+byebyte \- verb CLI for the byebyte storage daemon
+.SH SYNOPSIS
+.B byebyte
+.RI [ verb ]
+.RI [ options ]
+.SH DESCRIPTION
+.B byebyte
+talks to
+.BR byebyted (8)
+over its control socket and prints the answer. With no verb, it runs
+.BR status .
+Every verb accepts
+.B \-\-json
+for machine-readable output.
+.SH VERBS
+.TP
+.B status
+Headroom, burn rate, ETA-to-full, and quota per mount.
+.TP
+.BI why " [path]"
+Instant du-tree from the index, age-tagged (big AND stale stands out).
+Accepts
+.B \-\-limit
+.I N
+(default 15).
+.TP
+.B blame " [\-\-since T]"
+What grew since
+.IR T ,
+a join of two index snapshots.
+.I T
+is
+.IR Nh / Nd / Nw
+or
+.IR YYYY-MM-DD ;
+defaults to
+.IR 1d .
+.TP
+.B scan
+Kick off an on-demand index refresh (otherwise nightly).
+.B \-\-wait
+blocks until it finishes.
+.TP
+.BI purge " category " "[\-\-yes]"
+Delete what a compiled-in category detector positively matches. Dry-run
+by default; pass
+.B \-\-yes
+to execute.
+.B \-\-all
+is refused \(em one category per act. Categories: hf-hub, pip-cache,
+uv-cache, thumbnails, project-artifacts, rotated-logs, journald,
+snap-old. Every deletion is appended to
+.IR /var/lib/byebyte/ledger.jsonl .
+.TP
+.B ghosts
+List deleted-but-open files still holding disk blocks, grouped by the
+process holding them and the mount they live on. Report-only \(em never
+signals anything.
+.TP
+.B ballast " [release]"
+Show the pre-allocated emergency reserve, or release it to free space
+even at 0 bytes free.
+.TP
+.B kernels
+List removable kernel packages (installed, not running, not newest) and
+print the exact
+.I apt autoremove
+line. Never runs
+.BR apt (8)
+itself.
+.TP
+.B advise
+One-line nudges: mounts nearing full, fast index growers, cold caches,
+heavy ghosts, quota headroom running low.
+.TP
+.B burn " [\-\-seconds N] [\-\-limit N]"
+Live per-process write rates, sampled over
+.I N
+seconds (default 5, clamped 1\(en30).
+.SH EXAMPLES
+.EX
+$ byebyte status
+byebyte v0.5.0   (status 3s old)
+  /           824G free of   1.8T   burn quiet       full \(em
+  /tmp         24G free of    30G   burn quiet       full \(em   [quota: 24.4G of 24.4G left]
+
+$ byebyte why /var/log
+612M in /var/log   (scanned 2h ago)
+    480M  3d          /var/log/journal
+    120M  12d         /var/log/apt
+
+$ byebyte purge pip-cache
+     1.2G  /home/asuramaya/.cache/pip
+1.2G would be freed (dry-run \(em add \-\-yes to execute)
+
+$ byebyte ghosts
+    24.1G  pid 2046892  chrome           12334 fd(s)  on /tmp
+
+$ byebyte burn \-\-seconds 3
+    13.3M/s   pid 638912  rsyslogd          (writing on /)
+.EE
+.SH FILES
+.TP
+.I /run/byebyte/status.json
+The read seam \(em mounts, burn rate, index state. Mode 0640.
+.TP
+.I /run/byebyte/control.sock
+The command socket. Mode 0660, peercred-gated.
+.SH ENVIRONMENT
+.TP
+.B BYEBYTE_RUNTIME_DIR
+Overrides
+.I /run/byebyte
+(status.json and control.sock live here). Used for testing.
+.SH EXIT STATUS
+Non-zero if the daemon is unreachable, or if the daemon answers with an
+error (bad arguments, refused category, etc.) \(em the message explains why.
+.SH SEE ALSO
+.BR byebyted (8),
+.BR byebyte-healthcheck (1),
+.BR byebyte-update (1)
+.SH AUTHOR
+asuramaya and byebyte contributors.

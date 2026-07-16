@@ -22,6 +22,11 @@ jobs:
       - name: Smoke (real daemon, real mounts, hostile socket input)
         run: make smoke
 
+      - name: Man pages render without warnings
+        run: |
+          groff -man -Tutf8 -ww man/byebyte.1 > /dev/null
+          groff -t -man -Tutf8 -ww man/byebyted.8 > /dev/null
+
       - name: Extension JS syntax
         # GJS extensions are ESM; node only parses import/export from a .mjs
         # file, so check a renamed copy.

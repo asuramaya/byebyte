@@ -40,6 +40,7 @@ for b in byebyted byebyte byebyte-healthcheck byebyte-update; do
 done
 rm -f "$UNITDIR/byebyted.service" "$UNITDIR/byebyte-update.service" "$UNITDIR/byebyte-update.timer"
 rm -rf "$SHAREDIR"
+rm -f "$PREFIX/share/man/man1/byebyte.1" "$PREFIX/share/man/man8/byebyted.8"
 systemctl daemon-reload
 
 if [[ "$PURGE" -eq 1 ]]; then

@@ -1,0 +1,121 @@
+'\" t
+.TH BYEBYTED 8 "2026-07-16" "byebyte 0.5.0" "byebyte manual"
+.SH NAME
+byebyted \- the byebyte storage daemon
+.SH SYNOPSIS
+.B byebyted
+.RB [ \-\-config
+.IR path ]
+.RB [ \-\-once ]
+.SH DESCRIPTION
+.B byebyted
+is the only privileged actor in byebyte: it owns the truth about bytes at
+rest \(em statvfs and tmpfs-usrquota polling, EWMA burn rate, ETA-to-full,
+a per-directory sqlite index, and a category registry that
+.BR byebyte (1)'s
+.I purge
+verb acts through. Nothing above the control socket ever needs privilege.
+.PP
+.B \-\-once
+performs a single poll, writes
+.IR status.json ,
+and exits \(em used by
+.B make smoke
+and testing.
+.SH CONFIGURATION
+Config is the seed, never the master: every key is typed and clamped on
+load; unknown keys are ignored; a tampered config can tune numbers within
+the ranges below but can never grant the daemon a new ability or weaken
+an invariant. Default path:
+.IR /etc/byebyte/config.json .
+.TS
+tab(@) allbox;
+lb lb lb
+l l l.
+key@default@clamp
+poll_interval@30@2\(en3600 (seconds)
+burn_tau@1800@60\(en86400 (seconds)
+eta_cap_days@365@1\(en3650
+warn_eta_days@7.0@0.1\(en3650
+hot_eta_hours@24.0@0.1\(en8760
+warn_free_pct@10.0@0\(en100
+hot_free_pct@5.0@0\(en100
+owner_uid@1000@0\(en2^31
+scan_hour@3@0\(en23
+index_min_bytes@1048576@4096\(en2^40
+snapshot_ring@30@2\(en365
+ballast_gb@2@0\(en32 (0 = off)
+.TE
+.PP
+List-typed keys (validated as a list of strings, never clamped):
+.IR include_fstypes ", " tmpfs_mounts ", " exclude_mounts ", " scan_roots ", "
+.IR purge_disabled .
+.I purge_disabled
+may only name existing category ids to switch off \(em it can never add a
+path or a category the daemon doesn't already compile in.
+.SH FILES
+.TP
+.I /etc/byebyte/config.json
+Seeded once at install (owner_uid from the installing sudo call), never
+overwritten on reinstall.
+.TP
+.I /var/lib/byebyte/index.db
+The per-directory scan index (sqlite, WAL mode).
+.TP
+.I /var/lib/byebyte/ledger.jsonl
+One JSON line per purge deletion or ballast release: timestamp, category,
+path, bytes, status.
+.TP
+.I /var/lib/byebyte/ballast/
+Pre-allocated emergency-reserve slabs.
+.TP
+.I /run/byebyte/status.json
+0640, owned by
+.IR owner_uid .
+Written atomically (tmp file + rename).
+.TP
+.I /run/byebyte/control.sock
+0660, owned by
+.IR owner_uid .
+.SH SIGNALS
+.TP
+.B SIGTERM, SIGINT
+Clean shutdown: the current poll loop iteration finishes, the socket is
+closed.
+.SH SECURITY
+The relevant attacker is an unprivileged local process abusing the root
+daemon; byebyted has no network attack surface at all.
+.TP
+.B Socket
+AF_UNIX, newline-delimited JSON, bounded reads (4 KiB line cap, 5 s
+timeout). Every connection is checked against
+.B SO_PEERCRED
+\(em only root or the configured
+.I owner_uid
+may issue commands \(em on top of the socket's own 0660 file mode. Two
+independent gates.
+.TP
+.B Hostile input
+Malformed JSON, non-objects, and unknown commands are answered with
+.RI { \(dqerror\(dq : ...} and the connection ends; they never crash the
+daemon.
+.TP
+.B Registry invariant
+.I purge
+can only delete what a compiled-in category detector positively
+matches. Config may disable a category; it can never add one, and it can
+never supply a raw path.
+.TP
+.B Quota reader
+Effective headroom is
+.IR "min(free, quota remaining)" " per mount, read via " quotactl_fd (2)
+on x86_64 (other architectures report no quota). This is what catches an
+EDQUOT-on-tmpfs condition that
+.BR df (1)
+cannot see.
+.SH SEE ALSO
+.BR byebyte (1),
+.BR byebyte-healthcheck (1),
+.BR systemd.exec (5)
+.SH AUTHOR
+asuramaya and byebyte contributors.

@@ -61,6 +61,12 @@ done
 install -d -m 0755 "$SHAREDIR"
 install -m 0644 "$SRC/VERSION" "$SHAREDIR/VERSION"
 
+# 1b. man pages
+echo "-- man pages -> $PREFIX/share/man"
+install -d -m 0755 "$PREFIX/share/man/man1" "$PREFIX/share/man/man8"
+install -m 0644 "$SRC/man/byebyte.1" "$PREFIX/share/man/man1/byebyte.1"
+install -m 0644 "$SRC/man/byebyted.8" "$PREFIX/share/man/man8/byebyted.8"
+
 # 2. config: seeded once, then NEVER overwritten (kept across reinstalls).
 # Config is the seed, never the master — a tampered one can't weaken the
 # daemon anyway (typed, clamped, unknown keys ignored), but the human's
@@ -122,6 +128,7 @@ cat <<EOF
   byebyte status             headroom, burn rate, ETA-to-full per mount
   byebyte-healthcheck        vitals: fresh status.json + a daemon that answers ping
   byebyte-update --check     is a newer release out? (never installs by itself)
+  man byebyte / man 8 byebyted   full verb reference, config keys, security model
   Remove:  sudo ./uninstall.sh   (keeps /etc/byebyte + /var/lib/byebyte; --purge drops them)
 
 daily update CHECK is off by default (it's notify-only, never installs). Opt in:
