@@ -1,5 +1,5 @@
 # byebyte — the storage demon
-.PHONY: smoke install uninstall pill deb
+.PHONY: smoke attack install uninstall pill deb
 
 VERSION := $(shell tr -d '[:space:]' < VERSION)
 DEBROOT := build/deb/byebyte_$(VERSION)_all
@@ -7,6 +7,11 @@ DEBFILE := build/deb/byebyte_$(VERSION)_all.deb
 
 smoke:
 	bash tests/smoke.sh
+
+# the thorough adversarial pass (full cmd surface + oversized/garbage/nested/
+# stall); smoke.sh keeps its own quick hostile-input block for a fast loop
+attack:
+	python3 tests/attack_socket.py
 
 # root half of the two-step install; the pill (below) is the no-root half.
 # install.sh gates on EUID itself and prints guidance if sudo was forgotten.

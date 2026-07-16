@@ -14,10 +14,36 @@ StateDirectory=byebyte
 NoNewPrivileges=yes
 ProtectSystem=strict
 ReadWritePaths=/run/byebyte /var/lib/byebyte
-ProtectHome=read-only
+# ProtectHome=read-only (M0/M1) silently broke M3's purge: deleting
+# ~/.cache/pip etc. needs WRITE access somewhere under an arbitrary
+# owner_uid's home, and ProtectHome enforces a real read-only bind mount
+# that no capability bypasses. purge's whole job is writing there, so the
+# home tree stays fully accessible rather than pretending otherwise.
+ProtectHome=no
 # PrivateTmp would hide the real /tmp — the exact mount whose quota
 # ghosts caused the 2026-07-13 outage this daemon exists to see.
 PrivateTmp=no
+
+# --- M4 hardening pass ---
+# Each retained capability maps to something the code actually does as
+# root; nothing here is "just in case."
+#   CAP_DAC_READ_SEARCH — the M2 scanner walks scan_roots (default "/"),
+#     meaning it reads into every user's directories regardless of mode;
+#     quotactl_fd's O_DIRECTORY open on a mountpoint needs it too.
+#   CAP_DAC_OVERRIDE — purge deletes files under the owner_uid's home
+#     (pip/uv/hf-hub caches, project artifacts) that the daemon process
+#     doesn't itself own.
+#   CAP_CHOWN — write_status() and the control socket setup chown
+#     status.json/control.sock to owner_uid whenever running as root.
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE CAP_CHOWN
+# quotactl_fd (tmpfs usrquota, syscall 443 on x86_64) isn't in every
+# systemd version's @system-service group — named explicitly so hardening
+# can never silently break M0's core quota reader.
+SystemCallFilter=@system-service quotactl_fd
+ProtectKernelTunables=yes
+ProtectClock=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX
 
 [Install]
 WantedBy=multi-user.target

@@ -1125,6 +1125,15 @@ _COLD_CACHE_BYTES = 5 * 1024 ** 3
 _COLD_CACHE_DAYS = 90
 _FAST_GROWER_BPS_DAY = 2 * 1024 ** 3
 _GHOSTS_HEAVY_BYTES = 1 * 1024 ** 3
+# advise must stay cheap: only categories whose detect() is a handful of
+# fixed-path stats qualify. project-artifacts has no index shortcut for
+# "where are all the node_modules on this box" — it's a live, unbounded
+# walk of scan_roots (default ["/"] in production) that would turn every
+# advise call into a full-filesystem scan. journald/snap-old are already
+# harmless here (their candidates carry bytes=0, so they can never cross
+# _COLD_CACHE_BYTES) but are left out too since they're not real caches.
+_ADVISE_COLD_CACHE_CATEGORIES = ("hf-hub", "pip-cache", "uv-cache",
+                                 "thumbnails", "rotated-logs")
 
 
 def advise(cfg, status_doc, indexer):
@@ -1144,7 +1153,7 @@ def advise(cfg, status_doc, indexer):
         findings.append({"rule": "fast_grower", "path": grower[0],
                           "bytes_per_day": grower[1]})
 
-    for category in REGISTRY:
+    for category in _ADVISE_COLD_CACHE_CATEGORIES:
         if category in cfg.get("purge_disabled", []):
             continue
         total, newest = _category_totals(category, cfg, indexer)
