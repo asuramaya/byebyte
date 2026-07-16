@@ -30,3 +30,10 @@
 - byebyted/byebyte kernels: enumerates /boot + dpkg, marks removable kernels (never running, never newest), prints the apt autoremove line — never runs apt
 - byebyted/byebyte advise: rule engine over index + status — ETA soon, quota low, fast growers, cold caches, heavy ghosts — one line per finding + --json
 - smoke: fixture-based coverage for all five verbs (marker-gating, hostile input, child-held ghost fd, tiny ballast build/release, fixture /boot, growth-driven advise rule)
+
+## 0.5.0 — M4 completion
+- byebyted/byebyte burn: samples /proc/<pid>/io twice N seconds apart (write_bytes minus cancelled_write_bytes), reports top writers by rate + mount; seconds clamped 1..30
+- man/byebyte.1, man/byebyted.8: groff -man source, config keys + clamps table, security model, files, signals — installed by install.sh, removed by uninstall.sh
+- make deb: minimal dpkg-deb package (bins to /usr/bin, units, man pages, config.json as a conffile); postinst/prerm/postrm share the owner_uid seed logic with install.sh via scripts/seed-owner-uid.py; never installed by smoke, only built and inspected
+- hardening: systemd unit gets CapabilityBoundingSet (DAC_READ_SEARCH, DAC_OVERRIDE, CHOWN — each documented), SystemCallFilter=@system-service plus quotactl_fd, ProtectKernelTunables, ProtectClock, MemoryDenyWriteExecute, RestrictAddressFamilies=AF_UNIX; fixes ProtectHome=read-only silently blocking purge in real deployments; fixes advise's cold-cache rule triggering a full-filesystem walk via project-artifacts on every call (found by installing and running the hardened unit live)
+- tests/attack_socket.py: standalone adversarial harness covering the full command surface plus oversized/garbage/nested/stall; make attack wired into CI alongside make smoke
