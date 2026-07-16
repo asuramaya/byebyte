@@ -6,7 +6,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 RD=$(mktemp -d)
-trap 'kill "${DPID:-0}" 2>/dev/null || true; rm -rf "$RD"' EXIT
+# burn needs a REAL disk-backed path: /proc/pid/io's write_bytes only moves
+# for actual block-layer I/O — tmpfs (what $RD/mktemp default to here) never
+# touches it, so the fixture data file lives under /var/tmp instead.
+BURN_FIX=$(mktemp -d --tmpdir=/var/tmp byebyte-smoke-burn.XXXXXX)
+trap 'kill "${DPID:-0}" 2>/dev/null || true; rm -rf "$RD" "$BURN_FIX"' EXIT
 
 # fixture tree for the index: one pig, one runt — `why` must rank them
 FIX=$RD/tree
@@ -397,5 +401,59 @@ PY
 
 BYEBYTE_RUNTIME_DIR=$RD python3 bin/byebyte advise | grep -q "growth" \
     || { echo "SMOKE FAIL: CLI advise missing growth grower"; exit 1; }
+
+# --- M4: burn — a real disk-backed writer is named at its actual rate
+python3 - "$RD" "$BURN_FIX" <<'PY'
+import json, os, socket, subprocess, sys, time
+
+rd, burn_fix = sys.argv[1], sys.argv[2]
+
+def ask(obj, timeout=10):
+    c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    c.settimeout(timeout)
+    c.connect(os.path.join(rd, "control.sock"))
+    c.sendall(json.dumps(obj).encode() + b"\n")
+    buf = b""
+    while b"\n" not in buf:
+        chunk = c.recv(65536)
+        if not chunk:
+            break
+        buf += chunk
+    c.close()
+    return json.loads(buf.decode())
+
+child = subprocess.Popen([sys.executable, "-c", (
+    "import os, time\n"
+    f"f = open({os.path.join(burn_fix, 'churn')!r}, 'wb')\n"
+    "chunk = b'\\0' * (2 * 1024 * 1024)\n"
+    "end = time.time() + 6\n"
+    "while time.time() < end:\n"
+    "    f.write(chunk)\n"
+    "    f.flush()\n"
+    "    os.fsync(f.fileno())\n"
+    "    time.sleep(0.15)\n"  # ~13MB/s nominal — wide margin over the 4MB/s bar
+)])
+try:
+    time.sleep(0.3)  # let it start writing before the sample window opens
+    doc = ask({"cmd": "burn", "seconds": 3}, timeout=15)
+    writer = next((w for w in doc["writers"] if w["pid"] == child.pid), None)
+    assert writer is not None, f"burn never saw pid {child.pid}: {doc}"
+    assert writer["bytes_per_sec"] >= 4 * 1024 * 1024, writer
+finally:
+    child.kill()
+    child.wait()
+
+# hostile input: bad seconds/limit types and out-of-range values, daemon alive
+assert "error" in ask({"cmd": "burn", "seconds": 0}), "seconds=0 accepted"
+assert "error" in ask({"cmd": "burn", "seconds": "ten"}), "non-int seconds accepted"
+assert "error" in ask({"cmd": "burn", "seconds": 5, "limit": -1}), "limit=-1 accepted"
+assert ask({"cmd": "ping"})["ok"] is True, "daemon died after burn abuse"
+print(f"burn ok: named pid {child.pid} at {writer['bytes_per_sec']/1e6:.1f}MB/s, "
+      "hostile input survived")
+PY
+
+BYEBYTE_RUNTIME_DIR=$RD python3 bin/byebyte burn --seconds 1 --json | python3 -c \
+    "import json,sys; json.load(sys.stdin)" \
+    || { echo "SMOKE FAIL: CLI burn json invalid"; exit 1; }
 
 echo "SMOKE OK"

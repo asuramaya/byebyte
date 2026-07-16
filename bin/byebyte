@@ -13,17 +13,15 @@ import time
 
 RUNTIME_DIR = os.environ.get("BYEBYTE_RUNTIME_DIR", "/run/byebyte")
 
-PLANNED = {
-    "burn": "M4 — live per-process writes",
-}
+PLANNED = {}
 
 
-def request(payload):
+def request(payload, timeout=30):
     """One JSON command to the daemon; None if the socket is unreachable."""
     sock_path = os.path.join(RUNTIME_DIR, "control.sock")
     try:
         conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        conn.settimeout(30)
+        conn.settimeout(timeout)
         conn.connect(sock_path)
         conn.sendall(json.dumps(payload).encode() + b"\n")
         buf = b""
@@ -38,8 +36,8 @@ def request(payload):
         return None
 
 
-def request_or_die(payload):
-    doc = request(payload)
+def request_or_die(payload, timeout=30):
+    doc = request(payload, timeout=timeout)
     if doc is None:
         sys.exit("byebyte: daemon unreachable — is byebyted running?")
     if isinstance(doc, dict) and "error" in doc:
@@ -309,6 +307,24 @@ def cmd_advise(argv):
             print(f"  {rule}: {f}")
 
 
+def cmd_burn(argv):
+    seconds = int(_flag_val(argv, "--seconds", "5"))
+    limit = int(_flag_val(argv, "--limit", "15"))
+    doc = request_or_die({"cmd": "burn", "seconds": seconds, "limit": limit},
+                          timeout=seconds + 10)
+    if "--json" in argv:
+        print(json.dumps(doc, indent=2))
+        return
+    writers = doc.get("writers", [])
+    if not writers:
+        print(f"no writes ≥ 1B/s over {doc.get('seconds', seconds)}s")
+        return
+    for w in writers:
+        mount = f"  (writing on {w['mount']})" if w.get("mount") else ""
+        print(f"  {human_bytes(w['bytes_per_sec']):>8}/s   pid {w['pid']:<7} "
+              f"{w['comm']:<16}{mount}")
+
+
 def main():
     argv = sys.argv[1:]
     verb = argv[0] if argv and not argv[0].startswith("-") else "status"
@@ -316,7 +332,7 @@ def main():
     verbs = {"status": cmd_status, "scan": cmd_scan,
              "why": cmd_why, "blame": cmd_blame, "purge": cmd_purge,
              "ghosts": cmd_ghosts, "ballast": cmd_ballast, "kernels": cmd_kernels,
-             "advise": cmd_advise}
+             "advise": cmd_advise, "burn": cmd_burn}
     if verb in verbs:
         verbs[verb](rest)
     elif verb in PLANNED:

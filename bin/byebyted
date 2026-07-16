@@ -1160,6 +1160,62 @@ def advise(cfg, status_doc, indexer):
     return {"findings": findings}
 
 
+# --- burn: live per-process writes (stdlib route, v1) ------------------------
+# /proc/<pid>/io's write_bytes only moves for real block-layer I/O — tmpfs
+# writes never touch it, by design; that's expected, not a bug to work around.
+
+def _read_write_bytes(pid):
+    try:
+        vals = {}
+        with open(f"/proc/{pid}/io") as f:
+            for line in f:
+                k, _, v = line.partition(":")
+                vals[k.strip()] = int(v.strip())
+        return vals.get("write_bytes", 0) - vals.get("cancelled_write_bytes", 0)
+    except (OSError, ValueError):
+        return None
+
+
+def _pid_mount(pid, mounts_by_dev):
+    try:
+        st = os.stat(f"/proc/{pid}/cwd")
+    except OSError:
+        return None
+    devno = f"{os.major(st.st_dev)}:{os.minor(st.st_dev)}"
+    return mounts_by_dev.get(devno)
+
+
+def burn(seconds, limit):
+    try:
+        pids = [d for d in os.listdir("/proc") if d.isdigit()]
+    except OSError:
+        pids = []
+    before = {pid: b for pid in pids
+              for b in [_read_write_bytes(pid)] if b is not None}
+    time.sleep(seconds)
+    mounts_by_dev = _mountinfo_map()
+    rows = []
+    for pid, b0 in before.items():
+        b1 = _read_write_bytes(pid)
+        if b1 is None:
+            continue  # process exited mid-sample — silently skipped
+        rate = (b1 - b0) / seconds
+        if rate <= 0:
+            continue
+        rows.append({"pid": int(pid), "comm": _read_comm(pid),
+                     "bytes_per_sec": rate,
+                     "mount": _pid_mount(pid, mounts_by_dev)})
+    rows.sort(key=lambda r: -r["bytes_per_sec"])
+    return {"seconds": seconds, "writers": rows[:limit]}
+
+
+def _burn_seconds(req):
+    s = req.get("seconds", 5)
+    if not isinstance(s, int) or not 1 <= s <= 30:
+        raise ValueError("seconds must be an int in 1..30")
+    return s
+
+
 # --- control socket ---------------------------------------------------------
 # Input is hostile by default: SO_PEERCRED-gated (root or the owner, on top
 # of the 0660 file mode — family ruling 2026-07-14), bounded reads, JSON
@@ -1253,6 +1309,8 @@ class Control(threading.Thread):
                 resp = kernels()
             elif cmd == "advise":
                 resp = advise(self.cfg, self.get_status(), self.indexer)
+            elif cmd == "burn":
+                resp = burn(_burn_seconds(req), _limit(req))
             else:
                 resp = {"error": "unknown command"}
         except Exception as exc:  # noqa: BLE001 — hostile input, never crash
