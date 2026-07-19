@@ -1,5 +1,5 @@
 '\" t
-.TH BYEBYTED 8 "2026-07-16" "byebyte 0.5.0" "byebyte manual"
+.TH BYEBYTED 8 "2026-07-19" "byebyte 0.7.0" "byebyte manual"
 .SH NAME
 byebyted \- the byebyte storage daemon
 .SH SYNOPSIS
@@ -22,6 +22,24 @@ performs a single poll, writes
 and exits \(em used by
 .B make smoke
 and testing.
+.PP
+On a
+.I btrfs
+mount, byebyted shells out to the
+.B btrfs (8)
+CLI (an optional soft dependency \(em see
+.IR packages.txt )
+for read-only subvolume/snapshot/qgroup accounting, since a plain walk
+can't see space pinned by a snapshot. It never mutates the filesystem
+(no
+.IR "quota enable" ,
+no snapshot verbs); absent CLI or disabled quotas degrade to a one-line
+notice on
+.BR byebyte (1)'s
+.I why
+and
+.I blame
+verbs, never an error.
 .SH CONFIGURATION
 Config is the seed, never the master: every key is typed and clamped on
 load; unknown keys are ignored; a tampered config can tune numbers within

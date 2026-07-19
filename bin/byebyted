@@ -26,7 +26,7 @@ import time
 
 import sutra
 
-VERSION = "0.6.1"
+VERSION = "0.7.0"
 
 RUNTIME_DIR = os.environ.get("BYEBYTE_RUNTIME_DIR", "/run/byebyte")
 STATUS_PATH = os.path.join(RUNTIME_DIR, "status.json")
@@ -169,6 +169,117 @@ def quota_headroom(mountpoint, uid):
         os.close(fd)
 
 
+# --- btrfs: subvolume/snapshot/qgroup truth (V2.M2, read-only) -------------
+# On btrfs, a du-style walk lies: subvolumes and snapshots share extents, so
+# "where did my disk go" needs btrfs's own accounting. Shells out to the
+# `btrfs` CLI (a soft dependency, see packages.txt — same class as coldspot's
+# `iw`); absent CLI or disabled quotas degrade to a reason string, never an
+# error. No mutation, ever: no `quota enable`, no subvolume/snapshot verbs —
+# that's M4 policy territory.
+
+def _btrfs_cli():
+    return shutil.which("btrfs")
+
+
+def _btrfs_run(args, cwd_mount, timeout=15):
+    try:
+        out = subprocess.run(["btrfs"] + args + [cwd_mount], capture_output=True,
+                             text=True, timeout=timeout, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    return out.stdout
+
+
+_SUBVOL_LINE = re.compile(r"^ID (\d+) gen \d+ top level \d+ path (.+)$")
+
+
+def _parse_subvol_list(text):
+    """{id: path} for each `btrfs subvolume list` line, best-effort — a line
+    that doesn't match the expected shape is silently skipped, never fatal."""
+    out = {}
+    for line in (text or "").splitlines():
+        m = _SUBVOL_LINE.match(line.strip())
+        if m:
+            out[int(m.group(1))] = m.group(2)
+    return out
+
+
+_QGROUP_LINE = re.compile(r"^0/(\d+)\s+(\d+)\s+(\d+)")
+
+
+def _parse_qgroup_show(text):
+    """{subvol_id: {"referenced":, "exclusive":}} from `btrfs qgroup show
+    -reF --raw`'s level-0 (per-subvolume) rows."""
+    out = {}
+    for line in (text or "").splitlines():
+        m = _QGROUP_LINE.match(line.strip())
+        if m:
+            out[int(m.group(1))] = {"referenced": int(m.group(2)),
+                                    "exclusive": int(m.group(3))}
+    return out
+
+
+def btrfs_info(mountpoint):
+    """Read-only subvolume/snapshot accounting for one btrfs mount.
+
+    `pinned_bytes` is the sum of EXCLUSIVE bytes held only by snapshots
+    (never the live subvolumes) — data a plain walk of the live tree can
+    never see, because it belongs solely to a snapshotted point in time.
+    That needs qgroups enabled (we only read them, never `quota enable`);
+    when they're off, subvolume/snapshot counts still work but pinned_bytes
+    is None."""
+    if _btrfs_cli() is None:
+        return {"available": False, "reason": "btrfs CLI not found"}
+    all_subvols = _btrfs_run(["subvolume", "list", "-a"], mountpoint)
+    if all_subvols is None:
+        return {"available": False, "reason": "btrfs subvolume list failed"}
+    snap_ids = set(_parse_subvol_list(
+        _btrfs_run(["subvolume", "list", "-as"], mountpoint)))
+    qgroups = _parse_qgroup_show(
+        _btrfs_run(["qgroup", "show", "-reF", "--raw"], mountpoint))
+    pinned_bytes = None
+    if qgroups:
+        pinned_bytes = sum(q["exclusive"] for sid, q in qgroups.items()
+                           if sid in snap_ids)
+    return {
+        "available": True,
+        "subvolumes": len(_parse_subvol_list(all_subvols)),
+        "snapshots": len(snap_ids),
+        "pinned_bytes": pinned_bytes,
+        "quotas_enabled": bool(qgroups),
+    }
+
+
+def _fstype_of(mountpoint):
+    try:
+        with open("/proc/self/mounts") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 3:
+                    mp = parts[1].encode("ascii", "replace").decode("unicode_escape")
+                    if mp == mountpoint:
+                        return parts[2]
+    except OSError:
+        pass
+    return None
+
+
+def _btrfs_notice_for_path(path):
+    """{"mountpoint", ...btrfs_info()} for the btrfs mount containing `path`,
+    or None if `path` isn't on a btrfs mount (or can't be resolved)."""
+    try:
+        st_dev = os.stat(os.path.abspath(path)).st_dev
+    except OSError:
+        return None
+    devno = f"{os.major(st_dev)}:{os.minor(st_dev)}"
+    mp = _mountinfo_map().get(devno)
+    if mp is None or _fstype_of(mp) != "btrfs":
+        return None
+    return {"mountpoint": mp, **btrfs_info(mp)}
+
+
 # --- polling ----------------------------------------------------------------
 
 def poll_mount(m, state, cfg, uid, now):
@@ -191,7 +302,7 @@ def poll_mount(m, state, cfg, uid, now):
         if eta > cfg["eta_cap_days"] * 86400:
             eta = None
 
-    return {
+    row = {
         "mountpoint": m["mountpoint"],
         "fstype": m["fstype"],
         "total": total,
@@ -202,6 +313,9 @@ def poll_mount(m, state, cfg, uid, now):
         "eta_seconds": None if eta is None else int(eta),
         "state": classify(total, eff_free, eta, quota, cfg),
     }
+    if m["fstype"] == "btrfs":
+        row["btrfs"] = btrfs_info(m["mountpoint"])
+    return row
 
 
 def classify(total, eff_free, eta, quota, cfg):
@@ -1222,12 +1336,26 @@ def _make_dispatch(cfg, indexer, get_status):
             path = req.get("path", "/")
             if path is not None and not isinstance(path, str):
                 raise ValueError("path must be a string")
-            return indexer.why(path, _limit(req))
+            resp = indexer.why(path, _limit(req))
+            if isinstance(resp, dict) and "error" not in resp:
+                notice = _btrfs_notice_for_path(path or "/")
+                if notice:
+                    resp["btrfs"] = notice
+            return resp
         if cmd == "blame":
             since = req.get("since")
             if not isinstance(since, (int, float)) or since <= 0:
                 raise ValueError("since must be an epoch timestamp")
-            return indexer.blame(float(since), _limit(req))
+            resp = indexer.blame(float(since), _limit(req))
+            if isinstance(resp, dict) and "error" not in resp:
+                # blame is global over the most-recently-scanned root, which
+                # isn't returned by name — the first configured scan_root is
+                # the common-case proxy for "which mount was that"
+                proxy_root = cfg["scan_roots"][0] if cfg["scan_roots"] else "/"
+                notice = _btrfs_notice_for_path(proxy_root)
+                if notice:
+                    resp["btrfs"] = notice
+            return resp
         if cmd == "purge":
             category = req.get("category")
             dry_run = req.get("dry_run", True)

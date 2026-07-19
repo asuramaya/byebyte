@@ -1,4 +1,4 @@
-.TH BYEBYTE 1 "2026-07-16" "byebyte 0.5.0" "byebyte manual"
+.TH BYEBYTE 1 "2026-07-19" "byebyte 0.7.0" "byebyte manual"
 .SH NAME
 byebyte \- verb CLI for the byebyte storage daemon
 .SH SYNOPSIS
@@ -24,7 +24,10 @@ Instant du-tree from the index, age-tagged (big AND stale stands out).
 Accepts
 .B \-\-limit
 .I N
-(default 15).
+(default 15). On a
+.I btrfs
+mount, prints a note when snapshots pin space the walk can't see (or when
+btrfs accounting is unavailable).
 .TP
 .B blame " [\-\-since T]"
 What grew since
@@ -37,6 +40,10 @@ or
 .IR YYYY-MM-DD ;
 defaults to
 .IR 1d .
+Gains the same
+.I btrfs
+note as
+.IR why .
 .TP
 .B scan
 Kick off an on-demand index refresh (otherwise nightly).

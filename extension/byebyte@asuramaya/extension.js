@@ -68,6 +68,23 @@ function fmtEta(s) {
 // severity order for picking the tile's hero mount
 const RANK = {ok: 0, warn: 1, hot: 2, edquot: 3};
 
+// V2.M2: when snapshots pin a big enough slice of a btrfs mount, the free-
+// space number alone is misleading — the walk can't see that data, but it's
+// real and only a snapshot deletion (M4 policy territory) frees it. 20% of
+// the mount's total is the "dominates" bar for re-skinning the subtitle.
+const BTRFS_DOMINATES_FRAC = 0.2;
+
+function btrfsNote(m) {
+    const b = m.btrfs;
+    if (!isObj(b) || !b.available || !b.snapshots)
+        return null;
+    const pinned = num(b.pinned_bytes);
+    if (pinned == null)
+        return null;
+    return {pinned, dominates: num(m.total) != null &&
+                               pinned >= BTRFS_DOMINATES_FRAC * m.total};
+}
+
 function readStatus() {
     try {
         const [ok, bytes] = GLib.file_get_contents(STATUS_PATH);
@@ -132,7 +149,13 @@ class ByeByteToggle extends QuickMenuToggle {
                  (m.burn_bps ?? 0) > (hero.burn_bps ?? 0)))
                 hero = m;
         }
-        if (hero) {
+        const heroBtrfs = hero ? btrfsNote(hero) : null;
+        if (hero && heroBtrfs?.dominates) {
+            // re-skin: free-space alone is misleading when snapshots pin
+            // most of what's "used" — lead with the pinned number instead
+            this.subtitle = `${STATE_MARK[hero.state] ?? ''}` +
+                `${fmtBytes(heroBtrfs.pinned)} snapshot-pinned`;
+        } else if (hero) {
             const eta = hero.eta_seconds != null ? ` · ${fmtEta(hero.eta_seconds)}` : '';
             this.subtitle = `${STATE_MARK[hero.state] ?? ''}` +
                 `${fmtBytes(hero.effective_free)}${eta}`;
@@ -167,13 +190,17 @@ class ByeByteToggle extends QuickMenuToggle {
             const quota = m.quota
                 ? `  <span foreground="${DIM}">[q ${fmtBytes(m.quota.remaining)}]</span>`
                 : '';
+            const btrfs = btrfsNote(m);
+            const snap = btrfs
+                ? `  <span foreground="${DIM}">[snap pin ${fmtBytes(btrfs.pinned)}]</span>`
+                : '';
             it.label.clutter_text.set_markup(
                 `<span foreground="${color}" font_weight="bold">●</span> ` +
                 `${esc(m.mountpoint)}  ` +
                 `<span foreground="${ACCENT}">${fmtBytes(m.effective_free)}</span>` +
                 `<span foreground="${DIM}"> of ${fmtBytes(m.total)} · ` +
                 `${esc(fmtBurn(m.burn_bps))} · full ${fmtEta(m.eta_seconds)}</span>` +
-                quota);
+                quota + snap);
             this._mountSection.addMenuItem(it);
         }
 

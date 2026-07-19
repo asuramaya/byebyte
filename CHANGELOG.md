@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.0 — V2.M2: btrfs truth (read-only)
+- byebyted: `btrfs_info()` — read-only subvolume/snapshot/qgroup accounting via the `btrfs` CLI (optional soft dependency, see packages.txt); `pinned_bytes` sums the EXCLUSIVE bytes held only by snapshots, i.e. data a plain walk of the live tree can never see. No mutation ever (no `quota enable`, no snapshot verbs — that's M4 policy territory). Absent CLI or disabled quotas degrade to a reason string, never an error.
+- status.json: btrfs mounts gain a per-mount `btrfs` section (subvolumes, snapshots, pinned_bytes, quotas_enabled)
+- why/blame: gain an optional `btrfs` notice when the queried path/root lives on a btrfs mount ("N snapshots pin XG the walk can't see", or an unavailable-accounting reason)
+- byebyte: why/blame print the new notice line
+- pill: subtitle re-skins to lead with the pinned amount when snapshot-pinned space is at least 20% of a mount's total; per-mount rows gain a `[snap pin XG]` tag
+- packages.txt: new file documenting btrfs-progs (and the pre-existing snapd) as soft dependencies
+- smoke: pure parsing unit test for the subvolume-list/qgroup-show parsers (always runs); a loop-device fixture (subvolume + read-only snapshot pinning deleted data) exercises the live path when root/btrfs-progs/loop are available, skips cleanly otherwise (CI-safe)
+
 ## 0.6.1 — V2.M1: ghosts dedup
 - byebyted ghosts(): groups by (dev, inode) instead of (pid, comm) — a deleted-but-open file shared by N pids is now ONE ghost with an N-entry `holders` list, not N separate ghosts; `total_bytes` no longer double-counts a shared file's size (also sharpens advise's ghosts_heavy rule, which reads total_bytes)
 - byebyte ghosts: renders one line per ghost, listing every holding pid

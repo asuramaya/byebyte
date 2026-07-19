@@ -354,6 +354,102 @@ print(f"ghosts dedup ok: one ghost, {len(match['holders'])} holders, "
       f"{match['bytes']}B counted once")
 PY
 
+# --- V2.M2: btrfs truth — pure parsing first (always runs, no privilege),
+# then a real loop-device fixture (skips cleanly without root/tooling)
+python3 - <<'PY'
+import importlib.util, sys
+from importlib.machinery import SourceFileLoader
+
+# bin/byebyted has no .py suffix, so spec_from_file_location can't infer a
+# loader from the extension — hand it one explicitly. It `import sutra` as
+# a sibling, so bin/ needs to be on sys.path first (normally the running
+# script's own dir goes there automatically; a manual load doesn't get that).
+sys.path.insert(0, "bin")
+loader = SourceFileLoader("byebyted_mod", "bin/byebyted")
+spec = importlib.util.spec_from_loader("byebyted_mod", loader)
+mod = importlib.util.module_from_spec(spec)
+loader.exec_module(mod)
+
+subvols = mod._parse_subvol_list(
+    "ID 256 gen 10 top level 5 path live\n"
+    "ID 257 gen 12 top level 5 path snap1\n")
+assert subvols == {256: "live", 257: "snap1"}, subvols
+
+qgroups = mod._parse_qgroup_show(
+    "qgroupid         rfer         excl     max_rfer     max_excl \n"
+    "--------         ----         ----     --------     -------- \n"
+    "0/256        1073741824    536870912         none         none \n"
+    "0/257         536870912    536870912         none         none \n")
+assert qgroups == {256: {"referenced": 1073741824, "exclusive": 536870912},
+                   257: {"referenced": 536870912, "exclusive": 536870912}}, qgroups
+
+# a garbled/unexpected line is skipped, never fatal
+assert mod._parse_subvol_list("not a subvolume line at all\n") == {}
+assert mod._parse_qgroup_show("garbage\n") == {}
+print("btrfs parsing ok: subvolume/qgroup lines parsed, garbage lines skipped")
+PY
+
+btrfs_ready=1
+for tool in losetup mkfs.btrfs btrfs; do
+    command -v "$tool" >/dev/null 2>&1 || btrfs_ready=0
+done
+if [ "$btrfs_ready" -eq 1 ] && sudo -n true 2>/dev/null; then
+    BTRFS_IMG=$(mktemp --tmpdir=/var/tmp byebyte-smoke-btrfs.XXXXXX.img)
+    BTRFS_MNT=$(mktemp -d --tmpdir=/var/tmp byebyte-smoke-btrfs-mnt.XXXXXX)
+    loopdev=""
+    cleanup_btrfs() {
+        [ -n "$loopdev" ] && sudo -n umount "$BTRFS_MNT" 2>/dev/null
+        [ -n "$loopdev" ] && sudo -n losetup -d "$loopdev" 2>/dev/null
+        rm -f "$BTRFS_IMG"
+        rmdir "$BTRFS_MNT" 2>/dev/null || true
+    }
+    btrfs_live=0
+    if truncate -s 300M "$BTRFS_IMG" \
+        && loopdev=$(sudo -n losetup --show -f "$BTRFS_IMG" 2>/dev/null) \
+        && sudo -n mkfs.btrfs -q "$loopdev" >/dev/null 2>&1 \
+        && sudo -n mount "$loopdev" "$BTRFS_MNT" 2>/dev/null; then
+        btrfs_live=1
+    fi
+    if [ "$btrfs_live" -eq 1 ]; then
+        sudo -n btrfs subvolume create "$BTRFS_MNT/live" >/dev/null
+        dd if=/dev/zero of="$BTRFS_MNT/live/blob" bs=1M count=32 2>/dev/null
+        sudo -n btrfs subvolume snapshot -r "$BTRFS_MNT/live" "$BTRFS_MNT/snap1" >/dev/null
+        sudo -n rm -f "$BTRFS_MNT/live/blob"
+        sudo -n btrfs quota enable "$BTRFS_MNT" >/dev/null 2>&1 || true
+        sudo -n btrfs quota rescan -w "$BTRFS_MNT" >/dev/null 2>&1 || true
+
+        # read as root, same as the real daemon always does in production
+        sudo -n python3 - "$(pwd)/bin/byebyted" "$BTRFS_MNT" <<'PY'
+import importlib.util, os, sys
+from importlib.machinery import SourceFileLoader
+
+daemon_path, mnt = sys.argv[1], sys.argv[2]
+sys.path.insert(0, os.path.dirname(daemon_path))
+loader = SourceFileLoader("byebyted_mod", daemon_path)
+spec = importlib.util.spec_from_loader("byebyted_mod", loader)
+mod = importlib.util.module_from_spec(spec)
+loader.exec_module(mod)
+
+info = mod.btrfs_info(mnt)
+assert info["available"], info
+assert info["snapshots"] >= 1, info
+if info.get("quotas_enabled"):
+    assert info.get("pinned_bytes") and info["pinned_bytes"] >= 32 * 1024 * 1024 * 0.9, info
+    print(f"btrfs ok: {info['subvolumes']} subvol(s), {info['snapshots']} snapshot(s), "
+          f"{info['pinned_bytes']}B pinned")
+else:
+    print(f"btrfs ok (quotas unavailable in this env): {info['subvolumes']} subvol(s), "
+          f"{info['snapshots']} snapshot(s)")
+PY
+        cleanup_btrfs
+    else
+        cleanup_btrfs
+        echo "btrfs section: skipped (loop/mkfs.btrfs/mount failed under sudo -n)"
+    fi
+else
+    echo "btrfs section: skipped (no root/passwordless-sudo or btrfs tooling — CI-safe)"
+fi
+
 # --- M3: ballast — built at startup (test override: bytes, not gigabytes),
 # release frees it. "Zero writes before unlink" on the release path is
 # verified by code review (ballast_release() in byebyted: only os.stat reads

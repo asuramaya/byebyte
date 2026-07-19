@@ -146,6 +146,20 @@ def cmd_scan(argv):
                 return
 
 
+def print_btrfs_notice(doc):
+    b = doc.get("btrfs")
+    if not b:
+        return
+    if not b.get("available"):
+        print(f"  note: btrfs accounting unavailable on {b['mountpoint']}"
+              f" ({b.get('reason', 'unknown reason')})")
+    elif b.get("snapshots"):
+        pinned = b.get("pinned_bytes")
+        pin = f" pin {human_bytes(pinned)}" if pinned else " (pinned bytes unknown — quotas off)"
+        print(f"  note: {b['snapshots']} snapshot(s) on {b['mountpoint']}{pin}"
+              " the walk can't see")
+
+
 def cmd_why(argv):
     path = next((a for a in argv if not a.startswith("-")
                  and a != _flag_val(argv, "--limit", None)), "/")
@@ -164,6 +178,7 @@ def cmd_why(argv):
               f"  {r['path']}")
     if not doc["rows"]:
         print("  (nothing above the index threshold here)")
+    print_btrfs_notice(doc)
 
 
 def cmd_blame(argv):
@@ -182,6 +197,7 @@ def cmd_blame(argv):
               f"  (now {human_bytes(r['bytes'])})")
     if not doc["rows"]:
         print("  nothing moved above the index threshold")
+    print_btrfs_notice(doc)
 
 
 def cmd_purge(argv):

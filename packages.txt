@@ -1,0 +1,13 @@
+# byebyte — soft runtime dependencies (optional; graceful degrade if absent)
+#
+# Hard requirements live in packaging/deb's control file (python3 >= 3.8,
+# systemd). Everything below is a CLI tool byebyted shells out to for a
+# sharper answer when it's present — never required, and every one degrades
+# to a stdlib-only fallback or a one-line notice, never an error.
+
+btrfs-progs   # `btrfs` CLI: subvolume/snapshot/qgroup accounting on btrfs
+              # mounts (V2.M2, read-only — no `quota enable`, no snapshot
+              # verbs). Absent: why/blame fall back to the plain walk with
+              # a "btrfs accounting unavailable" note instead of an error.
+snapd         # `snap` CLI: backs the snap-old purge category (M3). Absent:
+              # that category's detector just returns no candidates.
