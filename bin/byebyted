@@ -12,22 +12,21 @@ stdlib only, by constitution.
 import argparse
 import ctypes
 import json
-import math
 import os
 import platform
 import pwd
 import re
 import shutil
 import signal
-import socket
 import sqlite3
-import struct
 import subprocess
 import sys
 import threading
 import time
 
-VERSION = "0.5.0"
+import sutra
+
+VERSION = "0.6.0"
 
 RUNTIME_DIR = os.environ.get("BYEBYTE_RUNTIME_DIR", "/run/byebyte")
 STATUS_PATH = os.path.join(RUNTIME_DIR, "status.json")
@@ -74,34 +73,22 @@ CLAMPS = {
 
 
 def load_config(path):
-    cfg = dict(DEFAULTS)
-    try:
-        with open(path) as f:
-            raw = json.load(f)
-    except (OSError, ValueError):
-        return cfg
-    if not isinstance(raw, dict):
-        return cfg
-    for key, default in DEFAULTS.items():
-        if key not in raw:
-            continue
-        val = raw[key]
-        if isinstance(default, list):
-            if isinstance(val, list) and all(isinstance(x, str) for x in val):
-                cfg[key] = val
-        elif isinstance(default, str):
-            if isinstance(val, str) and re.match(r"^\d+[KMGT]?$", val):
-                cfg[key] = val
-        elif isinstance(default, (int, float)) and isinstance(val, (int, float)):
-            lo, hi = CLAMPS[key]
-            cfg[key] = type(default)(min(hi, max(lo, val)))
+    cfg = sutra.load_config(path, DEFAULTS, CLAMPS,
+                            str_patterns={"journald_vacuum_size": r"^\d+[KMGT]?$"})
     # Test-only escape hatch, non-root only: lets smoke build a ballast sized
     # in bytes instead of whole gigabytes. Root — the real daemon — never
     # honors it, so a tampered config can't shrink the reserve below a GB.
+    # sutra doesn't know this key, so it's re-read straight from the raw file.
     if os.getuid() != 0:
-        bb = raw.get("ballast_bytes")
-        if isinstance(bb, int) and 0 <= bb <= (1 << 40):
-            cfg["ballast_bytes"] = bb
+        try:
+            with open(path) as f:
+                raw = json.load(f)
+        except (OSError, ValueError):
+            raw = {}
+        if isinstance(raw, dict):
+            bb = raw.get("ballast_bytes")
+            if isinstance(bb, int) and 0 <= bb <= (1 << 40):
+                cfg["ballast_bytes"] = bb
     return cfg
 
 
@@ -196,13 +183,7 @@ def poll_mount(m, state, cfg, uid, now):
     eff_free = free if quota is None else min(free, quota["remaining"])
 
     prev = state.get(m["mountpoint"])
-    ewma = 0.0
-    if prev is not None:
-        dt = max(1e-3, now - prev["t"])
-        rate = (used - prev["used"]) / dt  # bytes/s, positive = filling
-        alpha = 1.0 - math.exp(-dt / cfg["burn_tau"])
-        ewma = alpha * rate + (1.0 - alpha) * prev["ewma"]
-    state[m["mountpoint"]] = {"t": now, "used": used, "ewma": ewma}
+    state[m["mountpoint"]], ewma = sutra.ewma_rate(prev, used, now, cfg["burn_tau"])
 
     eta = None
     if ewma > 1.0:  # below 1 B/s the ETA is astrology
@@ -237,14 +218,7 @@ def classify(total, eff_free, eta, quota, cfg):
 
 
 def write_status(doc, cfg):
-    tmp = STATUS_PATH + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(doc, f, separators=(",", ":"))
-        f.write("\n")
-    os.chmod(tmp, 0o640)
-    if os.getuid() == 0:
-        os.chown(tmp, cfg["owner_uid"], -1)
-    os.replace(tmp, STATUS_PATH)
+    sutra.write_status(STATUS_PATH, doc, owner=(cfg["owner_uid"], -1))
 
 
 # --- index: the persistent truth about where the bytes are ------------------
@@ -1226,111 +1200,48 @@ def _burn_seconds(req):
 
 
 # --- control socket ---------------------------------------------------------
-# Input is hostile by default: SO_PEERCRED-gated (root or the owner, on top
-# of the 0660 file mode — family ruling 2026-07-14), bounded reads, JSON
-# only, a fixed command set, anything else answers {"error": ...} and the
-# connection dies.
+# The security seam (SO_PEERCRED-gated, bounded reads, hostile-input framing)
+# lives in sutra.ControlServer now. This dispatch closure carries only the
+# domain commands; ping/status are sutra's job.
 
-class Control(threading.Thread):
-    MAX_LINE = 4096
-
-    def __init__(self, cfg, get_status, indexer):
-        super().__init__(daemon=True)
-        self.cfg = cfg
-        self.get_status = get_status
-        self.indexer = indexer
-        self._allowed = {0, os.getuid(), cfg["owner_uid"]}
-        try:
-            os.unlink(SOCKET_PATH)
-        except FileNotFoundError:
-            pass
-        self.srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.srv.bind(SOCKET_PATH)
-        os.chmod(SOCKET_PATH, 0o660)
-        if os.getuid() == 0:
-            os.chown(SOCKET_PATH, cfg["owner_uid"], -1)
-        self.srv.listen(4)
-
-    def run(self):
-        while True:
-            try:
-                conn, _ = self.srv.accept()
-            except OSError:
-                return
-            threading.Thread(target=self.handle, args=(conn,),
-                             daemon=True).start()
-
-    def handle(self, conn):
-        try:
-            creds = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
-                                    struct.calcsize("3i"))
-            _pid, peer_uid, _gid = struct.unpack("3i", creds)
-            if peer_uid not in self._allowed:
-                raise PermissionError("peer not allowed")
-            conn.settimeout(5)
-            data = b""
-            while b"\n" not in data:
-                chunk = conn.recv(1024)
-                if not chunk:
-                    break
-                data += chunk
-                if len(data) > self.MAX_LINE:
-                    raise ValueError("line too long")
-            req = json.loads(data.decode("utf-8").splitlines()[0] or "{}")
-            if not isinstance(req, dict):
-                raise ValueError("not an object")
-            cmd = req.get("cmd")
-            if cmd == "ping":
-                resp = {"ok": True, "version": VERSION}
-            elif cmd == "status":
-                resp = self.get_status()
-            elif cmd == "scan":
-                started = self.indexer.scan()
-                resp = {"ok": True, "started": started,
-                        "running": not started}
-            elif cmd == "why":
-                path = req.get("path", "/")
-                if path is not None and not isinstance(path, str):
-                    raise ValueError("path must be a string")
-                resp = self.indexer.why(path, _limit(req))
-            elif cmd == "blame":
-                since = req.get("since")
-                if not isinstance(since, (int, float)) or since <= 0:
-                    raise ValueError("since must be an epoch timestamp")
-                resp = self.indexer.blame(float(since), _limit(req))
-            elif cmd == "purge":
-                category = req.get("category")
-                dry_run = req.get("dry_run", True)
-                if not isinstance(dry_run, bool):
-                    raise ValueError("dry_run must be a bool")
-                resp = purge(category, dry_run, self.cfg, self.indexer)
-            elif cmd == "ghosts":
-                resp = ghosts()
-            elif cmd == "ballast":
-                action = req.get("action", "status")
-                if action == "status":
-                    resp = ballast_status()
-                elif action == "release":
-                    resp = ballast_release()
-                else:
-                    raise ValueError("unknown ballast action")
-            elif cmd == "kernels":
-                resp = kernels()
-            elif cmd == "advise":
-                resp = advise(self.cfg, self.get_status(), self.indexer)
-            elif cmd == "burn":
-                resp = burn(_burn_seconds(req), _limit(req))
-            else:
-                resp = {"error": "unknown command"}
-        except Exception as exc:  # noqa: BLE001 — hostile input, never crash
-            resp = {"error": type(exc).__name__}
-        try:
-            conn.sendall((json.dumps(resp, separators=(",", ":")) + "\n")
-                         .encode())
-        except OSError:
-            pass
-        finally:
-            conn.close()
+def _make_dispatch(cfg, indexer, get_status):
+    def dispatch(cmd, req):
+        if cmd == "scan":
+            started = indexer.scan()
+            return {"ok": True, "started": started, "running": not started}
+        if cmd == "why":
+            path = req.get("path", "/")
+            if path is not None and not isinstance(path, str):
+                raise ValueError("path must be a string")
+            return indexer.why(path, _limit(req))
+        if cmd == "blame":
+            since = req.get("since")
+            if not isinstance(since, (int, float)) or since <= 0:
+                raise ValueError("since must be an epoch timestamp")
+            return indexer.blame(float(since), _limit(req))
+        if cmd == "purge":
+            category = req.get("category")
+            dry_run = req.get("dry_run", True)
+            if not isinstance(dry_run, bool):
+                raise ValueError("dry_run must be a bool")
+            return purge(category, dry_run, cfg, indexer)
+        if cmd == "ghosts":
+            return ghosts()
+        if cmd == "ballast":
+            action = req.get("action", "status")
+            if action == "status":
+                return ballast_status()
+            if action == "release":
+                return ballast_release()
+            raise ValueError("unknown ballast action")
+        if cmd == "kernels":
+            return kernels()
+        if cmd == "advise":
+            return advise(cfg, get_status(), indexer)
+        if cmd == "burn":
+            return burn(_burn_seconds(req), _limit(req))
+        return None
+    return dispatch
 
 
 # --- main -------------------------------------------------------------------
@@ -1364,7 +1275,9 @@ def main():
                             "scanning": indexer.scanning}
         return doc
 
-    ctl = Control(cfg, live_status, indexer)
+    dispatch = _make_dispatch(cfg, indexer, live_status)
+    ctl = sutra.ControlServer(SOCKET_PATH, sutra.allow_uids({0, uid}), VERSION,
+                              dispatch, live_status, socket_owner=(cfg["owner_uid"], -1))
     ctl.start()
 
     while not stop.is_set():

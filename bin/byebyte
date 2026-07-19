@@ -7,9 +7,10 @@ so it still answers even mid-daemon-restart.
 
 import json
 import os
-import socket
 import sys
 import time
+
+import sutra
 
 RUNTIME_DIR = os.environ.get("BYEBYTE_RUNTIME_DIR", "/run/byebyte")
 
@@ -19,21 +20,7 @@ PLANNED = {}
 def request(payload, timeout=30):
     """One JSON command to the daemon; None if the socket is unreachable."""
     sock_path = os.path.join(RUNTIME_DIR, "control.sock")
-    try:
-        conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        conn.settimeout(timeout)
-        conn.connect(sock_path)
-        conn.sendall(json.dumps(payload).encode() + b"\n")
-        buf = b""
-        while b"\n" not in buf:
-            chunk = conn.recv(65536)
-            if not chunk:
-                break
-            buf += chunk
-        conn.close()
-        return json.loads(buf.decode())
-    except (OSError, ValueError):
-        return None
+    return sutra.request(sock_path, payload, timeout=timeout)
 
 
 def request_or_die(payload, timeout=30):
@@ -49,11 +36,10 @@ def fetch():
     doc = request({"cmd": "status"})
     if isinstance(doc, dict) and "mounts" in doc:
         return doc
-    try:
-        with open(os.path.join(RUNTIME_DIR, "status.json")) as f:
-            return json.load(f)
-    except (OSError, ValueError):
+    doc = sutra.read_status(os.path.join(RUNTIME_DIR, "status.json"))
+    if doc is None:
         sys.exit("byebyte: no daemon and no status.json — is byebyted running?")
+    return doc
 
 
 def human_bytes(n):

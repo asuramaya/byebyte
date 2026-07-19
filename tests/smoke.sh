@@ -463,7 +463,7 @@ make deb > /tmp/byebyte-deb-build.log 2>&1 \
 DEBFILE=$(ls -t build/deb/byebyte_*_all.deb | head -1)
 CONTENTS=$(dpkg-deb --contents "$DEBFILE")
 for want in usr/bin/byebyted usr/bin/byebyte usr/bin/byebyte-healthcheck \
-            usr/bin/byebyte-update lib/systemd/system/byebyted.service \
+            usr/bin/byebyte-update usr/bin/sutra.py lib/systemd/system/byebyted.service \
             lib/systemd/system/byebyte-update.service \
             lib/systemd/system/byebyte-update.timer \
             usr/share/man/man1/byebyte.1 usr/share/man/man8/byebyted.8 \

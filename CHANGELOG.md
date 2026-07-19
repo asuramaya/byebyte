@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.0 — adopt the sutra backbone (behavior-preserving)
+- vendored bin/sutra.py + bin/sutra.version (sutra 0.1.0, ByeByte is the pilot extraction); byebyted/byebyte now import it as a sibling instead of hand-rolling the same skeleton
+- byebyted: load_config -> sutra.load_config (ballast_bytes test hatch re-applied on top, since sutra doesn't know that key); write_status -> sutra.write_status; the EWMA inline in poll_mount -> sutra.ewma_rate; the Control class deleted in favor of a dispatch closure over cfg/indexer/live_status carrying the unchanged domain commands (scan/why/blame/purge/ghosts/ballast/kernels/advise/burn), served by sutra.ControlServer + allow_uids — ping/status are sutra's job now
+- byebyte: request()/fetch() now call sutra.request / sutra.read_status instead of hand-rolling the socket client and status.json fallback
+- make check-sutra: verifies bin/sutra.py's sha256 against bin/sutra.version (integrity, always) and diffs against ~/code/REPOS/sutra/sutra.py when that checkout is present (freshness); wired into CI and the front of make smoke; make deb now ships bin/sutra.py alongside the bins
+- no observable change: same socket contract, same status.json shape, same config semantics — make smoke + make attack stay green throughout
+
 ## 0.0.1 — M0 truth engine
 - byebyted: statvfs + tmpfs-usrquota polling, EWMA burn rate, ETA-to-full, status.json, hardened control socket
 - byebyte: status verb (human + --json)
