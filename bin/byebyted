@@ -26,7 +26,7 @@ import time
 
 import sutra
 
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 
 RUNTIME_DIR = os.environ.get("BYEBYTE_RUNTIME_DIR", "/run/byebyte")
 STATUS_PATH = os.path.join(RUNTIME_DIR, "status.json")
@@ -818,8 +818,12 @@ def _mountinfo_map():
 
 
 def ghosts():
+    """Group by (dev, inode) — the SAME deleted-but-open file, however many
+    pids/fds point at it, is one ghost with N holders, never N ghosts. Bytes
+    are the file's size, counted once per ghost (V2.M1: dedup fix — before
+    this, a file held by two pids was double-counted in total_bytes)."""
     mounts_by_dev = _mountinfo_map()
-    holders = {}
+    by_inode = {}
     try:
         pids = [d for d in os.listdir("/proc") if d.isdigit()]
     except OSError:
@@ -830,6 +834,7 @@ def ghosts():
             fds = os.listdir(fd_dir)
         except OSError:
             continue
+        comm = None
         for fd in fds:
             fd_path = os.path.join(fd_dir, fd)
             try:
@@ -842,17 +847,21 @@ def ghosts():
                 st = os.stat(fd_path)  # follows the magic symlink to the inode
             except OSError:
                 continue
-            key = (pid, _read_comm(pid))
-            h = holders.setdefault(key, {"bytes": 0, "fds": 0, "mounts": set()})
-            h["bytes"] += st.st_size
-            h["fds"] += 1
+            key = (st.st_dev, st.st_ino)
+            g = by_inode.setdefault(key, {"bytes": st.st_size, "mounts": set(),
+                                          "holders": {}})
             devno = f"{os.major(st.st_dev)}:{os.minor(st.st_dev)}"
             mp = mounts_by_dev.get(devno)
             if mp:
-                h["mounts"].add(mp)
-    rows = [{"pid": int(pid), "comm": comm, "bytes": h["bytes"],
-             "fds": h["fds"], "mounts": sorted(h["mounts"])}
-            for (pid, comm), h in holders.items()]
+                g["mounts"].add(mp)
+            if comm is None:
+                comm = _read_comm(pid)
+            h = g["holders"].setdefault(pid, {"pid": int(pid), "comm": comm,
+                                              "fds": 0})
+            h["fds"] += 1
+    rows = [{"bytes": g["bytes"], "mounts": sorted(g["mounts"]),
+             "holders": sorted(g["holders"].values(), key=lambda h: -h["fds"])}
+            for g in by_inode.values()]
     rows.sort(key=lambda r: -r["bytes"])
     return {"total_bytes": sum(r["bytes"] for r in rows), "holders": rows}
 

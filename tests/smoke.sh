@@ -255,6 +255,13 @@ def ask(obj):
     c.close()
     return json.loads(buf.decode())
 
+def ghost_for_pid(doc, pid):
+    for g in doc["holders"]:
+        h = next((h for h in g["holders"] if h["pid"] == pid), None)
+        if h:
+            return g, h
+    return None, None
+
 child = subprocess.Popen([sys.executable, "-c", (
     "import os, tempfile, time\n"
     f"f = tempfile.NamedTemporaryFile(delete=False, dir={rd!r})\n"
@@ -264,16 +271,17 @@ child = subprocess.Popen([sys.executable, "-c", (
     "time.sleep(30)\n"
 )])
 try:
-    holder = None
+    ghost = holder = None
     for _ in range(40):
         doc = ask({"cmd": "ghosts"})
-        holder = next((h for h in doc["holders"] if h["pid"] == child.pid), None)
-        if holder:
+        ghost, holder = ghost_for_pid(doc, child.pid)
+        if ghost:
             break
         time.sleep(0.25)
-    assert holder is not None, f"ghosts never saw pid {child.pid}: {doc}"
-    assert holder["bytes"] >= 123456 * 0.9, holder
+    assert ghost is not None, f"ghosts never saw pid {child.pid}: {doc}"
+    assert ghost["bytes"] >= 123456 * 0.9, ghost
     assert holder["fds"] >= 1, holder
+    ghost_bytes = ghost["bytes"]
 finally:
     child.kill()
     child.wait()
@@ -281,13 +289,69 @@ finally:
 gone = False
 for _ in range(40):
     doc = ask({"cmd": "ghosts"})
-    if not any(h["pid"] == child.pid for h in doc["holders"]):
+    still, _ = ghost_for_pid(doc, child.pid)
+    if still is None:
         gone = True
         break
     time.sleep(0.25)
 assert gone, f"ghost for pid {child.pid} outlived the killed process"
 assert ask({"cmd": "ping"})["ok"] is True, "daemon died during ghosts test"
-print(f"ghosts ok: named pid {child.pid} holding {holder['bytes']}B, gone after kill")
+print(f"ghosts ok: named pid {child.pid} holding {ghost_bytes}B, gone after kill")
+PY
+
+# --- V2.M1: ghosts dedup — one deleted file shared by two pids is ONE ghost
+# with two holders, and its bytes are counted once, not twice
+python3 - "$RD" <<'PY'
+import json, os, socket, sys, tempfile, time
+
+rd = sys.argv[1]
+
+def ask(obj):
+    c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    c.settimeout(10)
+    c.connect(os.path.join(rd, "control.sock"))
+    c.sendall(json.dumps(obj).encode() + b"\n")
+    buf = b""
+    while b"\n" not in buf:
+        chunk = c.recv(65536)
+        if not chunk:
+            break
+        buf += chunk
+    c.close()
+    return json.loads(buf.decode())
+
+f = tempfile.NamedTemporaryFile(delete=False, dir=rd)
+f.write(b"\0" * 65536)
+f.flush()
+os.unlink(f.name)
+
+pid = os.fork()
+if pid == 0:
+    time.sleep(30)  # child: inherits the same fd/inode, holds it open
+    os._exit(0)
+
+try:
+    match = None
+    for _ in range(40):
+        doc = ask({"cmd": "ghosts"})
+        candidates = [g for g in doc["holders"]
+                      if {h["pid"] for h in g["holders"]} >= {os.getpid(), pid}]
+        if candidates:
+            match = candidates[0]
+            break
+        time.sleep(0.25)
+    assert match is not None, f"dedup ghost never saw both pids: {doc}"
+    assert len(candidates) == 1, f"same inode double-counted: {candidates}"
+    assert match["bytes"] >= 65536 * 0.9, match
+    assert len(match["holders"]) == 2, match
+finally:
+    os.kill(pid, 9)
+    os.waitpid(pid, 0)
+    f.close()
+
+assert ask({"cmd": "ping"})["ok"] is True, "daemon died during ghosts dedup test"
+print(f"ghosts dedup ok: one ghost, {len(match['holders'])} holders, "
+      f"{match['bytes']}B counted once")
 PY
 
 # --- M3: ballast — built at startup (test override: bytes, not gigabytes),

@@ -215,14 +215,15 @@ def cmd_ghosts(argv):
     if "--json" in argv:
         print(json.dumps(doc, indent=2))
         return
-    holders = doc.get("holders", [])
-    if not holders:
+    ghosts_list = doc.get("holders", [])
+    if not ghosts_list:
         print("no ghosts — nothing deleted-but-open")
         return
-    for h in holders:
-        mounts = ",".join(h["mounts"]) if h["mounts"] else "?"
-        print(f"  {human_bytes(h['bytes']):>8}  pid {h['pid']:<7} "
-              f"{h['comm']:<16} {h['fds']} fd(s)  on {mounts}")
+    for g in ghosts_list:
+        mounts = ",".join(g["mounts"]) if g["mounts"] else "?"
+        who = ", ".join(f"pid {h['pid']} {h['comm']} ({h['fds']} fd(s))"
+                        for h in g["holders"])
+        print(f"  {human_bytes(g['bytes']):>8}  on {mounts}  held by {who}")
     print(f"{human_bytes(doc['total_bytes'])} held by deleted-but-open files")
 
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.1 — V2.M1: ghosts dedup
+- byebyted ghosts(): groups by (dev, inode) instead of (pid, comm) — a deleted-but-open file shared by N pids is now ONE ghost with an N-entry `holders` list, not N separate ghosts; `total_bytes` no longer double-counts a shared file's size (also sharpens advise's ghosts_heavy rule, which reads total_bytes)
+- byebyte ghosts: renders one line per ghost, listing every holding pid
+- smoke: existing single-holder ghosts test updated for the new shape; new fork-based fixture proves the dedup — one shared deleted fd, two pids, one ghost, bytes counted once
+
 ## 0.6.0 — adopt the sutra backbone (behavior-preserving)
 - vendored bin/sutra.py + bin/sutra.version (sutra 0.1.0, ByeByte is the pilot extraction); byebyted/byebyte now import it as a sibling instead of hand-rolling the same skeleton
 - byebyted: load_config -> sutra.load_config (ballast_bytes test hatch re-applied on top, since sutra doesn't know that key); write_status -> sutra.write_status; the EWMA inline in poll_mount -> sutra.ewma_rate; the Control class deleted in favor of a dispatch closure over cfg/indexer/live_status carrying the unchanged domain commands (scan/why/blame/purge/ghosts/ballast/kernels/advise/burn), served by sutra.ControlServer + allow_uids — ping/status are sutra's job now
