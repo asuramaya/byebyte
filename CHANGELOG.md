@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.1 — fix: `sudo make smoke` (root-run acceptance bar)
+- three of byebyted's test-only escape hatches (`BYEBYTE_TEST_HOME`, `BYEBYTE_TEST_BOOT`, the `ballast_bytes` config override) are non-root-only by design — the daemon must never let an env var or config value redirect where a privileged process touches disk. That's correct and untouched, but it meant `sudo make smoke` broke: root silently fell through to the REAL home/boot/ballast-size instead of the fixtures, failing the hf-hub purge dry-run first (found live by the operator, reproduced by alfred) and would have failed kernels/ballast right after
+- smoke.sh: detects root once (`ROOT_SMOKE`); under root, disables ballast outright (`ballast_gb: 0`, since the real multi-GB build isn't appropriate for a smoke pass and risks this box's own tmpfs quota) and relaxes the hf-hub/kernels assertions to real-data-agnostic invariant checks (still meaningful — no crash, no candidate is ever the running/newest kernel — just not fixture-exact, since root correctly can't be redirected there)
+- unprivileged `make smoke` behavior is unchanged (verified green); the root path was sanity-checked by forcing the new branches without real root (crash-free, correct skip messages) but the actual root-only behavior (BYEBYTE_TEST_HOME/BOOT being refused) still needs a real `sudo make smoke` run to fully confirm
+
 ## 0.7.0 — V2.M2: btrfs truth (read-only)
 - byebyted: `btrfs_info()` — read-only subvolume/snapshot/qgroup accounting via the `btrfs` CLI (optional soft dependency, see packages.txt); `pinned_bytes` sums the EXCLUSIVE bytes held only by snapshots, i.e. data a plain walk of the live tree can never see. No mutation ever (no `quota enable`, no snapshot verbs — that's M4 policy territory). Absent CLI or disabled quotas degrade to a reason string, never an error.
 - status.json: btrfs mounts gain a per-mount `btrfs` section (subvolumes, snapshots, pinned_bytes, quotas_enabled)
