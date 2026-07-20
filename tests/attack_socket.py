@@ -115,6 +115,9 @@ HOSTILE = [
     # even {"dry": false} can never touch disk here — safe to fuzz freely
     {"cmd": "sweep"}, {"cmd": "sweep", "dry": "yes"}, {"cmd": "sweep", "dry": 1},
     {"cmd": "sweep", "dry": None}, {"cmd": "sweep", "dry": []},
+    {"cmd": "sweep", "history": True, "limit": -1},
+    {"cmd": "sweep", "history": True, "limit": "lots"},
+    {"cmd": "sweep", "history": "yes"},
     {"cmd": "wat"}, {"cmd": 123}, {"cmd": None}, {}, {"cmd": []},
 ]
 for msg in HOSTILE:

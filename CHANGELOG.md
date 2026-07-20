@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.1 — ledger field ruling: `target` (UNIFY.md, Alfred V) + sweep --history
+- Alfred V ruled on the ledger field ambiguity flagged in 0.9.0's own release: every NEW ledger line (purge, ballast, sweep) now writes `target` — the family-wide field UNIFY.md's ledger spec names. Lines already on disk before this commit used `path` and are NEVER rewritten (same doctrine as sealed releases: shipped bytes stand); `_ledger_read` treats `path` as a legacy alias so nothing that reads the ledger needs to care which era wrote a given line. UNIFY.md now carries this as a Legacy-fields clause — the pilot's first spec-fix, banked
+- `byebyte sweep --history [--limit N]`: replays past sweep acts/previews from the ledger, most recent first — closes the "CLI verb replays history" line from V2-SPEC.md's M4 shape that 0.9.0 shipped without
+- smoke: the purge ledger assertion updated for `target`; sweep's ledger checks confirm fresh lines use `target`; new `--history` coverage (daemon command + CLI human/--json); attack gains hostile `history`/`limit` inputs
+
 ## 0.9.0 — V2.M4: sweep (the unattended reclaim policy)
 - byebyted: `sweep(force_dry, cfg, indexer)` — double-consent unattended reclaim per docs/V2-SPEC.md M4 and UNIFY.md's ledger/notification specs. Consent #1 is the new `byebyte-sweep.timer` (disabled by default); consent #2 is the new `sweep_categories` config key (list of REGISTRY category ids to arm — validated as a subset, config can never widen beyond the compiled-in registry, same invariant `purge_disabled` already established in the other direction)
 - an unarmed category, or the whole call under `--dry`, only ever previews: reports what it would reclaim and ledgers a `dry_run` entry (only when there's something to report, to keep the ledger from filling with empty "nothing found" lines every timer tick), never touches disk. Armed categories reuse purge's own compiled-in detect/delete functions verbatim to actually reclaim, ledgering `sweep:<category>` per act

@@ -241,7 +241,7 @@ assert os.path.exists(os.path.join(fix, "home", "proj-without-marker",
 ledger_path = os.path.join(rd, "state", "ledger.jsonl")
 with open(ledger_path) as f:
     lines = [json.loads(l) for l in f if l.strip()]
-line = next(l for l in lines if l["path"] == target)
+line = next(l for l in lines if l["target"] == target)
 assert line["category"] == "project-artifacts" and line["status"] == "ok", line
 print(f"purge ledger: {line}")
 
@@ -749,16 +749,25 @@ assert any(l["category"] == "sweep:hf-hub" and l["status"] == "dry_run" for l in
 assert any(l["category"] == "sweep:hf-hub" and l["status"] == "ok" for l in lines), \
     f"the real sweep act never ledgered hf-hub: {lines}"
 
+# history: replays the ledger lines just written, target field (not the
+# legacy path alias — these are freshly-written, post-ruling lines)
+hist = ask({"cmd": "sweep", "history": True, "limit": 10})
+hist_lines = hist["history"]
+assert any(l["category"] == "sweep:hf-hub" and l["status"] == "ok"
+           and l["target"] == hf_hub_path for l in hist_lines), hist_lines
+
 # hostile input: non-bool dry — refused; daemon alive after
 assert "error" in ask({"cmd": "sweep", "dry": "yes"}), "non-bool dry accepted"
 assert ask({"cmd": "ping"})["ok"] is True, "daemon died during sweep test"
 print(f"sweep ok: dry-run previews unarmed categories, armed hf-hub freed "
-      f"{hf['freed_bytes']}B for real, both paths ledgered")
+      f"{hf['freed_bytes']}B for real, both paths ledgered, history replays")
 PY
 
 BYEBYTE_RUNTIME_DIR=$RD python3 bin/byebyte sweep --dry --json | python3 -c \
     "import json,sys; json.load(sys.stdin)" \
     || { echo "SMOKE FAIL: CLI sweep json invalid"; exit 1; }
+BYEBYTE_RUNTIME_DIR=$RD python3 bin/byebyte sweep --history | grep -q "sweep:hf-hub" \
+    || { echo "SMOKE FAIL: CLI sweep --history missing hf-hub"; exit 1; }
 
 # --- M4: make deb — builds a real .deb; contents include bins+units+man.
 # Builds and inspects only — never installed. The log path is per-invocation

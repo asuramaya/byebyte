@@ -356,6 +356,22 @@ def notify_owner(uid, summary, body):
 
 
 def cmd_sweep(argv):
+    if "--history" in argv:
+        limit = int(_flag_val(argv, "--limit", "15"))
+        doc = request_or_die({"cmd": "sweep", "history": True, "limit": limit})
+        if "--json" in argv:
+            print(json.dumps(doc, indent=2))
+            return
+        lines = doc.get("history", [])
+        if not lines:
+            print("sweep: no history yet")
+            return
+        for l in lines:
+            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(l["ts"]))
+            size = f" {human_bytes(l['bytes'])}" if l.get("bytes") else ""
+            print(f"  {when}  {l['category']:<20} {l['status']:<8}{size}  {l['target']}")
+        return
+
     force_dry = "--dry" in argv
     doc = request_or_die({"cmd": "sweep", "dry": force_dry})
     if "--json" in argv:

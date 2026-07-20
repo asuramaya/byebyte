@@ -90,7 +90,7 @@ only; CAP_SYS_ADMIN), each writer also names the directory it's writing
 to, background-aggregated as events arrive \(em not resampled per call.
 Absent the capability, writers are named by pid only, exactly as before.
 .TP
-.B sweep " [\-\-dry]"
+.B sweep " [\-\-dry] [\-\-history [\-\-limit N]]"
 The unattended reclaim policy. Double consent: the
 .I byebyte\-sweep.timer
 unit (disabled by default) is the opt-in to run at all; per-category arming
@@ -112,6 +112,9 @@ Kernel removal is always report-only here, regardless of config \(em running
 .BR apt (8)
 unattended is a separate, not-yet-made decision, kept out of this verb on
 purpose.
+.B \-\-history " [\-\-limit N]"
+replays past sweep acts and previews from the ledger (default 15, most
+recent first).
 .SH EXAMPLES
 .EX
 $ byebyte status

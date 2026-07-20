@@ -117,7 +117,18 @@ The per-directory scan index (sqlite, WAL mode).
 .TP
 .I /var/lib/byebyte/ledger.jsonl
 One JSON line per purge deletion, ballast release, or sweep act/preview:
-timestamp, category, path, bytes, status. Sweep entries prefix the
+timestamp, category,
+.IR target ,
+bytes, status (the family-wide ledger field, UNIFY.md; lines written
+before this field existed used
+.I path
+for the same thing \(em history is never rewritten, but
+.BR byebyte (1)
+sweep
+.B \-\-history
+reads
+.I path
+as a legacy alias). Sweep entries prefix the
 category with
 .IR sweep: ,
 and a

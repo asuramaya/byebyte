@@ -27,7 +27,7 @@ import time
 
 import sutra
 
-VERSION = "0.9.0"
+VERSION = "0.9.1"
 
 RUNTIME_DIR = os.environ.get("BYEBYTE_RUNTIME_DIR", "/run/byebyte")
 STATUS_PATH = os.path.join(RUNTIME_DIR, "status.json")
@@ -1333,15 +1333,36 @@ def kernels():
 LEDGER_PATH = os.path.join(STATE_DIR, "ledger.jsonl")
 
 
-def _ledger_append(ts, category, path, nbytes, status):
+def _ledger_append(ts, category, target, nbytes, status):
+    # UNIFY.md's ledger spec field is `target` (ruled 2026-07-20, Alfred V):
+    # every NEW line across purge/ballast/sweep writes it. Lines already on
+    # disk before this commit used `path` and are never rewritten — history
+    # stands. `_ledger_read` below accepts both.
     try:
         os.makedirs(STATE_DIR, exist_ok=True)
         with open(LEDGER_PATH, "a") as f:
-            f.write(json.dumps({"ts": ts, "category": category, "path": path,
+            f.write(json.dumps({"ts": ts, "category": category, "target": target,
                                  "bytes": nbytes, "status": status},
                                 separators=(",", ":")) + "\n")
     except OSError:
         pass
+
+
+def _ledger_read(limit=None):
+    """Ledger lines, oldest first, `target` normalized (a legacy `path`-keyed
+    line from before the field rename reads as `target` too — writers never
+    touch old lines, readers just don't need to care which era wrote one)."""
+    try:
+        with open(LEDGER_PATH) as f:
+            lines = [json.loads(l) for l in f if l.strip()]
+    except (OSError, ValueError):
+        return []
+    for line in lines:
+        if "target" not in line and "path" in line:
+            line["target"] = line["path"]
+    if limit is not None:
+        lines = lines[-limit:]
+    return lines
 
 
 # --- sweep: the unattended reclaim policy (V2.M4) ---------------------------
@@ -1648,6 +1669,10 @@ def _make_dispatch(cfg, indexer, get_status, path_attr=None):
         if cmd == "burn":
             return burn(_burn_seconds(req), _limit(req), path_attr)
         if cmd == "sweep":
+            if req.get("history"):
+                lines = [l for l in _ledger_read(_limit(req))
+                        if l["category"] == "sweep" or l["category"].startswith("sweep:")]
+                return {"history": lines}
             force_dry = req.get("dry", False)
             if not isinstance(force_dry, bool):
                 raise ValueError("dry must be a bool")
