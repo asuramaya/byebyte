@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.3 — fix: silent `make deb` failure under root
+- alfred's root-run `sudo make smoke` failed at the deb section with no visible error — the log ended cleanly after "-- built ..." and "-- lintian not installed, skipping", yet `make deb` exited nonzero. The prime suspect: the terse `command -v lintian >/dev/null 2>&1 && lintian $(DEBFILE) || echo "..."` one-liner, whose exit status is unambiguous on paper (`(A && B) || C`) but is exactly the kind of clever compound this class of bug hides in
+- rewritten as an explicit `if`/`else`/`fi`: run lintian if present (its own exit code discarded via `|| true` — warnings are just warnings, never a build failure), otherwise print the skip message. Deterministically exits 0 either way; verified here both with lintian genuinely absent (unchanged output) and with a fake lintian simulating a warning-exit (correct output, no misleading "not installed" message, exit 0)
+- bonus catch made while in there: `check-sutra`'s freshness check used `$HOME` to find the canonical sutra checkout, which is `/root` under sudo — silently skipping the check (not failing it) rather than genuinely comparing. Now resolves the real invoking user's home via `SUDO_USER`/`getent passwd`, falling back to `$HOME` when not run under sudo
+- make smoke + make attack green (unprivileged); still needs alfred's next root pass to confirm the actual silent-failure mechanism is gone — I could not reproduce the failure itself without root, only hypothesize and harden against his named suspect
+
 ## 0.8.2 — fix: btrfs pinned_bytes (V2.M2's second live root run)
 - alfred caught this one live with a hand-built raw fixture: `btrfs qgroup show -reF --raw <mount>` — the `-F` filters to qgroups impacting the GIVEN PATH, which at the mount root means only the toplevel qgroup; every child (snapshot) subvolume's qgroup row is excluded entirely. `pinned_bytes` summed exclusive bytes over an intersection with `snap_ids` that was structurally always empty, regardless of anything else being correct
 - fix: drop `-F` — `qgroup show -re --raw` returns every qgroup, toplevel and children alike, matched against snapshot subvolume ids exactly as before. Column format unchanged, so `_parse_qgroup_show` needed no changes, only the flag

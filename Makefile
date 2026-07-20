@@ -22,7 +22,8 @@ check-sutra:
 	    exit 1; \
 	fi; \
 	echo "check-sutra: integrity ok (sutra $$ver, sha256 $$sha)"; \
-	canon="$$HOME/code/REPOS/sutra/sutra.py"; \
+	real_home=$$(getent passwd "$${SUDO_USER:-$$(id -un)}" | cut -d: -f6); \
+	canon="$${real_home:-$$HOME}/code/REPOS/sutra/sutra.py"; \
 	if [ -f "$$canon" ]; then \
 	    if cmp -s bin/sutra.py "$$canon"; then \
 	        echo "check-sutra: freshness ok (matches canonical)"; \
@@ -106,4 +107,8 @@ deb:
 	} > $(DEBROOT)/DEBIAN/control
 	dpkg-deb --build --root-owner-group $(DEBROOT) $(DEBFILE)
 	@echo "-- built $(DEBFILE)"
-	@command -v lintian >/dev/null 2>&1 && lintian $(DEBFILE) || echo "-- lintian not installed, skipping"
+	@if command -v lintian >/dev/null 2>&1; then \
+	    lintian $(DEBFILE) || true; \
+	else \
+	    echo "-- lintian not installed, skipping"; \
+	fi
