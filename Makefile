@@ -2,8 +2,18 @@
 .PHONY: smoke attack install uninstall pill deb check-sutra
 
 VERSION := $(shell tr -d '[:space:]' < VERSION)
-DEBROOT := build/deb/byebyte_$(VERSION)_all
+# DEBROOT is per-invocation-unique (a shared dev box runs concurrent smoke
+# passes — root and unprivileged, different agents — against the SAME
+# checkout; a fixed staging dir raced install/rm-rf across them and
+# produced impossible-looking failures: real nonzero exit, innocent-looking
+# log, because the log/artifacts belonged to a DIFFERENT concurrent
+# invocation). DEBFILE's name stays canonical — it's the real, user-facing
+# release artifact name — but is only ever populated via an atomic rename
+# from a per-invocation temp file, so two concurrent builds can never leave
+# it torn.
+DEBROOT := build/deb/.stage-$(shell mktemp -u XXXXXX)-byebyte_$(VERSION)_all
 DEBFILE := build/deb/byebyte_$(VERSION)_all.deb
+DEBTMP := $(DEBFILE).$(shell mktemp -u XXXXXX).tmp
 
 smoke: check-sutra
 	bash tests/smoke.sh
@@ -105,7 +115,9 @@ deb:
 	  echo " ETA-to-full, an index, purge/ghosts/ballast/kernels/advise, and a GNOME"; \
 	  echo " Quick Settings pill."; \
 	} > $(DEBROOT)/DEBIAN/control
-	dpkg-deb --build --root-owner-group $(DEBROOT) $(DEBFILE)
+	dpkg-deb --build --root-owner-group $(DEBROOT) $(DEBTMP)
+	mv -f $(DEBTMP) $(DEBFILE)
+	rm -rf $(DEBROOT)
 	@echo "-- built $(DEBFILE)"
 	@if command -v lintian >/dev/null 2>&1; then \
 	    lintian $(DEBFILE) || true; \

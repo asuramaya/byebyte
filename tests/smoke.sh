@@ -687,10 +687,18 @@ BYEBYTE_RUNTIME_DIR=$RD python3 bin/byebyte burn --seconds 1 --json | python3 -c
     || { echo "SMOKE FAIL: CLI burn json invalid"; exit 1; }
 
 # --- M4: make deb — builds a real .deb; contents include bins+units+man.
-# Builds and inspects only — never installed.
-make deb > /tmp/byebyte-deb-build.log 2>&1 \
-    || { echo "SMOKE FAIL: make deb failed"; cat /tmp/byebyte-deb-build.log; exit 1; }
-DEBFILE=$(ls -t build/deb/byebyte_*_all.deb | head -1)
+# Builds and inspects only — never installed. The log path is per-invocation
+# unique: a shared dev box runs concurrent smoke passes (root and
+# unprivileged, different agents) against the SAME checkout, and a fixed
+# path let one process's log clobber another's — real failure, innocent-
+# looking evidence. DEBFILE is derived the same deterministic way the
+# Makefile derives it (never "most recently modified" — with concurrent
+# same-version builds that's ambiguous too).
+DEBLOG=$(mktemp --tmpdir=/tmp byebyte-smoke-deb-build.XXXXXX.log)
+make deb > "$DEBLOG" 2>&1 \
+    || { echo "SMOKE FAIL: make deb failed"; cat "$DEBLOG"; rm -f "$DEBLOG"; exit 1; }
+rm -f "$DEBLOG"
+DEBFILE="build/deb/byebyte_$(tr -d '[:space:]' < VERSION)_all.deb"
 CONTENTS=$(dpkg-deb --contents "$DEBFILE")
 for want in usr/bin/byebyted usr/bin/byebyte usr/bin/byebyte-healthcheck \
             usr/bin/byebyte-update usr/bin/sutra.py lib/systemd/system/byebyted.service \
