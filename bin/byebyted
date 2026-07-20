@@ -27,7 +27,7 @@ import time
 
 import sutra
 
-VERSION = "0.8.0"
+VERSION = "0.8.1"
 
 RUNTIME_DIR = os.environ.get("BYEBYTE_RUNTIME_DIR", "/run/byebyte")
 STATUS_PATH = os.path.join(RUNTIME_DIR, "status.json")
@@ -380,6 +380,36 @@ def _parse_qgroup_show(text):
     return out
 
 
+_SHOW_PARENT_UUID = re.compile(r"^\s*Parent UUID:\s*(\S+)")
+_NIL_UUID = "00000000-0000-0000-0000-000000000000"
+
+
+def _parse_subvol_show_parent_uuid(text):
+    """Parent UUID from `btrfs subvolume show`'s output, or None if the
+    field's missing/unparseable. '-' (or the nil UUID) means "no parent" —
+    not a snapshot."""
+    for line in (text or "").splitlines():
+        m = _SHOW_PARENT_UUID.match(line)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _is_snapshot(mountpoint, rel_path):
+    """A subvolume is a snapshot iff it has a real parent — `subvolume
+    show`'s Parent UUID field, which has stayed stable across btrfs-progs
+    versions far better than `subvolume list`'s flag-combination output
+    (V2.M3 root-run found `list -as` unreliable; this is the fix)."""
+    # `list -a`'s path column is relative to the filesystem's top-level
+    # subvolume, not necessarily to `mountpoint` — but for the common case
+    # (mountpoint IS the top-level subvolume, no subvol= mount option) a
+    # leading slash is the only thing that could derail os.path.join
+    parent = _parse_subvol_show_parent_uuid(
+        _btrfs_run(["subvolume", "show"],
+                   os.path.join(mountpoint, rel_path.lstrip("/"))))
+    return parent is not None and parent not in ("-", _NIL_UUID)
+
+
 def btrfs_info(mountpoint):
     """Read-only subvolume/snapshot accounting for one btrfs mount.
 
@@ -391,11 +421,12 @@ def btrfs_info(mountpoint):
     is None."""
     if _btrfs_cli() is None:
         return {"available": False, "reason": "btrfs CLI not found"}
-    all_subvols = _btrfs_run(["subvolume", "list", "-a"], mountpoint)
-    if all_subvols is None:
+    all_subvols_text = _btrfs_run(["subvolume", "list", "-a"], mountpoint)
+    if all_subvols_text is None:
         return {"available": False, "reason": "btrfs subvolume list failed"}
-    snap_ids = set(_parse_subvol_list(
-        _btrfs_run(["subvolume", "list", "-as"], mountpoint)))
+    all_subvols = _parse_subvol_list(all_subvols_text)
+    snap_ids = {sid for sid, path in all_subvols.items()
+                if _is_snapshot(mountpoint, path)}
     qgroups = _parse_qgroup_show(
         _btrfs_run(["qgroup", "show", "-reF", "--raw"], mountpoint))
     pinned_bytes = None
@@ -404,7 +435,7 @@ def btrfs_info(mountpoint):
                            if sid in snap_ids)
     return {
         "available": True,
-        "subvolumes": len(_parse_subvol_list(all_subvols)),
+        "subvolumes": len(all_subvols),
         "snapshots": len(snap_ids),
         "pinned_bytes": pinned_bytes,
         "quotas_enabled": bool(qgroups),

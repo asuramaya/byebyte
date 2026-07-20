@@ -412,7 +412,19 @@ assert qgroups == {256: {"referenced": 1073741824, "exclusive": 536870912},
 # a garbled/unexpected line is skipped, never fatal
 assert mod._parse_subvol_list("not a subvolume line at all\n") == {}
 assert mod._parse_qgroup_show("garbage\n") == {}
-print("btrfs parsing ok: subvolume/qgroup lines parsed, garbage lines skipped")
+
+# `subvolume show`'s Parent UUID field: '-' (no parent) is not a snapshot,
+# a real UUID is (V2.M3 root-run found `list -as` unreliable — this
+# stabler, longer-documented field replaced it as the snapshot signal)
+not_a_snap = mod._parse_subvol_show_parent_uuid(
+    "live\n\tName: \t\t\tlive\n\tUUID: \t\t\tabc\n\tParent UUID: \t\t-\n")
+assert not_a_snap == "-", not_a_snap
+is_a_snap = mod._parse_subvol_show_parent_uuid(
+    "snap1\n\tName: \t\t\tsnap1\n"
+    "\tParent UUID: \t\tf47ac10b-58cc-4372-a567-0e02b2c3d479\n")
+assert is_a_snap == "f47ac10b-58cc-4372-a567-0e02b2c3d479", is_a_snap
+assert mod._parse_subvol_show_parent_uuid("garbage\n") is None
+print("btrfs parsing ok: subvolume/qgroup/parent-uuid lines parsed, garbage lines skipped")
 PY
 
 btrfs_ready=1

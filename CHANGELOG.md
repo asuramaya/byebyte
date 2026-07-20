@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.1 — fix: btrfs snapshot detection (V2.M2's first live root run)
+- alfred's privileged `sudo make smoke` run exercised the btrfs loop-device fixture for the first time and found `snapshots: 0` against a fixture that definitely has one — `btrfs subvolume list -as <mount>` (bundled `-a`+`-s`, "list only snapshots") turned out unreliable live, despite matching documented flag semantics
+- replaced it with `btrfs subvolume show <path>`'s `Parent UUID` field per discovered subvolume — a real (non-`-`) parent UUID means "snapshot of something", and `subvolume show`'s output has stayed far more stable across btrfs-progs versions than `list`'s flag-combination behavior
+- `pinned_bytes` was a trivial consequence of the empty snapshot set (summing exclusive bytes filtered by an empty id set is always 0), not a separate quota-timing bug — the fixture's existing `quota rescan -w` was already correct
+- smoke: new pure-parsing unit test for `_parse_subvol_show_parent_uuid` (no privilege needed); verified here (unprivileged: parsing unit green, live branch still cleanly skipped, no CAP_SYS_ADMIN in this sandbox) — the actual fix needs alfred's next root pass to confirm `snapshots >= 1` and `pinned_bytes` nonzero for real
+
 ## 0.8.0 — V2.M3: burn pid→path attribution
 - byebyted: `PathAttribution` — a background fanotify watch (mount-wide, read-only FAN_MODIFY, root/CAP_SYS_ADMIN only, x86_64) answers WHERE a pid writes, aggregated continuously as events arrive rather than resampled per `burn` call; bounded by the new `burn_path_lru` config key (LRU-evicted). Raw ctypes syscalls (fanotify_init/fanotify_mark) — not vendored into sutra (ruling 86a80778: not a primitive); eBPF not needed, fanotify proved sufficient
 - `burn`'s writers gain an optional `top_path` (the directory with the most write events for that pid); status.json gains a `burn` section (`available`, `top_paths`) refreshed every poll
