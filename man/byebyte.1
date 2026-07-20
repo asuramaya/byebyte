@@ -1,4 +1,4 @@
-.TH BYEBYTE 1 "2026-07-19" "byebyte 0.7.0" "byebyte manual"
+.TH BYEBYTE 1 "2026-07-20" "byebyte 0.8.0" "byebyte manual"
 .SH NAME
 byebyte \- verb CLI for the byebyte storage daemon
 .SH SYNOPSIS
@@ -85,7 +85,10 @@ heavy ghosts, quota headroom running low.
 .B burn " [\-\-seconds N] [\-\-limit N]"
 Live per-process write rates, sampled over
 .I N
-seconds (default 5, clamped 1\(en30).
+seconds (default 5, clamped 1\(en30). When fanotify is available (root
+only; CAP_SYS_ADMIN), each writer also names the directory it's writing
+to, background-aggregated as events arrive \(em not resampled per call.
+Absent the capability, writers are named by pid only, exactly as before.
 .SH EXAMPLES
 .EX
 $ byebyte status

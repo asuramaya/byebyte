@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.0 — V2.M3: burn pid→path attribution
+- byebyted: `PathAttribution` — a background fanotify watch (mount-wide, read-only FAN_MODIFY, root/CAP_SYS_ADMIN only, x86_64) answers WHERE a pid writes, aggregated continuously as events arrive rather than resampled per `burn` call; bounded by the new `burn_path_lru` config key (LRU-evicted). Raw ctypes syscalls (fanotify_init/fanotify_mark) — not vendored into sutra (ruling 86a80778: not a primitive); eBPF not needed, fanotify proved sufficient
+- `burn`'s writers gain an optional `top_path` (the directory with the most write events for that pid); status.json gains a `burn` section (`available`, `top_paths`) refreshed every poll
+- degrade: no CAP_SYS_ADMIN, non-x86_64, or the aggregator thread dying mid-run all fall back to pid-level burn exactly as before — never an error
+- byebyte burn: prints the directory alongside the mount when present
+- man pages: byebyted.8 documents the fanotify watch + `burn_path_lru`; byebyte.1 documents `burn`'s path-naming behavior
+- smoke: status.json shape gains the `burn` section check; the burn fixture asserts `top_path` matches the writer's real directory under root, and asserts its clean absence off root (verified here — no CAP_SYS_ADMIN in this sandbox, so only the degrade path ran; the live fanotify path needs a real root confirmation, same as V2.M2's btrfs branch)
+
 ## 0.7.1 — fix: `sudo make smoke` (root-run acceptance bar)
 - three of byebyted's test-only escape hatches (`BYEBYTE_TEST_HOME`, `BYEBYTE_TEST_BOOT`, the `ballast_bytes` config override) are non-root-only by design — the daemon must never let an env var or config value redirect where a privileged process touches disk. That's correct and untouched, but it meant `sudo make smoke` broke: root silently fell through to the REAL home/boot/ballast-size instead of the fixtures, failing the hf-hub purge dry-run first (found live by the operator, reproduced by alfred) and would have failed kernels/ballast right after
 - smoke.sh: detects root once (`ROOT_SMOKE`); under root, disables ballast outright (`ballast_gb: 0`, since the real multi-GB build isn't appropriate for a smoke pass and risks this box's own tmpfs quota) and relaxes the hf-hub/kernels assertions to real-data-agnostic invariant checks (still meaningful — no crash, no candidate is ever the running/newest kernel — just not fixture-exact, since root correctly can't be redirected there)

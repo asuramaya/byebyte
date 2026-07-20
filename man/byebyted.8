@@ -1,5 +1,5 @@
 '\" t
-.TH BYEBYTED 8 "2026-07-19" "byebyte 0.7.0" "byebyte manual"
+.TH BYEBYTED 8 "2026-07-20" "byebyte 0.8.0" "byebyte manual"
 .SH NAME
 byebyted \- the byebyte storage daemon
 .SH SYNOPSIS
@@ -40,6 +40,21 @@ notice on
 and
 .I blame
 verbs, never an error.
+.PP
+When
+.B CAP_SYS_ADMIN
+is available (root, x86_64), byebyted also runs a background
+.BR fanotify (7)
+watch (mount-wide, read-only, never vendored into the shared skeleton) so
+.BR byebyte (1)'s
+.I burn
+verb can name not just which pid is writing but which directory. Bounded
+memory: the (pid, directory) aggregation is capped at
+.I burn_path_lru
+entries, oldest evicted first. Absent the capability, or on a
+non-x86_64 architecture,
+.I burn
+degrades to naming pids only, exactly as before \(em never an error.
 .SH CONFIGURATION
 Config is the seed, never the master: every key is typed and clamped on
 load; unknown keys are ignored; a tampered config can tune numbers within
@@ -63,6 +78,7 @@ scan_hour@3@0\(en23
 index_min_bytes@1048576@4096\(en2^40
 snapshot_ring@30@2\(en365
 ballast_gb@2@0\(en32 (0 = off)
+burn_path_lru@4096@64\(en65536 (pid/dir pairs kept)
 .TE
 .PP
 List-typed keys (validated as a list of strings, never clamped):
@@ -131,6 +147,12 @@ on x86_64 (other architectures report no quota). This is what catches an
 EDQUOT-on-tmpfs condition that
 .BR df (1)
 cannot see.
+.TP
+.B Path attribution
+.BR fanotify (7)
+is watched mount-wide, read-only (FAN_MODIFY only \(em no permission
+events, nothing is ever blocked or denied); it never mutates the
+filesystem and CAP_SYS_ADMIN is required to even start it.
 .SH SEE ALSO
 .BR byebyte (1),
 .BR byebyte-healthcheck (1),

@@ -87,6 +87,8 @@ for m in doc["mounts"]:
         assert key in m, f"mount missing {key}"
     assert m["state"] in ("ok", "warn", "hot", "edquot"), m["state"]
     assert m["effective_free"] <= m["free"], "effective_free > free"
+assert "available" in doc["burn"] and "top_paths" in doc["burn"], doc.get("burn")
+assert isinstance(doc["burn"]["top_paths"], list), doc["burn"]
 print("shape ok:", len(doc["mounts"]), "mounts")
 PY
 
@@ -606,10 +608,13 @@ BYEBYTE_RUNTIME_DIR=$RD python3 bin/byebyte advise | grep -q "growth" \
     || { echo "SMOKE FAIL: CLI advise missing growth grower"; exit 1; }
 
 # --- M4: burn — a real disk-backed writer is named at its actual rate
-python3 - "$RD" "$BURN_FIX" <<'PY'
+# V2.M3: on root (CAP_SYS_ADMIN), it's also named by directory (fanotify,
+# background-aggregated since daemon startup); off root, that's absent —
+# the clean-degrade path, exactly as documented.
+python3 - "$RD" "$BURN_FIX" "$ROOT_SMOKE" <<'PY'
 import json, os, socket, subprocess, sys, time
 
-rd, burn_fix = sys.argv[1], sys.argv[2]
+rd, burn_fix, root_smoke = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
 
 def ask(obj, timeout=10):
     c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -642,6 +647,15 @@ try:
     writer = next((w for w in doc["writers"] if w["pid"] == child.pid), None)
     assert writer is not None, f"burn never saw pid {child.pid}: {doc}"
     assert writer["bytes_per_sec"] >= 4 * 1024 * 1024, writer
+    if root_smoke:
+        # fanotify only starts with CAP_SYS_ADMIN — under real root it
+        # should have been aggregating events for this writer since the
+        # child's first write, well before this 3s sample window even opens
+        assert writer.get("top_path"), f"no top_path under root: {writer}"
+        assert os.path.realpath(writer["top_path"]) == os.path.realpath(burn_fix), writer
+    else:
+        assert "top_path" not in writer, \
+            f"top_path present without CAP_SYS_ADMIN: {writer}"
 finally:
     child.kill()
     child.wait()
@@ -651,7 +665,8 @@ assert "error" in ask({"cmd": "burn", "seconds": 0}), "seconds=0 accepted"
 assert "error" in ask({"cmd": "burn", "seconds": "ten"}), "non-int seconds accepted"
 assert "error" in ask({"cmd": "burn", "seconds": 5, "limit": -1}), "limit=-1 accepted"
 assert ask({"cmd": "ping"})["ok"] is True, "daemon died after burn abuse"
-print(f"burn ok: named pid {child.pid} at {writer['bytes_per_sec']/1e6:.1f}MB/s, "
+path_note = f", top_path={writer['top_path']}" if writer.get("top_path") else " (no fanotify)"
+print(f"burn ok: named pid {child.pid} at {writer['bytes_per_sec']/1e6:.1f}MB/s{path_note}, "
       "hostile input survived")
 PY
 

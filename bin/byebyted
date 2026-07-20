@@ -16,6 +16,7 @@ import os
 import platform
 import pwd
 import re
+import select
 import shutil
 import signal
 import sqlite3
@@ -26,7 +27,7 @@ import time
 
 import sutra
 
-VERSION = "0.7.1"
+VERSION = "0.8.0"
 
 RUNTIME_DIR = os.environ.get("BYEBYTE_RUNTIME_DIR", "/run/byebyte")
 STATUS_PATH = os.path.join(RUNTIME_DIR, "status.json")
@@ -54,6 +55,7 @@ DEFAULTS = {
     "purge_disabled": [],     # category ids config may switch off — never add
     "journald_vacuum_size": "1G",
     "ballast_gb": 2,          # pre-allocated emergency reserve; 0 = off
+    "burn_path_lru": 4096,    # (pid, dir) pairs kept by burn's fanotify aggregator
 }
 
 CLAMPS = {
@@ -69,6 +71,7 @@ CLAMPS = {
     "index_min_bytes": (4096, 1 << 40),
     "snapshot_ring": (2, 365),
     "ballast_gb": (0, 32),
+    "burn_path_lru": (64, 65536),
 }
 
 
@@ -167,6 +170,162 @@ def quota_headroom(mountpoint, uid):
                 "remaining": max(0, limit - used)}
     finally:
         os.close(fd)
+
+
+# --- burn path attribution: fanotify, root-only (V2.M3) --------------------
+# /proc/<pid>/io (below) answers HOW MUCH a pid writes; fanotify answers
+# WHERE. Mount-wide FAN_MODIFY watch, classic (non-FID) mode so each event
+# carries an fd the kernel already opened — readlink /proc/self/fd/<fd> for
+# the path, no name_to_handle_at/open_by_handle_at needed. CAP_SYS_ADMIN
+# only; unavailable (non-root, non-x86_64, or the syscall itself refused)
+# degrades to pid-level burn exactly as before — never an error, never a
+# required dependency. Do NOT vendor this into sutra (ruling 86a80778: not
+# a primitive) and do NOT reach for eBPF — fanotify is sufficient here.
+_SYS_FANOTIFY_INIT = 300 if platform.machine() == "x86_64" else None
+_SYS_FANOTIFY_MARK = 301 if platform.machine() == "x86_64" else None
+
+_FAN_CLASS_NOTIF = 0x00000000
+_FAN_CLOEXEC = 0x00000001
+_FAN_NONBLOCK = 0x00000002
+_FAN_MARK_ADD = 0x00000001
+_FAN_MARK_MOUNT = 0x00000010
+_FAN_MODIFY = 0x00000002
+_AT_FDCWD = -100
+_FAN_EVENT_METADATA_LEN = 24
+
+
+class _FanotifyEventMetadata(ctypes.Structure):
+    _fields_ = [
+        ("event_len", ctypes.c_uint32),
+        ("vers", ctypes.c_uint8),
+        ("reserved", ctypes.c_uint8),
+        ("metadata_len", ctypes.c_uint16),
+        ("mask", ctypes.c_uint64),
+        ("fd", ctypes.c_int32),
+        ("pid", ctypes.c_int32),
+    ]
+
+
+def _fanotify_init():
+    if _SYS_FANOTIFY_INIT is None:
+        return None
+    fd = _libc.syscall(_SYS_FANOTIFY_INIT,
+                       _FAN_CLASS_NOTIF | _FAN_CLOEXEC | _FAN_NONBLOCK,
+                       os.O_RDONLY)
+    return fd if fd >= 0 else None
+
+
+def _fanotify_mark_mount(fan_fd, mountpoint):
+    if _SYS_FANOTIFY_MARK is None:
+        return False
+    ret = _libc.syscall(_SYS_FANOTIFY_MARK, fan_fd,
+                        _FAN_MARK_ADD | _FAN_MARK_MOUNT, _FAN_MODIFY,
+                        _AT_FDCWD, mountpoint.encode("utf-8"))
+    return ret == 0
+
+
+class PathAttribution:
+    """Background fanotify aggregator: (pid, dir) -> event count, bounded by
+    cfg["burn_path_lru"] (oldest-touched pair evicted first). `available` is
+    False whenever fanotify never started or its reader thread has died —
+    callers degrade to no path data, never an error."""
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self._lock = threading.Lock()
+        self._counts = {}
+        self._order = {}  # insertion/touch order for LRU eviction
+        self.available = False
+        self._fan_fd = None
+
+    def start(self, mounts):
+        fan_fd = _fanotify_init()
+        if fan_fd is None:
+            return
+        marked = 0
+        for m in mounts:
+            if _fanotify_mark_mount(fan_fd, m["mountpoint"]):
+                marked += 1
+        if marked == 0:
+            os.close(fan_fd)
+            return
+        self._fan_fd = fan_fd
+        self.available = True
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def _loop(self):
+        buf_size = _FAN_EVENT_METADATA_LEN * 64
+        try:
+            while True:
+                try:
+                    r, _, _ = select.select([self._fan_fd], [], [], 1.0)
+                except OSError:
+                    return
+                if not r:
+                    continue
+                try:
+                    data = os.read(self._fan_fd, buf_size)
+                except BlockingIOError:
+                    continue
+                except OSError:
+                    return
+                if not data:
+                    return
+                off = 0
+                while off + _FAN_EVENT_METADATA_LEN <= len(data):
+                    ev = _FanotifyEventMetadata.from_buffer_copy(
+                        data[off:off + _FAN_EVENT_METADATA_LEN])
+                    off += ev.event_len if ev.event_len else _FAN_EVENT_METADATA_LEN
+                    if ev.fd < 0:
+                        continue  # FAN_NOFD: queue overflow marker, not a file
+                    try:
+                        target = os.readlink(f"/proc/self/fd/{ev.fd}")
+                    except OSError:
+                        target = None
+                    finally:
+                        try:
+                            os.close(ev.fd)
+                        except OSError:
+                            pass
+                    if target:
+                        self._record(ev.pid, os.path.dirname(target))
+        except OSError:
+            pass
+        finally:
+            self.available = False
+
+    def _record(self, pid, dirpath):
+        key = (pid, dirpath)
+        cap = self.cfg.get("burn_path_lru", 4096)
+        with self._lock:
+            self._counts[key] = self._counts.get(key, 0) + 1
+            self._order.pop(key, None)
+            self._order[key] = None
+            while len(self._order) > cap:
+                oldest = next(iter(self._order))
+                del self._order[oldest]
+                self._counts.pop(oldest, None)
+
+    def top_path(self, pid):
+        """The directory with the most recorded write events for `pid`, or
+        None (fanotify unavailable, or nothing seen yet for this pid)."""
+        if not self.available:
+            return None
+        with self._lock:
+            best = None
+            for (p, path), count in self._counts.items():
+                if p == pid and (best is None or count > best[1]):
+                    best = (path, count)
+        return best[0] if best else None
+
+    def top_n(self, limit):
+        """Top (pid, path) pairs by event count, for status.json."""
+        if not self.available:
+            return []
+        with self._lock:
+            items = sorted(self._counts.items(), key=lambda kv: -kv[1])[:limit]
+        return [{"pid": pid, "path": path, "events": count}
+                for (pid, path), count in items]
 
 
 # --- btrfs: subvolume/snapshot/qgroup truth (V2.M2, read-only) -------------
@@ -1291,7 +1450,7 @@ def _pid_mount(pid, mounts_by_dev):
     return mounts_by_dev.get(devno)
 
 
-def burn(seconds, limit):
+def burn(seconds, limit, path_attr=None):
     try:
         pids = [d for d in os.listdir("/proc") if d.isdigit()]
     except OSError:
@@ -1308,9 +1467,14 @@ def burn(seconds, limit):
         rate = (b1 - b0) / seconds
         if rate <= 0:
             continue
-        rows.append({"pid": int(pid), "comm": _read_comm(pid),
-                     "bytes_per_sec": rate,
-                     "mount": _pid_mount(pid, mounts_by_dev)})
+        row = {"pid": int(pid), "comm": _read_comm(pid),
+               "bytes_per_sec": rate,
+               "mount": _pid_mount(pid, mounts_by_dev)}
+        if path_attr is not None:
+            top = path_attr.top_path(int(pid))
+            if top:
+                row["top_path"] = top
+        rows.append(row)
     rows.sort(key=lambda r: -r["bytes_per_sec"])
     return {"seconds": seconds, "writers": rows[:limit]}
 
@@ -1327,7 +1491,7 @@ def _burn_seconds(req):
 # lives in sutra.ControlServer now. This dispatch closure carries only the
 # domain commands; ping/status are sutra's job.
 
-def _make_dispatch(cfg, indexer, get_status):
+def _make_dispatch(cfg, indexer, get_status, path_attr=None):
     def dispatch(cmd, req):
         if cmd == "scan":
             started = indexer.scan()
@@ -1376,7 +1540,7 @@ def _make_dispatch(cfg, indexer, get_status):
         if cmd == "advise":
             return advise(cfg, get_status(), indexer)
         if cmd == "burn":
-            return burn(_burn_seconds(req), _limit(req))
+            return burn(_burn_seconds(req), _limit(req), path_attr)
         return None
     return dispatch
 
@@ -1402,6 +1566,8 @@ def main():
     latest = {"doc": {"error": "no status yet"}}
     indexer = Indexer(cfg)
     ballast_build(cfg)
+    path_attr = PathAttribution(cfg)
+    path_attr.start(discover_mounts(cfg))
 
     def live_status():
         # the cached doc is up to one poll old — fine for mounts, but the
@@ -1412,7 +1578,7 @@ def main():
                             "scanning": indexer.scanning}
         return doc
 
-    dispatch = _make_dispatch(cfg, indexer, live_status)
+    dispatch = _make_dispatch(cfg, indexer, live_status, path_attr)
     ctl = sutra.ControlServer(SOCKET_PATH, sutra.allow_uids({0, uid}), VERSION,
                               dispatch, live_status, socket_owner=(cfg["owner_uid"], -1))
     ctl.start()
@@ -1429,6 +1595,8 @@ def main():
             "index": {"last_scan": indexer.last_scan_ts,
                       "scanning": indexer.scanning},
             "mounts": rows,
+            "burn": {"available": path_attr.available,
+                     "top_paths": path_attr.top_n(10)},
         }
         latest["doc"] = doc
         write_status(doc, cfg)

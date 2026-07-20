@@ -324,8 +324,9 @@ def cmd_burn(argv):
         return
     for w in writers:
         mount = f"  (writing on {w['mount']})" if w.get("mount") else ""
+        top_path = f"  -> {w['top_path']}" if w.get("top_path") else ""
         print(f"  {human_bytes(w['bytes_per_sec']):>8}/s   pid {w['pid']:<7} "
-              f"{w['comm']:<16}{mount}")
+              f"{w['comm']:<16}{mount}{top_path}")
 
 
 def main():
