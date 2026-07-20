@@ -27,7 +27,7 @@ import time
 
 import sutra
 
-VERSION = "0.8.1"
+VERSION = "0.8.2"
 
 RUNTIME_DIR = os.environ.get("BYEBYTE_RUNTIME_DIR", "/run/byebyte")
 STATUS_PATH = os.path.join(RUNTIME_DIR, "status.json")
@@ -370,7 +370,9 @@ _QGROUP_LINE = re.compile(r"^0/(\d+)\s+(\d+)\s+(\d+)")
 
 def _parse_qgroup_show(text):
     """{subvol_id: {"referenced":, "exclusive":}} from `btrfs qgroup show
-    -reF --raw`'s level-0 (per-subvolume) rows."""
+    -re --raw`'s level-0 (per-subvolume) rows. NOT -F: that filters to
+    qgroups impacting the given path, which at the mount root means only
+    the toplevel qgroup — every child subvolume's row would be excluded."""
     out = {}
     for line in (text or "").splitlines():
         m = _QGROUP_LINE.match(line.strip())
@@ -427,8 +429,13 @@ def btrfs_info(mountpoint):
     all_subvols = _parse_subvol_list(all_subvols_text)
     snap_ids = {sid for sid, path in all_subvols.items()
                 if _is_snapshot(mountpoint, path)}
+    # -F (filter to qgroups impacting the given path) was wrong here: pointed
+    # at the mount root it returns ONLY the toplevel qgroup, excluding every
+    # child subvolume's — meaning the exclusive-sum below always summed an
+    # empty intersection against snap_ids (V2.M2's second live root-run
+    # bug). Dropping it returns every qgroup, toplevel and children alike.
     qgroups = _parse_qgroup_show(
-        _btrfs_run(["qgroup", "show", "-reF", "--raw"], mountpoint))
+        _btrfs_run(["qgroup", "show", "-re", "--raw"], mountpoint))
     pinned_bytes = None
     if qgroups:
         pinned_bytes = sum(q["exclusive"] for sid, q in qgroups.items()

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.2 — fix: btrfs pinned_bytes (V2.M2's second live root run)
+- alfred caught this one live with a hand-built raw fixture: `btrfs qgroup show -reF --raw <mount>` — the `-F` filters to qgroups impacting the GIVEN PATH, which at the mount root means only the toplevel qgroup; every child (snapshot) subvolume's qgroup row is excluded entirely. `pinned_bytes` summed exclusive bytes over an intersection with `snap_ids` that was structurally always empty, regardless of anything else being correct
+- fix: drop `-F` — `qgroup show -re --raw` returns every qgroup, toplevel and children alike, matched against snapshot subvolume ids exactly as before. Column format unchanged, so `_parse_qgroup_show` needed no changes, only the flag
+- snapshot detection itself (0.8.1's Parent UUID fix) is confirmed correct on real hardware: alfred's root run reported `snapshots: 1`
+- unverified in this sandbox as always (no CAP_SYS_ADMIN) — alfred's next root pass covers three proofs at once: root-smoke end-to-end, btrfs live (this fix), and fanotify live (never yet reached)
+
 ## 0.8.1 — fix: btrfs snapshot detection (V2.M2's first live root run)
 - alfred's privileged `sudo make smoke` run exercised the btrfs loop-device fixture for the first time and found `snapshots: 0` against a fixture that definitely has one — `btrfs subvolume list -as <mount>` (bundled `-a`+`-s`, "list only snapshots") turned out unreliable live, despite matching documented flag semantics
 - replaced it with `btrfs subvolume show <path>`'s `Parent UUID` field per discovered subvolume — a real (non-`-`) parent UUID means "snapshot of something", and `subvolume show`'s output has stayed far more stable across btrfs-progs versions than `list`'s flag-combination behavior
