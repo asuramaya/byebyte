@@ -96,7 +96,8 @@ deb:
 	install -m 0644 man/byebyted.8 $(DEBROOT)/usr/share/man/man8/byebyted.8
 	install -m 0644 config/config.json $(DEBROOT)/etc/byebyte/config.json
 	install -m 0644 systemd/system/byebyted.service systemd/system/byebyte-update.service \
-	    systemd/system/byebyte-update.timer $(DEBROOT)/lib/systemd/system/
+	    systemd/system/byebyte-update.timer systemd/system/byebyte-sweep.service \
+	    systemd/system/byebyte-sweep.timer $(DEBROOT)/lib/systemd/system/
 	install -m 0755 packaging/deb/postinst $(DEBROOT)/DEBIAN/postinst
 	install -m 0755 packaging/deb/prerm $(DEBROOT)/DEBIAN/prerm
 	install -m 0755 packaging/deb/postrm $(DEBROOT)/DEBIAN/postrm

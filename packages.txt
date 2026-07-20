@@ -11,3 +11,8 @@ btrfs-progs   # `btrfs` CLI: subvolume/snapshot/qgroup accounting on btrfs
               # a "btrfs accounting unavailable" note instead of an error.
 snapd         # `snap` CLI: backs the snap-old purge category (M3). Absent:
               # that category's detector just returns no candidates.
+libnotify-bin # `notify-send` CLI: the `sweep` verb's toast when an armed
+              # category actually reclaims something (V2.M4, UNIFY.md's
+              # notification spec). Absent, or no active login session for
+              # the owner: sweep still runs and ledgers, it just can't show
+              # a desktop toast — never an error.

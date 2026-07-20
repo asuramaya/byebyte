@@ -88,13 +88,19 @@ else
   chmod 0644 /etc/byebyte/config.json
 fi
 
-# 3. systemd: daemon + daily update-CHECK timer. The timer only ever runs
-# `byebyte-update --check` — it notifies, it never installs unattended
-# (family doctrine: updates are click-to-install).
+# 3. systemd: daemon + daily update-CHECK timer + the sweep timer (both
+# opt-in). update.timer only ever runs `byebyte-update --check` — it
+# notifies, it never installs unattended. sweep.timer runs `byebyte sweep`,
+# which only ACTS on categories explicitly armed in config.json's
+# sweep_categories — everything else stays a dry-run preview regardless of
+# whether this timer is enabled (family doctrine: updates and unattended
+# reclaim are both click-to-install/opt-in, never on by default).
 echo "-- systemd units + enabling"
 install -m 0644 "$SRC/systemd/system/byebyted.service"       "$UNITDIR/byebyted.service"
 install -m 0644 "$SRC/systemd/system/byebyte-update.service" "$UNITDIR/byebyte-update.service"
 install -m 0644 "$SRC/systemd/system/byebyte-update.timer"   "$UNITDIR/byebyte-update.timer"
+install -m 0644 "$SRC/systemd/system/byebyte-sweep.service"  "$UNITDIR/byebyte-sweep.service"
+install -m 0644 "$SRC/systemd/system/byebyte-sweep.timer"    "$UNITDIR/byebyte-sweep.timer"
 systemctl daemon-reload
 systemctl enable byebyted.service
 # `enable --now` on an ALREADY-active unit is a no-op start — it would leave
@@ -128,6 +134,12 @@ cat <<EOF
 
 daily update CHECK is off by default (it's notify-only, never installs). Opt in:
   sudo systemctl enable --now byebyte-update.timer
+
+sweep (unattended reclaim) is off by default — TWO opt-ins needed: this timer,
+AND naming categories in sweep_categories (/etc/byebyte/config.json); nothing
+acts until both are set, and only named categories ever act (everything else
+stays a dry-run, ledgered, notified):
+  sudo systemctl enable --now byebyte-sweep.timer
 
 >>> the GNOME pill is a separate, per-account, NO-ROOT step — as yourself: <<<
   make pill

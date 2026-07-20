@@ -7,6 +7,8 @@ so it still answers even mid-daemon-restart.
 
 import json
 import os
+import pwd
+import subprocess
 import sys
 import time
 
@@ -329,6 +331,76 @@ def cmd_burn(argv):
               f"{w['comm']:<16}{mount}{top_path}")
 
 
+def notify_owner(uid, summary, body):
+    """Best-effort notify-send into the owner's desktop session. Silently
+    does nothing if there's no active login session (bus socket absent) or
+    anything about reaching it fails — a sweep's success never depends on
+    whether a toast could be shown."""
+    if uid is None:
+        return
+    bus = f"/run/user/{uid}/bus"
+    if not os.path.exists(bus):
+        return
+    try:
+        name = pwd.getpwuid(uid).pw_name
+    except KeyError:
+        return
+    try:
+        subprocess.run(
+            ["runuser", "-u", name, "--",
+             "env", f"DBUS_SESSION_BUS_ADDRESS=unix:path={bus}",
+             "notify-send", "-a", "ByeByte", "-u", "normal", summary, body],
+            capture_output=True, timeout=5, check=False)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def cmd_sweep(argv):
+    force_dry = "--dry" in argv
+    doc = request_or_die({"cmd": "sweep", "dry": force_dry})
+    if "--json" in argv:
+        print(json.dumps(doc, indent=2))
+        return
+    results = doc.get("results", [])
+    printed = False
+    for r in results:
+        cat = r["category"]
+        if cat == "kernels":
+            cands = r.get("candidates", [])
+            if cands:
+                print(f"  kernels: {len(cands)} removable (report-only, never auto-removed)")
+                if r.get("apt_line"):
+                    print(f"    {r['apt_line']}")
+                printed = True
+            continue
+        if r["dry_run"]:
+            total = r.get("total_bytes", 0)
+            if not total:
+                continue
+            tag = "armed, --dry preview" if r["armed"] else "not armed"
+            print(f"  [{tag}] {cat}: {human_bytes(total)} would be freed")
+        else:
+            item_results = r.get("results", [])
+            if not item_results:
+                continue  # armed, but nothing was there to reclaim this time
+            freed = r.get("freed_bytes", 0)
+            errors = [x for x in item_results if not x["ok"]]
+            tail = f" ({len(errors)} failed)" if errors else ""
+            print(f"  [armed] {cat}: freed {human_bytes(freed)}{tail}")
+        printed = True
+    if not printed:
+        print("sweep: nothing to report")
+
+    acted = [r for r in results if not r.get("dry_run") and r.get("freed_bytes", 0) > 0]
+    if acted and not force_dry:
+        status = request({"cmd": "status"})
+        uid = (status or {}).get("daemon", {}).get("owner_uid")
+        total_freed = sum(r["freed_bytes"] for r in acted)
+        cats = ", ".join(r["category"] for r in acted)
+        notify_owner(uid, f"swept {human_bytes(total_freed)}",
+                     f"reclaimed from: {cats} — see: byebyte sweep --json")
+
+
 def main():
     argv = sys.argv[1:]
     verb = argv[0] if argv and not argv[0].startswith("-") else "status"
@@ -336,7 +408,7 @@ def main():
     verbs = {"status": cmd_status, "scan": cmd_scan,
              "why": cmd_why, "blame": cmd_blame, "purge": cmd_purge,
              "ghosts": cmd_ghosts, "ballast": cmd_ballast, "kernels": cmd_kernels,
-             "advise": cmd_advise, "burn": cmd_burn}
+             "advise": cmd_advise, "burn": cmd_burn, "sweep": cmd_sweep}
     if verb in verbs:
         verbs[verb](rest)
     elif verb in PLANNED:

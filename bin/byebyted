@@ -27,7 +27,7 @@ import time
 
 import sutra
 
-VERSION = "0.8.4"
+VERSION = "0.9.0"
 
 RUNTIME_DIR = os.environ.get("BYEBYTE_RUNTIME_DIR", "/run/byebyte")
 STATUS_PATH = os.path.join(RUNTIME_DIR, "status.json")
@@ -56,6 +56,8 @@ DEFAULTS = {
     "journald_vacuum_size": "1G",
     "ballast_gb": 2,          # pre-allocated emergency reserve; 0 = off
     "burn_path_lru": 4096,    # (pid, dir) pairs kept by burn's fanotify aggregator
+    "sweep_categories": [],   # REGISTRY category ids armed for sweep's unattended
+                              # ACT path — never validated wider than REGISTRY
 }
 
 CLAMPS = {
@@ -1342,6 +1344,72 @@ def _ledger_append(ts, category, path, nbytes, status):
         pass
 
 
+# --- sweep: the unattended reclaim policy (V2.M4) ---------------------------
+# Double consent, per docs/V2-SPEC.md M4: the systemd timer (opt-in, disabled
+# by default) is consent #1 — nothing runs unattended without it. Per-category
+# arming via sweep_categories config is consent #2 — a category outside that
+# list, or the whole call under force_dry, only ever DRY-RUNS: it reports what
+# it would reclaim and ledgers the preview, never touches disk. Only armed
+# REGISTRY categories (the SAME compiled-in detect/delete pairs purge already
+# uses — config can name which to arm, never add one outside REGISTRY) ever
+# execute for real here.
+#
+# Kernels stay report-only, unconditionally, even when "sweep_categories"
+# somehow named "kernels" (validated away — see below): kernels() carries its
+# own long-standing invariant ("never runs apt") from M3, and actually
+# running apt-get to remove a kernel package unattended is a materially
+# different, higher-stakes capability than automating cache-dir deletion —
+# it needs its own explicit go-ahead, not one bundled silently into this
+# milestone. Ghosts (kill-after-confirm) and ballast (expiry) aren't reclaim
+# categories here at all yet, for the same reason: no policy classifier for
+# "safe to kill" or definition of "expired" has been ruled on.
+
+def sweep(force_dry, cfg, indexer):
+    armed = set(cfg.get("sweep_categories", [])) & set(REGISTRY.keys())
+    results = []
+    for category, (detect, delete) in REGISTRY.items():
+        if category in cfg.get("purge_disabled", []):
+            continue
+        acting = (not force_dry) and category in armed
+        candidates = detect(cfg, indexer)
+        total = sum(c["bytes"] for c in candidates)
+        if not acting:
+            if total > 0:
+                _ledger_append(time.time(), f"sweep:{category}", "(preview)",
+                               total, "dry_run")
+            results.append({
+                "category": category, "armed": category in armed,
+                "dry_run": True,
+                "candidates": [{"path": c["path"], "bytes": c["bytes"]}
+                               for c in candidates],
+                "total_bytes": total,
+            })
+            continue
+        freed = 0
+        item_results = []
+        for c in candidates:
+            ts = time.time()
+            try:
+                delete(c)
+                ok = True
+                freed += c["bytes"]
+            except (OSError, PermissionError):
+                ok = False
+            _ledger_append(ts, f"sweep:{category}", c["path"], c["bytes"],
+                           "ok" if ok else "error")
+            item_results.append({"path": c["path"], "bytes": c["bytes"], "ok": ok})
+        results.append({"category": category, "armed": True, "dry_run": False,
+                        "freed_bytes": freed, "results": item_results})
+
+    kdoc = kernels()
+    kcandidates = kdoc.get("candidates", [])
+    if kcandidates:
+        _ledger_append(time.time(), "sweep:kernels", "(preview)", 0, "dry_run")
+    results.append({"category": "kernels", "armed": False, "dry_run": True,
+                    "candidates": kcandidates, "apt_line": kdoc.get("apt_line")})
+    return {"force_dry": bool(force_dry), "results": results}
+
+
 # --- advise: a rule engine over the index + live status ---------------------
 
 def _index_mtime_for(indexer, path):
@@ -1579,6 +1647,11 @@ def _make_dispatch(cfg, indexer, get_status, path_attr=None):
             return advise(cfg, get_status(), indexer)
         if cmd == "burn":
             return burn(_burn_seconds(req), _limit(req), path_attr)
+        if cmd == "sweep":
+            force_dry = req.get("dry", False)
+            if not isinstance(force_dry, bool):
+                raise ValueError("dry must be a bool")
+            return sweep(force_dry, cfg, indexer)
         return None
     return dispatch
 
@@ -1629,7 +1702,8 @@ def main():
             "v": 1,
             "ts": now,
             "daemon": {"version": VERSION, "pid": os.getpid(),
-                       "poll_interval": cfg["poll_interval"]},
+                       "poll_interval": cfg["poll_interval"],
+                       "owner_uid": cfg["owner_uid"]},
             "index": {"last_scan": indexer.last_scan_ts,
                       "scanning": indexer.scanning},
             "mounts": rows,

@@ -1,0 +1,18 @@
+[Unit]
+Description=byebyte sweep — unattended reclaim (armed categories only)
+Documentation=https://github.com/asuramaya/byebyte
+After=byebyted.service
+Requires=byebyted.service
+
+[Service]
+Type=oneshot
+# The CLI is a thin socket client; byebyted (already running, already root)
+# does the actual privileged reclaim work. Runs as root only so the socket
+# connects unconditionally (the peercred gate allows root or owner_uid) —
+# sweep itself never touches disk directly, and every act it triggers is
+# ledgered by the daemon regardless of who asked for it.
+ExecStart=/usr/local/bin/byebyte sweep
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=no

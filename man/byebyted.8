@@ -1,5 +1,5 @@
 '\" t
-.TH BYEBYTED 8 "2026-07-20" "byebyte 0.8.0" "byebyte manual"
+.TH BYEBYTED 8 "2026-07-20" "byebyte 0.9.0" "byebyte manual"
 .SH NAME
 byebyted \- the byebyte storage daemon
 .SH SYNOPSIS
@@ -55,6 +55,19 @@ entries, oldest evicted first. Absent the capability, or on a
 non-x86_64 architecture,
 .I burn
 degrades to naming pids only, exactly as before \(em never an error.
+.PP
+.BR byebyte-sweep.timer ,
+disabled by default, drives
+.BR byebyte (1)'s
+.I sweep
+verb for unattended reclaim. Double consent: the timer enabled is opt-in
+#1; naming a category in
+.I sweep_categories
+(below) is opt-in #2 \(em without both, sweep only ever previews and
+ledgers, never deletes. Reclaim reuses
+.IR purge 's
+own compiled-in category registry verbatim, so the same invariant governs:
+config can arm a category, never invent one.
 .SH CONFIGURATION
 Config is the seed, never the master: every key is typed and clamped on
 load; unknown keys are ignored; a tampered config can tune numbers within
@@ -83,10 +96,16 @@ burn_path_lru@4096@64\(en65536 (pid/dir pairs kept)
 .PP
 List-typed keys (validated as a list of strings, never clamped):
 .IR include_fstypes ", " tmpfs_mounts ", " exclude_mounts ", " scan_roots ", "
-.IR purge_disabled .
+.IR purge_disabled ", " sweep_categories .
 .I purge_disabled
 may only name existing category ids to switch off \(em it can never add a
 path or a category the daemon doesn't already compile in.
+.I sweep_categories
+may only name existing category ids to arm for
+.IR sweep 's
+unattended ACT path (same invariant, opposite direction: naming one
+enables acting on it, and only on it \(em never widens beyond the
+compiled-in registry).
 .SH FILES
 .TP
 .I /etc/byebyte/config.json
@@ -97,8 +116,13 @@ overwritten on reinstall.
 The per-directory scan index (sqlite, WAL mode).
 .TP
 .I /var/lib/byebyte/ledger.jsonl
-One JSON line per purge deletion or ballast release: timestamp, category,
-path, bytes, status.
+One JSON line per purge deletion, ballast release, or sweep act/preview:
+timestamp, category, path, bytes, status. Sweep entries prefix the
+category with
+.IR sweep: ,
+and a
+.I dry_run
+status means it was a preview, never a deletion.
 .TP
 .I /var/lib/byebyte/ballast/
 Pre-allocated emergency-reserve slabs.
@@ -153,6 +177,16 @@ cannot see.
 is watched mount-wide, read-only (FAN_MODIFY only \(em no permission
 events, nothing is ever blocked or denied); it never mutates the
 filesystem and CAP_SYS_ADMIN is required to even start it.
+.TP
+.B Sweep double consent
+Unattended reclaim needs two independent opt-ins: the
+.I byebyte-sweep.timer
+unit enabled, AND the category named in
+.IR sweep_categories .
+Either one missing means every category only ever previews and ledgers a
+.I dry_run
+entry \(em nothing is deleted. Kernel removal is never armable through
+this path at all; it stays report-only regardless of config.
 .SH SEE ALSO
 .BR byebyte (1),
 .BR byebyte-healthcheck (1),

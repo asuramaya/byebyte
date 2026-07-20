@@ -1,4 +1,4 @@
-.TH BYEBYTE 1 "2026-07-20" "byebyte 0.8.0" "byebyte manual"
+.TH BYEBYTE 1 "2026-07-20" "byebyte 0.9.0" "byebyte manual"
 .SH NAME
 byebyte \- verb CLI for the byebyte storage daemon
 .SH SYNOPSIS
@@ -89,6 +89,29 @@ seconds (default 5, clamped 1\(en30). When fanotify is available (root
 only; CAP_SYS_ADMIN), each writer also names the directory it's writing
 to, background-aggregated as events arrive \(em not resampled per call.
 Absent the capability, writers are named by pid only, exactly as before.
+.TP
+.B sweep " [\-\-dry]"
+The unattended reclaim policy. Double consent: the
+.I byebyte\-sweep.timer
+unit (disabled by default) is the opt-in to run at all; per-category arming
+via
+.I sweep_categories
+in
+.I config.json
+(a subset of
+.IR purge 's
+own compiled-in categories \(em config can never widen it) is the opt-in to
+actually
+.B act
+rather than preview. An unarmed category, or the whole call under
+.BR \-\-dry ,
+only ever previews and ledgers a
+.I dry_run
+entry; only armed categories delete anything, and every act is ledgered.
+Kernel removal is always report-only here, regardless of config \(em running
+.BR apt (8)
+unattended is a separate, not-yet-made decision, kept out of this verb on
+purpose.
 .SH EXAMPLES
 .EX
 $ byebyte status

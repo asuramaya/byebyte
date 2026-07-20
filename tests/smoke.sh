@@ -61,7 +61,8 @@ BALLAST_CFG='"ballast_bytes": 1048576'
 
 cat > "$RD/config.json" <<EOF
 {"poll_interval": 1, "owner_uid": $(id -u),
- "scan_roots": ["$FIX"], "index_min_bytes": 4096, $BALLAST_CFG}
+ "scan_roots": ["$FIX"], "index_min_bytes": 4096, $BALLAST_CFG,
+ "sweep_categories": ["hf-hub"]}
 EOF
 
 BYEBYTE_RUNTIME_DIR=$RD BYEBYTE_STATE_DIR=$RD/state BYEBYTE_TEST_HOME=$HOME_FIX \
@@ -686,6 +687,79 @@ BYEBYTE_RUNTIME_DIR=$RD python3 bin/byebyte burn --seconds 1 --json | python3 -c
     "import json,sys; json.load(sys.stdin)" \
     || { echo "SMOKE FAIL: CLI burn json invalid"; exit 1; }
 
+# --- V2.M4: sweep — dry-run previews unarmed categories, armed ones act for
+# real, both ledgered. hf-hub is armed via config.json's sweep_categories
+# (set at the top); every other category stays unarmed here, so both paths
+# are exercised in one pass. Runs AFTER the M3 purge section on purpose — that
+# section's own hf-hub dry-run check needs the fixture still intact, and this
+# one is what finally deletes it (for real, since it's armed).
+python3 - "$RD" "$FIX" <<'PY'
+import json, os, socket, sys
+
+rd, fix = sys.argv[1], sys.argv[2]
+
+def ask(obj):
+    c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    c.settimeout(10)
+    c.connect(os.path.join(rd, "control.sock"))
+    c.sendall(json.dumps(obj).encode() + b"\n")
+    buf = b""
+    while b"\n" not in buf:
+        chunk = c.recv(65536)
+        if not chunk:
+            break
+        buf += chunk
+    c.close()
+    return json.loads(buf.decode())
+
+hf_hub_path = os.path.join(fix, "home", ".cache", "huggingface", "hub", "models--test--x")
+assert os.path.isdir(hf_hub_path), "fixture vanished before the sweep test ran"
+
+# forced dry (dry=True): NOTHING acts, even the armed category
+preview = ask({"cmd": "sweep", "dry": True})
+by_cat = {r["category"]: r for r in preview["results"]}
+assert by_cat["hf-hub"]["armed"] is True, by_cat["hf-hub"]
+assert by_cat["hf-hub"]["dry_run"] is True, by_cat["hf-hub"]
+assert by_cat["hf-hub"]["total_bytes"] > 0, by_cat["hf-hub"]
+assert by_cat["pip-cache"]["armed"] is False, by_cat["pip-cache"]
+assert os.path.isdir(hf_hub_path), "forced-dry sweep touched disk"
+
+# real run (dry=False): hf-hub (armed) acts for real; everything else previews
+real = ask({"cmd": "sweep", "dry": False})
+by_cat = {r["category"]: r for r in real["results"]}
+hf = by_cat["hf-hub"]
+assert hf["armed"] is True and hf["dry_run"] is False, hf
+assert hf["freed_bytes"] > 0, hf
+assert not os.path.isdir(hf_hub_path), "sweep armed hf-hub but didn't delete it"
+unarmed = by_cat["pip-cache"]
+assert unarmed["dry_run"] is True and unarmed["armed"] is False, unarmed
+
+# kernels: always report-only regardless of anything in sweep_categories —
+# running apt-get to remove one for real is a separate authorization, never
+# bundled into this milestone (see byebyted.py's sweep() docstring)
+kern = by_cat["kernels"]
+assert kern["dry_run"] is True and kern["armed"] is False, kern
+
+# ledger: the forced-dry preview AND the real act both left a line
+ledger_path = os.path.join(rd, "state", "ledger.jsonl")
+with open(ledger_path) as f:
+    lines = [json.loads(l) for l in f if l.strip()]
+assert any(l["category"] == "sweep:hf-hub" and l["status"] == "dry_run" for l in lines), \
+    f"the forced-dry preview never ledgered hf-hub: {lines}"
+assert any(l["category"] == "sweep:hf-hub" and l["status"] == "ok" for l in lines), \
+    f"the real sweep act never ledgered hf-hub: {lines}"
+
+# hostile input: non-bool dry — refused; daemon alive after
+assert "error" in ask({"cmd": "sweep", "dry": "yes"}), "non-bool dry accepted"
+assert ask({"cmd": "ping"})["ok"] is True, "daemon died during sweep test"
+print(f"sweep ok: dry-run previews unarmed categories, armed hf-hub freed "
+      f"{hf['freed_bytes']}B for real, both paths ledgered")
+PY
+
+BYEBYTE_RUNTIME_DIR=$RD python3 bin/byebyte sweep --dry --json | python3 -c \
+    "import json,sys; json.load(sys.stdin)" \
+    || { echo "SMOKE FAIL: CLI sweep json invalid"; exit 1; }
+
 # --- M4: make deb — builds a real .deb; contents include bins+units+man.
 # Builds and inspects only — never installed. The log path is per-invocation
 # unique: a shared dev box runs concurrent smoke passes (root and
@@ -704,6 +778,8 @@ for want in usr/bin/byebyted usr/bin/byebyte usr/bin/byebyte-healthcheck \
             usr/bin/byebyte-update usr/bin/sutra.py lib/systemd/system/byebyted.service \
             lib/systemd/system/byebyte-update.service \
             lib/systemd/system/byebyte-update.timer \
+            lib/systemd/system/byebyte-sweep.service \
+            lib/systemd/system/byebyte-sweep.timer \
             usr/share/man/man1/byebyte.1 usr/share/man/man8/byebyted.8 \
             etc/byebyte/config.json; do
     echo "$CONTENTS" | grep -q "$want" \

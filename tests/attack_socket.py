@@ -86,7 +86,7 @@ def alive(where):
 
 # ------------------------------------------------------------- command surface
 print("== command-surface hostile fuzz (scan/why/blame/purge/ghosts/"
-      "ballast/kernels/advise/burn) ==")
+      "ballast/kernels/advise/burn/sweep) ==")
 HOSTILE = [
     {"cmd": "status"}, {"cmd": "scan"}, {"cmd": "scan", "extra": "garbage"},
     {"cmd": "why"}, {"cmd": "why", "path": 123}, {"cmd": "why", "path": []},
@@ -111,6 +111,10 @@ HOSTILE = [
     {"cmd": "burn", "seconds": -5}, {"cmd": "burn", "seconds": "ten"},
     {"cmd": "burn", "seconds": 1, "limit": -1},
     {"cmd": "burn", "seconds": None},
+    # sweep_categories is empty in this fixture's config (nothing armed), so
+    # even {"dry": false} can never touch disk here — safe to fuzz freely
+    {"cmd": "sweep"}, {"cmd": "sweep", "dry": "yes"}, {"cmd": "sweep", "dry": 1},
+    {"cmd": "sweep", "dry": None}, {"cmd": "sweep", "dry": []},
     {"cmd": "wat"}, {"cmd": 123}, {"cmd": None}, {}, {"cmd": []},
 ]
 for msg in HOSTILE:

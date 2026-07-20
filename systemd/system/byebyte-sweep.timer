@@ -1,0 +1,16 @@
+[Unit]
+Description=byebyte sweep — periodic unattended reclaim
+
+# NOT enabled by install.sh, and never should be: this is consent #1 of
+# sweep's double-consent model (docs/V2-SPEC.md M4) — enabling this timer is
+# the operator's own deliberate opt-in to unattended reclaim running at all.
+# Consent #2 lives in config.json's sweep_categories: even with this timer
+# running, only categories explicitly armed there ever ACT — everything else
+# stays a dry-run preview, ledgered but untouched.
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=1d
+Persistent=true
+
+[Install]
+WantedBy=timers.target

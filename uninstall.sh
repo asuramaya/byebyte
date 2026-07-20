@@ -31,14 +31,16 @@ fi
 
 echo "== byebyte uninstaller =="
 
-echo "-- stopping service + update timer"
-systemctl disable --now byebyted.service byebyte-update.timer byebyte-update.service 2>/dev/null || true
+echo "-- stopping service + timers"
+systemctl disable --now byebyted.service byebyte-update.timer byebyte-update.service \
+  byebyte-sweep.timer byebyte-sweep.service 2>/dev/null || true
 
 echo "-- removing files"
 for b in byebyted byebyte byebyte-healthcheck byebyte-update; do
   rm -f "$BINDIR/$b"
 done
-rm -f "$UNITDIR/byebyted.service" "$UNITDIR/byebyte-update.service" "$UNITDIR/byebyte-update.timer"
+rm -f "$UNITDIR/byebyted.service" "$UNITDIR/byebyte-update.service" "$UNITDIR/byebyte-update.timer" \
+      "$UNITDIR/byebyte-sweep.service" "$UNITDIR/byebyte-sweep.timer"
 rm -rf "$SHAREDIR"
 rm -f "$PREFIX/share/man/man1/byebyte.1" "$PREFIX/share/man/man8/byebyted.8"
 systemctl daemon-reload
