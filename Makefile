@@ -90,6 +90,7 @@ deb:
 	install -d -m 0755 $(DEBROOT)/lib/systemd/system
 	install -m 0755 bin/byebyted bin/byebyte bin/byebyte-healthcheck bin/byebyte-update $(DEBROOT)/usr/bin/
 	install -m 0644 bin/sutra.py $(DEBROOT)/usr/bin/sutra.py
+	install -m 0644 bin/sutra_update.py $(DEBROOT)/usr/bin/sutra_update.py
 	install -m 0644 VERSION $(DEBROOT)/usr/share/byebyte/VERSION
 	install -m 0755 scripts/seed-owner-uid.py $(DEBROOT)/usr/share/byebyte/scripts/
 	install -m 0644 man/byebyte.1 $(DEBROOT)/usr/share/man/man1/byebyte.1
@@ -108,7 +109,7 @@ deb:
 	  echo "Section: admin"; \
 	  echo "Priority: optional"; \
 	  echo "Architecture: all"; \
-	  echo "Depends: python3 (>= 3.8), systemd"; \
+	  echo "Depends: python3 (>= 3.8), systemd, openssh-client"; \
 	  echo "Maintainer: asuramaya <asuramaya@users.noreply.github.com>"; \
 	  echo "Homepage: https://github.com/asuramaya/byebyte"; \
 	  echo "Description: storage as a deadline, not a percentage"; \

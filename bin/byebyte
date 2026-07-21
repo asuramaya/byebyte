@@ -417,6 +417,23 @@ def cmd_sweep(argv):
                      f"reclaimed from: {cats} — see: byebyte sweep --json")
 
 
+def cmd_update(argv):
+    """Delegate straight to byebyte-update (execvp — its exit code becomes
+    ours). `byebyte update --check --json` is the pill's UpdateSurface
+    checking for a newer release without needing pkexec; a bare `byebyte
+    update` is the manual-install consent tier."""
+    binary = "byebyte-update"
+    path = binary  # last resort: PATH lookup
+    for cand in (f"/usr/bin/{binary}", f"/usr/local/bin/{binary}"):
+        if os.path.exists(cand):
+            path = cand
+            break
+    try:
+        os.execvp(path, [binary, *argv])
+    except OSError as e:
+        sys.exit(f"cannot run {binary}: {e}")
+
+
 def main():
     argv = sys.argv[1:]
     verb = argv[0] if argv and not argv[0].startswith("-") else "status"
@@ -424,7 +441,8 @@ def main():
     verbs = {"status": cmd_status, "scan": cmd_scan,
              "why": cmd_why, "blame": cmd_blame, "purge": cmd_purge,
              "ghosts": cmd_ghosts, "ballast": cmd_ballast, "kernels": cmd_kernels,
-             "advise": cmd_advise, "burn": cmd_burn, "sweep": cmd_sweep}
+             "advise": cmd_advise, "burn": cmd_burn, "sweep": cmd_sweep,
+             "update": cmd_update}
     if verb in verbs:
         verbs[verb](rest)
     elif verb in PLANNED:

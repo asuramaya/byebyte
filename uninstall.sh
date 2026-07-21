@@ -39,6 +39,7 @@ echo "-- removing files"
 for b in byebyted byebyte byebyte-healthcheck byebyte-update; do
   rm -f "$BINDIR/$b"
 done
+rm -f "$BINDIR/sutra.py" "$BINDIR/sutra_update.py"
 rm -f "$UNITDIR/byebyted.service" "$UNITDIR/byebyte-update.service" "$UNITDIR/byebyte-update.timer" \
       "$UNITDIR/byebyte-sweep.service" "$UNITDIR/byebyte-sweep.timer"
 rm -rf "$SHAREDIR"

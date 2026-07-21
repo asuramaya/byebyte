@@ -27,7 +27,7 @@ import time
 
 import sutra
 
-VERSION = "0.9.1"
+VERSION = "0.10.0"
 
 RUNTIME_DIR = os.environ.get("BYEBYTE_RUNTIME_DIR", "/run/byebyte")
 STATUS_PATH = os.path.join(RUNTIME_DIR, "status.json")

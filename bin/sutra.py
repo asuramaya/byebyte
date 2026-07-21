@@ -39,8 +39,9 @@ import signal
 import socket
 import struct
 import threading
+import time
 
-SUTRA_VERSION = "0.1.0"
+SUTRA_VERSION = "0.2.0"
 
 
 # --- config: the seed, never the master -------------------------------------
@@ -286,3 +287,38 @@ def read_status(status_path):
             return json.load(f)
     except (OSError, ValueError):
         return None
+
+
+# --- health: the vitals verdict every healthcheck bin repeats ---------------
+# Freshness judged against the daemon's OWN declared poll_interval, never a
+# magic number — a config that slows polling to 10min must not fake an
+# outage (ByeByte/RAMstein's originals agreed on this, independently). Same
+# 3x+5s slack as pill.js's isStale, so a stale status reads identically from
+# a CLI healthcheck and a GNOME pill. Passive: it renders a verdict, it never
+# restarts anything — that stays each pill's call (systemd's Restart=, or
+# nothing, per pill).
+
+def check_health(status_path, socket_path, default_poll=30, ping_timeout=5):
+    """(healthy, reason, info) — info carries whatever's known even on
+    failure (age/limit, then version once ping succeeds), so a caller can
+    report detail without re-deriving it."""
+    doc = read_status(status_path)
+    if doc is None:
+        return False, f"no readable status.json at {status_path}", {}
+    try:
+        ts = float(doc["ts"])
+        poll = float(doc.get("daemon", {}).get("poll_interval", default_poll))
+    except (KeyError, TypeError, ValueError):
+        return False, "status.json missing/invalid ts", {}
+    if not poll > 0:
+        return False, f"status.json declares a nonsense poll_interval ({poll})", {}
+    age = time.time() - ts
+    limit = 3 * poll + 5
+    info = {"age": age, "limit": limit}
+    if age > limit:
+        return False, f"status.json stale ({age:.0f}s old, limit {limit:.0f}s)", info
+    resp = request(socket_path, {"cmd": "ping"}, timeout=ping_timeout)
+    if not (isinstance(resp, dict) and resp.get("ok") is True):
+        return False, f"control socket ping failed: {resp!r}", info
+    info["version"] = resp.get("version", "?")
+    return True, "healthy", info

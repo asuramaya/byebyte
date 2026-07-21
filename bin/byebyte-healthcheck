@@ -3,89 +3,33 @@
 # Copyright (C) 2026 asuramaya and byebyte contributors
 """byebyte-healthcheck — are the daemon's vitals good?
 
-Exit 0 when healthy, nonzero with a one-line reason when not. Two checks,
-matching what the CLI and pill actually depend on:
-
-  1. status.json exists, parses, and is fresher than 3x the poll_interval
-     the daemon itself declared inside it (the seam is only trustworthy
-     while it's being rewritten);
-  2. control.sock answers {"cmd":"ping"} with ok:true (the daemon is not
-     just alive-on-disk but alive-and-answering).
+Thin wrapper over sutra.check_health (UNIFY Wave A #3): status.json fresh
+against the daemon's own declared poll_interval, control.sock answering
+ping. Exit 0 when healthy, nonzero with a one-line reason when not.
 
 Passive by design: it diagnoses and reports, it never restarts anything —
 systemd's Restart= owns recovery, and a monitoring probe that mutates what
-it measures can't be trusted. stdlib only, by constitution. Honors
-BYEBYTE_RUNTIME_DIR exactly like byebyted and byebyte do.
+it measures can't be trusted. Honors BYEBYTE_RUNTIME_DIR exactly like
+byebyted and byebyte do.
 """
 
-import json
 import os
-import socket
 import sys
-import time
+
+import sutra
 
 RUNTIME_DIR = os.environ.get("BYEBYTE_RUNTIME_DIR", "/run/byebyte")
 STATUS_PATH = os.path.join(RUNTIME_DIR, "status.json")
 SOCKET_PATH = os.path.join(RUNTIME_DIR, "control.sock")
 
 
-def fail(reason):
-    print(f"byebyte-healthcheck: UNHEALTHY — {reason}")
-    sys.exit(1)
-
-
-def check_status():
-    """Freshness against the daemon's OWN declared cadence, not a magic
-    number: a config that slows polling to 10min must not fake an outage."""
-    try:
-        mtime = os.stat(STATUS_PATH).st_mtime
-    except OSError:
-        fail(f"{STATUS_PATH} missing — daemon never wrote status "
-             "(is byebyted running?)")
-    try:
-        with open(STATUS_PATH) as f:
-            doc = json.load(f)
-        interval = float(doc["daemon"]["poll_interval"])
-        if not interval > 0:
-            raise ValueError(interval)
-    except (OSError, ValueError, KeyError, TypeError):
-        fail(f"{STATUS_PATH} unreadable or malformed")
-    age = time.time() - mtime
-    if age > 3 * interval:
-        fail(f"status.json stale ({age:.0f}s old, poll_interval is "
-             f"{interval:.0f}s — daemon wedged?)")
-    return age
-
-
-def check_ping():
-    try:
-        conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        conn.settimeout(5)
-        conn.connect(SOCKET_PATH)
-        conn.sendall(b'{"cmd":"ping"}\n')
-        buf = b""
-        while b"\n" not in buf:
-            chunk = conn.recv(4096)
-            if not chunk:
-                break
-            buf += chunk
-        conn.close()
-    except OSError as exc:
-        fail(f"{SOCKET_PATH}: {exc} — daemon not answering")
-    try:
-        resp = json.loads(buf.decode())
-    except ValueError:
-        fail("control.sock spoke garbage to ping")
-    if not (isinstance(resp, dict) and resp.get("ok") is True):
-        fail(f"ping not ok: {resp!r}")
-    return resp.get("version", "?")
-
-
 def main():
-    age = check_status()
-    version = check_ping()
-    print(f"byebyte-healthcheck: ok (status {age:.0f}s old, "
-          f"byebyted {version} answering)")
+    healthy, reason, info = sutra.check_health(STATUS_PATH, SOCKET_PATH)
+    if not healthy:
+        print(f"byebyte-healthcheck: UNHEALTHY — {reason}")
+        return 1
+    print(f"byebyte-healthcheck: ok (status {info['age']:.0f}s old, "
+          f"byebyted {info['version']} answering)")
     return 0
 
 

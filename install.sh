@@ -58,6 +58,14 @@ echo "-- binaries -> $BINDIR"
 for b in byebyted byebyte byebyte-healthcheck byebyte-update; do
   install -m 0755 -o root -g root "$SRC/bin/$b" "$BINDIR/$b"
 done
+# sutra + sutra_update are imported modules, not entry points (0644, no
+# +x) — but they're siblings byebyted/byebyte/byebyte-healthcheck/
+# byebyte-update all `import`, straight from BINDIR, exactly like Python's
+# own script-directory sys.path[0] rule expects. The .deb has always done
+# this (Makefile's deb: target); install.sh had fallen behind since sutra's
+# adoption — a source install would ModuleNotFoundError without this.
+install -m 0644 -o root -g root "$SRC/bin/sutra.py" "$BINDIR/sutra.py"
+install -m 0644 -o root -g root "$SRC/bin/sutra_update.py" "$BINDIR/sutra_update.py"
 install -d -m 0755 "$SHAREDIR"
 install -m 0644 "$SRC/VERSION" "$SHAREDIR/VERSION"
 

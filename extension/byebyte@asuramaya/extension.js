@@ -2,57 +2,33 @@
 // Copyright (C) 2026 asuramaya and ByeByte contributors
 //
 // ByeByte — storage as a deadline, not a percentage, in a GNOME Quick
-// Settings pill. Reads the daemon's status snapshot; M1 is read-only
-// (the purge/ballast levers arrive with M3 and will talk to the socket).
+// Settings pill. Reads the daemon's status snapshot; talks to the socket
+// for the purge/ballast/sweep levers.
 
 import GObject from 'gi://GObject';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 
-import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
-import {QuickMenuToggle, SystemIndicator} from 'resource:///org/gnome/shell/ui/quickSettings.js';
+import {QuickMenuToggle} from 'resource:///org/gnome/shell/ui/quickSettings.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
+import * as Pill from './pill.js';
+
 const STATUS_PATH = '/run/byebyte/status.json';
+const {PALETTE} = Pill;
+const {DIM, ACCENT} = PALETTE;
 
 const ICON = 'drive-harddisk-symbolic';
 
-// concept palette (family)
-const ACCENT = '#b9acff';
-const DIM = '#9aa0a6';
-const GOOD = '#4caf50';
-const WARN = '#ffbb33';
-const BAD = '#ff5b5b';
-
-const STATE_COLOR = {ok: GOOD, warn: WARN, hot: BAD, edquot: BAD};
+const STATE_COLOR = {ok: PALETTE.GOOD, warn: PALETTE.WARN, hot: PALETTE.BAD, edquot: PALETTE.BAD};
 const STATE_MARK = {ok: '', warn: '⚠ ', hot: '‼ ', edquot: '✗ '};
 
-function isObj(v) {
-    return v && typeof v === 'object' && !Array.isArray(v);
-}
-function num(v) {
-    return (typeof v === 'number' && isFinite(v)) ? v : null;
-}
-function esc(s) {
-    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
-}
-function fmtBytes(n) {
-    if (n == null)
-        return '?';
-    const units = ['B', 'K', 'M', 'G', 'T'];
-    let i = 0;
-    while (Math.abs(n) >= 1024 && i < units.length - 1) {
-        n /= 1024;
-        i++;
-    }
-    return i === 0 ? `${Math.round(n)}B` : `${n.toFixed(1)}${units[i]}`;
-}
 function fmtBurn(bps) {
     const perDay = (bps ?? 0) * 86400;
     if (Math.abs(perDay) < 1024 * 1024)
         return 'quiet';
-    return `${fmtBytes(perDay)}/day`;
+    return `${Pill.fmtBytes(perDay)}/day`;
 }
 function fmtEta(s) {
     if (s == null)
@@ -76,30 +52,27 @@ const BTRFS_DOMINATES_FRAC = 0.2;
 
 function btrfsNote(m) {
     const b = m.btrfs;
-    if (!isObj(b) || !b.available || !b.snapshots)
+    if (!Pill.isObj(b) || !b.available || !b.snapshots)
         return null;
-    const pinned = num(b.pinned_bytes);
+    const pinned = Pill.num(b.pinned_bytes);
     if (pinned == null)
         return null;
-    return {pinned, dominates: num(m.total) != null &&
+    return {pinned, dominates: Pill.num(m.total) != null &&
                                pinned >= BTRFS_DOMINATES_FRAC * m.total};
 }
 
 function readStatus() {
-    try {
-        const [ok, bytes] = GLib.file_get_contents(STATUS_PATH);
-        if (!ok)
-            return null;
-        const o = JSON.parse(new TextDecoder().decode(bytes));
-        return isObj(o) && Array.isArray(o.mounts) ? o : null;
-    } catch (_e) {
-        return null;
-    }
+    return Pill.readStatusFile(STATUS_PATH, o => Array.isArray(o.mounts));
 }
+
+// re-check cadence for the pill's own "update available" row — independent
+// of byebyte-update.timer (which only notifies/logs, never paints the UI).
+// GitHub's unauthenticated rate limit (60/h) has no trouble with this.
+const UPDATE_CHECK_SECONDS = 6 * 3600;
 
 const ByeByteToggle = GObject.registerClass(
 class ByeByteToggle extends QuickMenuToggle {
-    _init() {
+    _init(cancellable) {
         super._init({title: 'ByeByte', iconName: ICON, toggleMode: false});
         this.menu.setHeader(ICON, 'ByeByte', 'bytes at rest');
 
@@ -112,17 +85,17 @@ class ByeByteToggle extends QuickMenuToggle {
         this.menu.addMenuItem(this._mountSection);
 
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
-        this._versionItem = new PopupMenu.PopupMenuItem('', {reactive: false});
-        this.menu.addMenuItem(this._versionItem);
+        this._update = new Pill.UpdateSurface('byebyte', {cancellable});
+        this.menu.addMenuItem(this._update.updateItem);
+        this.menu.addMenuItem(this._update.versionItem);
 
-        // M1 has nothing to toggle; a click is a free instant refresh
+        // a click is a free instant refresh
         this.connect('clicked', () => this.refresh());
     }
 
     refresh() {
         const st = readStatus();
-        const stale = st && (GLib.get_real_time() / 1e6 - st.ts) >
-            3 * (num(st.daemon?.poll_interval) ?? 30) + 5;
+        const stale = Pill.isStale(st);
         if (!st || stale) {
             this.subtitle = stale ? 'status stale' : 'daemon offline';
             this.checked = false;
@@ -132,14 +105,14 @@ class ByeByteToggle extends QuickMenuToggle {
                 stale ? 'byebyted stopped updating' : 'byebyted not running',
                 {reactive: false});
             this._mountSection.addMenuItem(it);
-            this._setVersion(null);
+            this._update.setVersion(null);
             return;
         }
         this._apply(st);
     }
 
     _apply(st) {
-        const mounts = st.mounts.filter(isObj);
+        const mounts = st.mounts.filter(Pill.isObj);
 
         // tile: the worst mount is the hero; ties go to the biggest burn
         let hero = null;
@@ -154,11 +127,11 @@ class ByeByteToggle extends QuickMenuToggle {
             // re-skin: free-space alone is misleading when snapshots pin
             // most of what's "used" — lead with the pinned number instead
             this.subtitle = `${STATE_MARK[hero.state] ?? ''}` +
-                `${fmtBytes(heroBtrfs.pinned)} snapshot-pinned`;
+                `${Pill.fmtBytes(heroBtrfs.pinned)} snapshot-pinned`;
         } else if (hero) {
             const eta = hero.eta_seconds != null ? ` · ${fmtEta(hero.eta_seconds)}` : '';
             this.subtitle = `${STATE_MARK[hero.state] ?? ''}` +
-                `${fmtBytes(hero.effective_free)}${eta}`;
+                `${Pill.fmtBytes(hero.effective_free)}${eta}`;
         } else {
             this.subtitle = 'no mounts';
         }
@@ -174,11 +147,11 @@ class ByeByteToggle extends QuickMenuToggle {
             const why = m.state === 'edquot'
                 ? 'quota exhausted'
                 : (m.quota && m.effective_free < m.free
-                    ? `quota: ${fmtBytes(m.quota.remaining)} left`
+                    ? `quota: ${Pill.fmtBytes(m.quota.remaining)} left`
                     : `full ${fmtEta(m.eta_seconds)}`);
             it.label.clutter_text.set_markup(
                 `<span foreground="${STATE_COLOR[m.state]}">` +
-                `${STATE_MARK[m.state]}${esc(m.mountpoint)} — ${esc(why)}</span>`);
+                `${STATE_MARK[m.state]}${Pill.esc(m.mountpoint)} — ${Pill.esc(why)}</span>`);
             this._alertSection.addMenuItem(it);
         }
 
@@ -188,81 +161,60 @@ class ByeByteToggle extends QuickMenuToggle {
             const it = new PopupMenu.PopupMenuItem('', {reactive: false});
             const color = STATE_COLOR[m.state] ?? DIM;
             const quota = m.quota
-                ? `  <span foreground="${DIM}">[q ${fmtBytes(m.quota.remaining)}]</span>`
+                ? `  <span foreground="${DIM}">[q ${Pill.fmtBytes(m.quota.remaining)}]</span>`
                 : '';
             const btrfs = btrfsNote(m);
             const snap = btrfs
-                ? `  <span foreground="${DIM}">[snap pin ${fmtBytes(btrfs.pinned)}]</span>`
+                ? `  <span foreground="${DIM}">[snap pin ${Pill.fmtBytes(btrfs.pinned)}]</span>`
                 : '';
             it.label.clutter_text.set_markup(
                 `<span foreground="${color}" font_weight="bold">●</span> ` +
-                `${esc(m.mountpoint)}  ` +
-                `<span foreground="${ACCENT}">${fmtBytes(m.effective_free)}</span>` +
-                `<span foreground="${DIM}"> of ${fmtBytes(m.total)} · ` +
-                `${esc(fmtBurn(m.burn_bps))} · full ${fmtEta(m.eta_seconds)}</span>` +
+                `${Pill.esc(m.mountpoint)}  ` +
+                `<span foreground="${ACCENT}">${Pill.fmtBytes(m.effective_free)}</span>` +
+                `<span foreground="${DIM}"> of ${Pill.fmtBytes(m.total)} · ` +
+                `${Pill.esc(fmtBurn(m.burn_bps))} · full ${fmtEta(m.eta_seconds)}</span>` +
                 quota + snap);
             this._mountSection.addMenuItem(it);
         }
 
         const heroSub = hero ? this.subtitle : 'bytes at rest';
         this.menu.setHeader(ICON, 'ByeByte', heroSub);
-        this._setVersion(st.daemon?.version);
+        this._update.setVersion(st.daemon?.version);
     }
 
-    _setVersion(ver) {
-        this._versionItem.label.clutter_text.set_markup(
-            `<span foreground="${DIM}">byebyte ${ver ? `v${esc(ver)}` : '(daemon offline)'}</span>`);
-    }
-});
-
-const ByeByteIndicator = GObject.registerClass(
-class ByeByteIndicator extends SystemIndicator {
-    _init() {
-        super._init();
-        this.toggle = new ByeByteToggle();
-        this.quickSettingsItems.push(this.toggle);
+    checkForUpdate() {
+        this._update.checkNow();
     }
 });
 
 export default class ByeByteExtension extends Extension {
     enable() {
-        this._indicator = new ByeByteIndicator();
-        Main.panel.statusArea.quickSettings.addExternalIndicator(this._indicator);
-        this._indicator.toggle.refresh();
+        this._cancellable = new Gio.Cancellable();
+        this._toggle = new ByeByteToggle(this._cancellable);
+        this._indicator = Pill.addQuickSettingsToggle(this._toggle);
+        this._toggle.refresh();
+        this._toggle.checkForUpdate();
 
-        // event-driven: the daemon writes status.json with an atomic rename,
-        // which lands here as exactly one CREATED/CHANGES_DONE event per poll
-        this._file = Gio.File.new_for_path(STATUS_PATH);
-        this._monitor = this._file.monitor_file(Gio.FileMonitorFlags.NONE, null);
-        this._monitorId = this._monitor.connect('changed', (_m, _f, _of, ev) => {
-            if (ev === Gio.FileMonitorEvent.CHANGES_DONE_HINT ||
-                ev === Gio.FileMonitorEvent.CREATED ||
-                ev === Gio.FileMonitorEvent.RENAMED)
-                this._indicator.toggle.refresh();
-        });
-        // slow fallback tick: catches daemon death (no events, status goes
-        // stale) and monitor misses across /run recreation on reboot
-        this._timeout = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 60, () => {
-            this._indicator.toggle.refresh();
-            return GLib.SOURCE_CONTINUE;
-        });
+        this._watcher = new Pill.StatusWatcher(
+            STATUS_PATH, () => this._toggle.refresh(), {fallbackSeconds: 60});
+        this._updateTimeout = GLib.timeout_add_seconds(
+            GLib.PRIORITY_DEFAULT, UPDATE_CHECK_SECONDS, () => {
+                this._toggle.checkForUpdate();
+                return GLib.SOURCE_CONTINUE;
+            });
     }
 
     disable() {
-        if (this._timeout) {
-            GLib.source_remove(this._timeout);
-            this._timeout = null;
+        this._cancellable?.cancel();
+        this._cancellable = null;
+        if (this._updateTimeout) {
+            GLib.source_remove(this._updateTimeout);
+            this._updateTimeout = null;
         }
-        if (this._monitor) {
-            if (this._monitorId)
-                this._monitor.disconnect(this._monitorId);
-            this._monitor.cancel();
-            this._monitor = null;
-            this._monitorId = null;
-        }
-        this._file = null;
-        this._indicator?.quickSettingsItems.forEach(i => i.destroy());
-        this._indicator?.destroy();
+        this._watcher?.destroy();
+        this._watcher = null;
+        Pill.removeIndicator(this._indicator);
         this._indicator = null;
+        this._toggle = null;
     }
 }

@@ -1,4 +1,4 @@
-.TH BYEBYTE 1 "2026-07-20" "byebyte 0.9.0" "byebyte manual"
+.TH BYEBYTE 1 "2026-07-21" "byebyte 0.10.0" "byebyte manual"
 .SH NAME
 byebyte \- verb CLI for the byebyte storage daemon
 .SH SYNOPSIS
@@ -115,6 +115,17 @@ purpose.
 .B \-\-history " [\-\-limit N]"
 replays past sweep acts and previews from the ledger (default 15, most
 recent first).
+.TP
+.B update " [\-\-check] [\-\-json]"
+Delegates straight to
+.BR byebyte\-update (8).
+.B \-\-check
+reports whether a newer release exists (notify tier, the daily timer's own
+invocation); a bare
+.B update
+is the manual\-install consent tier. Never runs unattended \(em no
+.B \-\-auto
+tier is wired up from this CLI.
 .SH EXAMPLES
 .EX
 $ byebyte status
