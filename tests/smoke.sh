@@ -785,6 +785,9 @@ DEBFILE="build/deb/byebyte_$(tr -d '[:space:]' < VERSION)_all.deb"
 CONTENTS=$(dpkg-deb --contents "$DEBFILE")
 for want in usr/bin/byebyted usr/bin/byebyte usr/bin/byebyte-healthcheck \
             usr/bin/byebyte-update usr/bin/sutra.py usr/bin/sutra_update.py \
+            usr/bin/sutra_xen.py usr/share/byebyte/allowed_signers \
+            usr/share/byebyte/extension/byebyte@asuramaya/extension.js \
+            usr/share/byebyte/extension/byebyte@asuramaya/pill.js \
             lib/systemd/system/byebyted.service \
             lib/systemd/system/byebyte-update.service \
             lib/systemd/system/byebyte-update.timer \

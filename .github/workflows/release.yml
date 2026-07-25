@@ -1,0 +1,98 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Verify tag matches VERSION and byebyted's VERSION constant
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          file="$(tr -d '[:space:]' < VERSION)"
+          daemon="$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' bin/byebyted)"
+          echo "tag=${tag} VERSION=${file} bin/byebyted=${daemon}"
+          if [ "${tag}" != "${file}" ]; then
+            echo "::error::tag ${tag} does not match VERSION ${file}"
+            exit 1
+          fi
+          if [ "${file}" != "${daemon}" ]; then
+            echo "::error::VERSION ${file} does not match bin/byebyted's VERSION constant ${daemon}"
+            exit 1
+          fi
+
+      - name: Build .deb (produces build/deb/byebyte_<ver>_all.deb + build/deb/SHA256SUMS)
+        run: make deb
+
+      - name: Build release tarball, fold into the same manifest
+        run: |
+          # .gitattributes export-ignore keeps CI/dev files out of the tarball.
+          # --prefix=ByeByte/: extraction hygiene doctrine (RELEASE.md) — every
+          # tarball extracts to exactly one named directory, never bare into
+          # the caller's CWD.
+          git archive --format=tar.gz --prefix=ByeByte/ -o byebyte.tar.gz HEAD
+          debfile="build/deb/byebyte_$(tr -d '[:space:]' < VERSION)_all.deb"
+          cp "${debfile}" .
+          cp build/deb/SHA256SUMS .
+          sha256sum byebyte.tar.gz >> SHA256SUMS
+          echo "--- contents (tarball) ---"
+          tar -tzf byebyte.tar.gz
+          echo "--- manifest (one signature covers every artifact it lists) ---"
+          cat SHA256SUMS
+
+      - name: Extract this version's CHANGELOG section (release-notes recipe)
+        # decision 1bc925cb (family, UNIFY presentation axis): gh release
+        # create's --generate-notes produces a generic commit-list/compare-
+        # stub, not curated prose. ByeByte's first release ships real notes
+        # from the start, extracted from the CHANGELOG entry that matches
+        # this exact version -- never the auto-generated default.
+        run: |
+          version="$(tr -d '[:space:]' < VERSION)"
+          awk -v v="$version" '
+            $0 ~ "^## " v " " { p=1; next }
+            p && /^## / { exit }
+            p { print }
+          ' CHANGELOG.md > NOTES.md
+          # trim leading/trailing blank lines
+          sed -i -e '/./,$!d' -e ':a' -e '/^\n*$/{$d;N;ba' -e '}' NOTES.md
+          if [ ! -s NOTES.md ]; then
+            echo "::error::no CHANGELOG.md section matches version ${version} -- refusing to ship a generic release"
+            exit 1
+          fi
+          echo "--- NOTES.md ---"
+          cat NOTES.md
+
+      # No signing step here, deliberately: byebyte-update and install.sh
+      # trust an SSH signature (ssh-keygen -Y verify) against a key pinned
+      # INSIDE the client (release-signing/allowed_signers,
+      # docs/RELEASE-SIGNING.md), precisely so this CI (or the GitHub account
+      # behind it) is not the trust root. A secret/hardware key living in
+      # Actions secrets would let anyone who compromises the account or the
+      # workflow sign whatever they just pushed -- that defeats the entire
+      # scheme. The release ships UNSIGNED from here; the operator signs the
+      # published SHA256SUMS bytes BY HAND, offline, with the physical FIDO2
+      # key, and runs `gh release upload <tag> SHA256SUMS.sig --clobber` after.
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Idempotent: if the release was already created by hand (e.g. with
+          # release notes written ahead of the tag push), attach/replace the
+          # build assets on it instead of failing on "tag already exists".
+          debfile="build/deb/byebyte_$(tr -d '[:space:]' < VERSION)_all.deb"
+          assets=(byebyte.tar.gz "$(basename "${debfile}")" SHA256SUMS)
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" "${assets[@]}" \
+              --title "byebyte ${GITHUB_REF_NAME}" \
+              --notes-file NOTES.md
+          fi

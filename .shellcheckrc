@@ -1,0 +1,3 @@
+# Runtime `source` of dynamic paths (tests/test_signing.sh sourcing
+# install.sh with BYEBYTE_INSTALL_SOURCED=1) cannot be followed statically.
+disable=SC1090,SC1091

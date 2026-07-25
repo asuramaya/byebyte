@@ -17,6 +17,7 @@ DEBTMP := $(DEBFILE).$(shell mktemp -u XXXXXX).tmp
 
 smoke: check-sutra
 	bash tests/smoke.sh
+	bash tests/test_signing.sh
 
 # drift guard for the vendored sutra copy: integrity (hash matches what
 # vendor.sh recorded — the copy wasn't hand-edited) always runs; freshness
@@ -84,6 +85,7 @@ deb:
 	install -d -m 0755 $(DEBROOT)/DEBIAN
 	install -d -m 0755 $(DEBROOT)/usr/bin
 	install -d -m 0755 $(DEBROOT)/usr/share/byebyte/scripts
+	install -d -m 0755 $(DEBROOT)/usr/share/byebyte/extension/byebyte@asuramaya
 	install -d -m 0755 $(DEBROOT)/usr/share/man/man1
 	install -d -m 0755 $(DEBROOT)/usr/share/man/man8
 	install -d -m 0755 $(DEBROOT)/etc/byebyte
@@ -91,8 +93,12 @@ deb:
 	install -m 0755 bin/byebyted bin/byebyte bin/byebyte-healthcheck bin/byebyte-update $(DEBROOT)/usr/bin/
 	install -m 0644 bin/sutra.py $(DEBROOT)/usr/bin/sutra.py
 	install -m 0644 bin/sutra_update.py $(DEBROOT)/usr/bin/sutra_update.py
+	install -m 0644 bin/sutra_xen.py $(DEBROOT)/usr/bin/sutra_xen.py
 	install -m 0644 VERSION $(DEBROOT)/usr/share/byebyte/VERSION
+	install -m 0644 release-signing/allowed_signers $(DEBROOT)/usr/share/byebyte/allowed_signers
 	install -m 0755 scripts/seed-owner-uid.py $(DEBROOT)/usr/share/byebyte/scripts/
+	install -m 0644 extension/byebyte@asuramaya/extension.js extension/byebyte@asuramaya/pill.js \
+	    extension/byebyte@asuramaya/metadata.json $(DEBROOT)/usr/share/byebyte/extension/byebyte@asuramaya/
 	install -m 0644 man/byebyte.1 $(DEBROOT)/usr/share/man/man1/byebyte.1
 	install -m 0644 man/byebyted.8 $(DEBROOT)/usr/share/man/man8/byebyted.8
 	install -m 0644 config/config.json $(DEBROOT)/etc/byebyte/config.json
@@ -120,9 +126,13 @@ deb:
 	dpkg-deb --build --root-owner-group $(DEBROOT) $(DEBTMP)
 	mv -f $(DEBTMP) $(DEBFILE)
 	rm -rf $(DEBROOT)
+	( cd build/deb && sha256sum "$$(basename $(DEBFILE))" > SHA256SUMS )
 	@echo "-- built $(DEBFILE)"
 	@if command -v lintian >/dev/null 2>&1; then \
 	    lintian $(DEBFILE) || true; \
 	else \
 	    echo "-- lintian not installed, skipping"; \
 	fi
+
+# signing anchor rebuild is centralized in mudra now, not a per-repo target:
+#   ~/code/REPOS/mudra/bin/mudra sync-signers ByeByte

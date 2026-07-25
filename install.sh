@@ -18,6 +18,51 @@ BINDIR="$PREFIX/bin"
 SHAREDIR="$PREFIX/share/byebyte"
 UNITDIR="/etc/systemd/system"
 EXT_UUID="byebyte@asuramaya"
+REPO_SLUG="asuramaya/ByeByte"
+
+# principal = WHO (byebyte's stable identity); namespace = WHAT-FOR (what
+# this signature authorizes). Never conflate the two — see ~/code/REPOS/RELEASE.md.
+SIGN_PRINCIPAL="byebyte"
+SIGN_NAMESPACE="byebyte-release"
+
+# Trust anchor for the curl-pipe-bash bootstrap below, EMBEDDED directly:
+# `curl -fsSL .../install.sh | sudo bash` fetches ONLY this file — not the
+# sibling release-signing/ directory — so the anchor has to travel embedded
+# in whichever copy of this script is currently executing, not be read from
+# a file that hasn't been fetched yet (that would mean trusting the very
+# release being verified). Ships EMPTY until a key is provisioned (arm-
+# first-from-birth, docs/RELEASE-SIGNING.md); kept in sync with
+# release-signing/allowed_signers by `mudra sync-signers ByeByte` — never
+# hand-edit this. Single-quoted deliberately: the value can span multiple
+# lines (one per pinned key) and must never be shell-interpolated. While
+# empty, verification degrades to SHA256-only with a printed warning.
+RELEASE_ALLOWED_SIGNERS=''
+
+# Has a real key been provisioned, or is this still the empty placeholder?
+has_signing_key() {
+  [[ -n "${RELEASE_ALLOWED_SIGNERS// /}" ]]
+}
+
+# True/false: does the detached signature in $2 (a file path) verify $1 (a
+# file path, the exact bytes that were signed) against the pinned key(s) in
+# $3 (an allowed_signers path), for principal $4 and namespace $5? Principal
+# is WHO (byebyte's identity); namespace is WHAT-FOR (what this signature
+# authorizes) — a signature made for a different purpose, or by a principal
+# not pinned in allowed_signers, must not verify here.
+verify_signature() {
+  local data_file="$1" sig_file="$2" signers="$3" principal="$4" ns="$5"
+  ssh-keygen -Y verify -f "${signers}" -I "${principal}" -n "${ns}" -s "${sig_file}" \
+    < "${data_file}" >/dev/null 2>&1
+}
+
+# tests/test_signing.sh sources this file (with BYEBYTE_INSTALL_SOURCED=1) to
+# reach has_signing_key/verify_signature directly, without running an actual
+# install — everything above this point only ever DEFINES functions/vars, so
+# returning here before the root check keeps sourcing side-effect-free.
+if [[ "${BYEBYTE_INSTALL_SOURCED:-0}" == "1" ]]; then
+  # shellcheck disable=SC2317
+  return 0 2>/dev/null || exit 0
+fi
 
 # ---- root, checked FIRST ------------------------------------------------
 # Fail fast and plainly rather than self-elevating.
@@ -36,12 +81,65 @@ EOF
   exit 1
 fi
 
-# No published releases yet, so no curl|bash bootstrap (coldspot grows one
-# from its release assets) — this installs from a checkout, full stop.
+# Reached when install.sh runs without its sibling files next to it, i.e.
+# `curl -fsSL .../install.sh | sudo bash` — the human types sudo on their
+# OWN command line (this script still never re-execs itself; the root check
+# above already ran and passed by the time we get here). Fetches the
+# published .deb + SHA256SUMS (+ signature once a key is provisioned) and
+# dpkg -i's it — the .deb's own postinst does everything the rest of this
+# script does for a checkout install (config seed, systemd enable+start),
+# so nothing else needs to run afterward.
+bootstrap_from_release() {
+  command -v curl >/dev/null 2>&1 || { echo "curl is required for remote install" >&2; exit 1; }
+  command -v dpkg >/dev/null 2>&1 || {
+    echo "dpkg not found — this quick-install path needs a Debian/Ubuntu" >&2
+    echo "system. Clone the repo and run install.sh from a checkout instead." >&2
+    exit 1
+  }
+
+  local tmp; tmp="$(mktemp -d)"
+  trap 'rm -rf "${tmp}"' EXIT
+  local base="https://github.com/${REPO_SLUG}/releases/latest/download"
+
+  echo "== fetching latest byebyte release =="
+  curl -fsSL "${base}/SHA256SUMS" -o "${tmp}/SHA256SUMS" \
+    || { echo "could not fetch the release checksum manifest (SHA256SUMS) — refusing to install unverified." >&2; exit 1; }
+  local debname
+  debname="$(awk '$2 ~ /_all\.deb$/ { n = $2; sub(/^\*/, "", n); print n; exit }' "${tmp}/SHA256SUMS")"
+  [[ -n "${debname}" ]] || { echo "SHA256SUMS has no .deb entry — aborting." >&2; exit 1; }
+  curl -fsSL "${base}/${debname}" -o "${tmp}/${debname}" \
+    || { echo "deb download failed" >&2; exit 1; }
+
+  local want got
+  want="$(awk -v n="${debname}" '$2 == n || $2 == "*"n { print $1; exit }' "${tmp}/SHA256SUMS")"
+  got="$(sha256sum "${tmp}/${debname}" | cut -d' ' -f1)"
+  [[ "${want}" == "${got}" ]] || { echo "CHECKSUM MISMATCH for ${debname} — aborting." >&2; exit 1; }
+  echo "sha256 verified."
+
+  if has_signing_key; then
+    curl -fsSL "${base}/SHA256SUMS.sig" -o "${tmp}/SHA256SUMS.sig" \
+      || { echo "signing key is pinned but the release has no SHA256SUMS.sig — refusing to install unsigned." >&2; exit 1; }
+    printf '%s\n' "${RELEASE_ALLOWED_SIGNERS}" > "${tmp}/allowed_signers"
+    verify_signature "${tmp}/SHA256SUMS" "${tmp}/SHA256SUMS.sig" "${tmp}/allowed_signers" \
+      "${SIGN_PRINCIPAL}" "${SIGN_NAMESPACE}" \
+      || { echo "SIGNATURE VERIFICATION FAILED — aborting." >&2; exit 1; }
+    echo "signature verified."
+  else
+    echo "warning: no release-signing key provisioned yet (see docs/RELEASE-SIGNING.md) — proceeding on SHA256 alone." >&2
+  fi
+
+  dpkg -i "${tmp}/${debname}"
+  echo
+  echo ">>> the GNOME pill is a separate, per-account, NO-ROOT step — as yourself: <<<"
+  echo "  mkdir -p ~/.local/share/gnome-shell/extensions"
+  echo "  cp -r /usr/share/byebyte/extension/${EXT_UUID} ~/.local/share/gnome-shell/extensions/"
+  echo "  gnome-extensions enable ${EXT_UUID}"
+  echo "  (then log out and back in once — Wayland reloads extensions at login)"
+}
+
 if [[ ! -f "$SRC/bin/byebyted" ]]; then
-  echo "install.sh must run from a byebyte checkout (bin/byebyted not found" >&2
-  echo "next to it). Clone https://github.com/asuramaya/ByeByte and re-run." >&2
-  exit 1
+  bootstrap_from_release
+  exit 0
 fi
 
 # The only thing that needs to know about a human account is owner_uid in a
@@ -66,8 +164,12 @@ done
 # adoption — a source install would ModuleNotFoundError without this.
 install -m 0644 -o root -g root "$SRC/bin/sutra.py" "$BINDIR/sutra.py"
 install -m 0644 -o root -g root "$SRC/bin/sutra_update.py" "$BINDIR/sutra_update.py"
+install -m 0644 -o root -g root "$SRC/bin/sutra_xen.py" "$BINDIR/sutra_xen.py"
 install -d -m 0755 "$SHAREDIR"
 install -m 0644 "$SRC/VERSION" "$SHAREDIR/VERSION"
+# release-signing trust anchor (docs/RELEASE-SIGNING.md) — empty until a key
+# is provisioned; byebyte-update degrades to SHA256-only until it isn't
+install -m 0644 "$SRC/release-signing/allowed_signers" "$SHAREDIR/allowed_signers"
 
 # 1b. man pages
 echo "-- man pages -> $PREFIX/share/man"

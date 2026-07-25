@@ -15,10 +15,11 @@ privileged control loop (phanspeed's split, inherited verbatim).
   byebyte-update                  manual install (explicit human consent)
 
 auto_enabled is hardcoded False: byebyte-update.timer runs --check only
-(family doctrine: updates are click-to-install) and no signing anchor
-exists yet (Wave B's release-signing scaffold hasn't shipped) — an --auto
-tier would no-op on the missing anchor regardless, but there's no config
-knob pretending otherwise until that decision is made on purpose.
+(family doctrine: updates are click-to-install). The release-signing
+anchor ships EMPTY from birth (arm-first, docs/RELEASE-SIGNING.md) — an
+--auto tier would no-op against an unarmed anchor regardless, but there's
+no config knob pretending otherwise until arming is a decision someone's
+actually made.
 """
 
 import os
@@ -34,6 +35,9 @@ _SRC_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VERSION_CANDIDATES = ("/usr/share/byebyte/VERSION",
                       "/usr/local/share/byebyte/VERSION",
                       os.path.join(_SRC_DIR, "VERSION"))
+ANCHOR_CANDIDATES = ["/usr/share/byebyte/allowed_signers",
+                     "/usr/local/share/byebyte/allowed_signers",
+                     os.path.join(_SRC_DIR, "release-signing", "allowed_signers")]
 
 
 def installed_version():
@@ -52,6 +56,5 @@ if __name__ == "__main__":
     sys.exit(sutra_update.main(
         pill="byebyte", slug="asuramaya/ByeByte",
         installed_version=installed_version(),
-        anchor_candidates=["/usr/share/byebyte/allowed_signers",
-                           _SRC_DIR + "/release-signing/allowed_signers"],
+        anchor_candidates=ANCHOR_CANDIDATES,
         auto_enabled=False))
