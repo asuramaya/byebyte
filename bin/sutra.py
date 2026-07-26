@@ -16,6 +16,8 @@ refuse to hand-fix six times:
   * ewma_rate      — the EWMA burn-rate accumulator
   * request        — the client side of the socket, for CLIs and healthchecks
   * read_status    — read status.json without the daemon
+  * check_health   — the freshness+ping vitals verdict every healthcheck bin repeats
+  * notify_owner   — best-effort notify-send into the owner's desktop session
   * runtime_paths / stop_event — the small main() scaffolding
 
 What sutra does NOT own, by design: domain polling, the sqlite index, the
@@ -38,10 +40,11 @@ import re
 import signal
 import socket
 import struct
+import subprocess
 import threading
 import time
 
-SUTRA_VERSION = "0.2.0"
+SUTRA_VERSION = "0.3.0"
 
 
 # --- config: the seed, never the master -------------------------------------
@@ -322,3 +325,43 @@ def check_health(status_path, socket_path, default_poll=30, ping_timeout=5):
         return False, f"control socket ping failed: {resp!r}", info
     info["version"] = resp.get("version", "?")
     return True, "healthy", info
+
+
+# --- notifications: a toast is a pointer to truth, never the truth itself ---
+# UNIFY.md's notification spec (row 13): notify-send via the daemon's
+# owner-session, or a user daemon's own session directly; app-name = the
+# pill name; urgency 'normal' for update-available/completed auto-actions,
+# 'critical' only for failsafe events (OOM imminent, disk deadline under
+# threshold). Absorbed verbatim from ByeByte's original (root-daemon path);
+# the direct-session branch is new, for a user daemon (gestalt) that's
+# already running as its owner. Best-effort, always: a verb's success never
+# depends on whether a toast could be shown.
+
+def notify_owner(uid, app_name, summary, body, urgency="normal",
+                  bus_path=None, run=subprocess.run):
+    """notify-send `summary`/`body` into uid's desktop session — crossing
+    via `runuser` + that session's bus at /run/user/<uid>/bus (or
+    `bus_path`, when a caller/test needs to override it) when uid isn't
+    the caller's own (a root daemon reaching its owner); called directly
+    when uid is None or already the caller's uid (a user daemon).
+    Silently does nothing if there's no active login session (bus socket
+    absent) or anything about reaching it fails — the caller must already
+    have written the ledger/status entry this toast points at; this
+    function never crashes and never blocks on the result."""
+    if uid is None or uid == os.getuid():
+        cmd = ["notify-send", "-a", app_name, "-u", urgency, summary, body]
+    else:
+        bus = bus_path if bus_path is not None else f"/run/user/{uid}/bus"
+        if not os.path.exists(bus):
+            return
+        try:
+            name = pwd.getpwuid(uid).pw_name
+        except KeyError:
+            return
+        cmd = ["runuser", "-u", name, "--",
+               "env", f"DBUS_SESSION_BUS_ADDRESS=unix:path={bus}",
+               "notify-send", "-a", app_name, "-u", urgency, summary, body]
+    try:
+        run(cmd, capture_output=True, timeout=5, check=False)
+    except (OSError, subprocess.SubprocessError):
+        pass
