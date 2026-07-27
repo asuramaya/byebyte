@@ -36,7 +36,11 @@ SIGN_NAMESPACE="byebyte-release"
 # hand-edit this. Single-quoted deliberately: the value can span multiple
 # lines (one per pinned key) and must never be shell-interpolated. While
 # empty, verification degrades to SHA256-only with a printed warning.
-RELEASE_ALLOWED_SIGNERS=''
+RELEASE_ALLOWED_SIGNERS='byebyte namespaces="byebyte-release,pills-tag" sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIAvqlv848gk9uzM40ZsFZTQeXsQKpxYaK4Fi8ubNl1H7AAAAFnNzaDphc3VyYW1heWEtbWFzdGVyLTE= ra-master-1
+byebyte namespaces="byebyte-release,pills-tag" sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIFJBKAsk6b4YR2UH/UZ1Rk24PxepTYNkF7zflo01AmlZAAAAFnNzaDphc3VyYW1heWEtbWFzdGVyLTI= ra-master-2
+byebyte namespaces="byebyte-release,pills-tag" sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIHTVqgo3ARbpTq04YlQksobfGIbBAw21nbE6HyeCPgxBAAAAFnNzaDphc3VyYW1heWEtbWFzdGVyLTM= ra-master-3
+byebyte namespaces="byebyte-release,pills-tag" sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIP15ZeSJYWryHN2WEHDlJbWk/vA+j5JFgb9RSzT1SHveAAAAFnNzaDphc3VyYW1heWEtbWFzdGVyLTQ= ra-master-4
+'
 
 # Has a real key been provisioned, or is this still the empty placeholder?
 has_signing_key() {
