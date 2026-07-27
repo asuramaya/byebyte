@@ -1,13 +1,17 @@
 # Release signing
 
-Status: **shipping empty (pre-arming)** — the pilot's first release ships
-with `release-signing/allowed_signers` (and its `install.sh`-embedded twin,
-`RELEASE_ALLOWED_SIGNERS`) inert, per the family's arm-first-from-birth
-sequencing (`~/code/REPOS/RELEASE.md`: "arm BEFORE tag, so the first sealed
-artifacts carry the anchor from birth"). Verification degrades to SHA256-only
-with a loud warning until the operator's first signing ceremony arms it —
-from that commit on, `byebyte-update`/`install.sh`'s bootstrap fail closed:
-no `SHA256SUMS.sig`, no `ssh-keygen`, or no matching key means no install.
+Status: **armed** — `release-signing/allowed_signers` (and its
+`install.sh`-embedded twin, `RELEASE_ALLOWED_SIGNERS`) carry the operator's
+four canonical keys as of the arming commit that followed v0.11.0's tag. v0.11.0
+itself shipped, and still verifies, as hash-only-with-a-warning: its own
+artifacts were published before the anchor existed, per the family's
+arm-first-from-birth sequencing (`~/code/REPOS/RELEASE.md`: "arm BEFORE tag,
+so the first sealed artifacts carry the anchor from birth") — arming right
+after v0.11.0 rather than inside its own tag commit means the *next* release
+is the first one the trust chain actually covers from birth. From the arming
+commit on, `byebyte-update`/`install.sh`'s bootstrap fail closed for anything
+released after it: no `SHA256SUMS.sig`, no `ssh-keygen`, or no matching key
+means no install.
 
 ## Why this exists
 
@@ -81,12 +85,13 @@ canonical key home never reaches a CI runner — it can't confirm either one
 still matches the operator's actual keys; that comparison only ever happens
 locally, via `mudra` itself.
 
-**Sequencing rule (do not skip):** `mudra sync-signers ByeByte` populates
-the anchor. Run it ONLY in the same act as cutting the operator's first
-signed byebyte release — arming it any earlier bricks `byebyte update`
-against every existing unsigned release. Until then, `release-signing/
-allowed_signers` ships empty and CI's `signing-sync` check just confirms
-that stays true.
+**Sequencing rule:** `mudra sync-signers ByeByte` populates the anchor. It
+was run once, after v0.11.0's tag and before any release depended on it —
+arming earlier than a release's own tag is exactly the "arm before tag"
+sequencing the doctrine calls for, and arming any *later* than a release
+would brick `byebyte update` against that release's own already-published,
+unsigned artifacts. Re-run it only to rotate keys, and only between
+releases, never mid-ceremony (see [RELEASING.md](RELEASING.md)).
 
 ## Per-release signing (operator, needs the FIDO2 key attached + a touch)
 
