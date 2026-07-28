@@ -34,7 +34,7 @@ _SRC_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # installed at all.
 VERSION_CANDIDATES = ("/usr/share/byebyte/VERSION",
                       "/usr/local/share/byebyte/VERSION",
-                      os.path.join(_SRC_DIR, "VERSION"))
+                      os.path.join(_SRC_DIR, "packaging", "VERSION"))
 ANCHOR_CANDIDATES = ["/usr/share/byebyte/allowed_signers",
                      "/usr/local/share/byebyte/allowed_signers",
                      os.path.join(_SRC_DIR, "release-signing", "allowed_signers")]

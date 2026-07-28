@@ -11,6 +11,15 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: One version constant (REPO-STANDARD.md)
+        run: |
+          if grep -rn 'VERSION[[:space:]]*=[[:space:]]*['"'"'"][0-9]' \
+              bin/byebyted bin/byebyte bin/byebyte-healthcheck bin/byebyte-update \
+              install.sh uninstall.sh 'extension/byebyte@asuramaya/extension.js' 2>/dev/null; then
+            echo "::error::a literal version string exists outside packaging/VERSION"
+            exit 1
+          fi
+
       - name: Python compiles
         run: python3 -m py_compile bin/byebyted bin/byebyte bin/byebyte-healthcheck bin/byebyte-update bin/sutra.py bin/sutra_update.py bin/sutra_xen.py
 

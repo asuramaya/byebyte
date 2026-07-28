@@ -54,7 +54,7 @@ issue commands. Two independent gates, so a mode-bit mistake alone can't open it
 | `packaging/deb/` | `.deb` maintainer scripts (`postinst`, `prerm`, `postrm`). `make deb` builds the package; it never installs it |
 | `packages.txt` | the apt packages the installer needs |
 | `.shellcheckrc` | shellcheck's rule exceptions |
-| `VERSION` | the one version constant; `bin/byebyted`'s own `VERSION` string is asserted equal to it in CI, and both are asserted equal to the git tag at release |
+| `packaging/VERSION` | the one version constant. `bin/byebyted` and `bin/byebyte-update` both read it at runtime rather than carrying their own copy; CI asserts it equals the git tag at release |
 | `docs/CHANGELOG.md` | what changed, and when |
 | `tests/` | `smoke.sh`, `test_signing.sh`, `attack_socket.py` |
 | `install.sh`, `uninstall.sh` | the root installer and its symmetric removal |
@@ -167,9 +167,9 @@ exactly as before, never an error.
 
 ## Conventions worth knowing before you edit
 
-* Every static check that matters is mechanical: `make check-sutra` for the vendored spine,
-  `shellcheck` for the bash surface, `py_compile` for both daemons. A convention that isn't
-  wired into `make` is a wish, not a rule.
+* Every static check that matters is mechanical, wired into `make check` (which itself
+  depends on `make check-sutra`, the vendored spine's integrity and freshness check). A
+  convention that isn't wired into `make` is a wish, not a rule.
 * The category registry is the only path to deletion. A new cleanup idea is a new detector
   with its own positive match, never a config-driven path.
 * Device names, discovered devices, and anything else that comes from outside the machine

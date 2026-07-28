@@ -9,8 +9,9 @@ and the signing key never goes near CI.
 
 ## 1. Prepare
 
-Bump `VERSION`. It's the one version constant; `bin/byebyted`'s own `VERSION` string is
-asserted equal to it in CI, and both are asserted equal to the tag at release.
+Bump `packaging/VERSION`. It's the one version constant: `bin/byebyted` and
+`bin/byebyte-update` both read it at runtime rather than carrying their own copy, and CI
+asserts it equals the tag at release.
 
 Write the `docs/CHANGELOG.md` entry under a `## X.Y.Z` heading that starts with the bare
 version number, formatted the same way every existing entry is. This is not optional
@@ -21,7 +22,7 @@ Whatever you write there is what the world reads.
 Run the checks:
 
 ```bash
-make check-sutra     # the vendored spine matches canonical, byte for byte
+make check           # static checks, and the vendored spine matches canonical, byte for byte
 make smoke           # end to end, against a throwaway runtime dir
 make attack          # full command surface, oversized/garbage/nested/stall input
 ```
@@ -86,8 +87,8 @@ awaiting the seal.
 **CI refuses with "no CHANGELOG section"** means the heading doesn't contain the version, or
 doesn't start with the bare number. Add the section and re-push the tag.
 
-**The tag assertion fails** means `VERSION` and the tag disagree, or `bin/byebyted`'s own
-`VERSION` string has drifted from `VERSION`. Fix it, delete the tag, tag again.
+**The tag assertion fails** means `packaging/VERSION` and the tag disagree. Fix it, delete
+the tag, tag again.
 
 **A client reports "armed but release is unsigned"** means the release was published and
 never sealed. Nothing is broken in the artifact; it needs the operator's signature uploaded.

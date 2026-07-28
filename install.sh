@@ -151,7 +151,7 @@ fi
 # Since this script never sudos itself, $SUDO_UID is reliable: it's set by
 # whichever single sudo call the human actually typed.
 OWNER_UID="${SUDO_UID:-1000}"
-VERSION="$(tr -d '[:space:]' < "$SRC/VERSION" 2>/dev/null || echo unknown)"
+VERSION="$(tr -d '[:space:]' < "$SRC/packaging/VERSION" 2>/dev/null || echo unknown)"
 
 echo "== byebyte ${VERSION} installer =="
 
@@ -170,7 +170,7 @@ install -m 0644 -o root -g root "$SRC/bin/sutra.py" "$BINDIR/sutra.py"
 install -m 0644 -o root -g root "$SRC/bin/sutra_update.py" "$BINDIR/sutra_update.py"
 install -m 0644 -o root -g root "$SRC/bin/sutra_xen.py" "$BINDIR/sutra_xen.py"
 install -d -m 0755 "$SHAREDIR"
-install -m 0644 "$SRC/VERSION" "$SHAREDIR/VERSION"
+install -m 0644 "$SRC/packaging/VERSION" "$SHAREDIR/VERSION"
 # release-signing trust anchor (docs/RELEASE-SIGNING.md) — empty until a key
 # is provisioned; byebyte-update degrades to SHA256-only until it isn't
 install -m 0644 "$SRC/release-signing/allowed_signers" "$SHAREDIR/allowed_signers"

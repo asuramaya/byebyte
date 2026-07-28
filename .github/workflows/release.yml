@@ -13,18 +13,17 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Verify tag matches VERSION and byebyted's VERSION constant
+      - name: Verify tag matches packaging/VERSION
+        # bin/byebyted has no hardcoded version of its own to cross-check any
+        # more: it reads packaging/VERSION at runtime (Pass 2, REPO-STANDARD.md
+        # "a second constant kept equal by a CI assertion is two truths with
+        # a referee"), so this is the one comparison that matters.
         run: |
           tag="${GITHUB_REF_NAME#v}"
-          file="$(tr -d '[:space:]' < VERSION)"
-          daemon="$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' bin/byebyted)"
-          echo "tag=${tag} VERSION=${file} bin/byebyted=${daemon}"
+          file="$(tr -d '[:space:]' < packaging/VERSION)"
+          echo "tag=${tag} packaging/VERSION=${file}"
           if [ "${tag}" != "${file}" ]; then
-            echo "::error::tag ${tag} does not match VERSION ${file}"
-            exit 1
-          fi
-          if [ "${file}" != "${daemon}" ]; then
-            echo "::error::VERSION ${file} does not match bin/byebyted's VERSION constant ${daemon}"
+            echo "::error::tag ${tag} does not match packaging/VERSION ${file}"
             exit 1
           fi
 
@@ -38,7 +37,7 @@ jobs:
           # tarball extracts to exactly one named directory, never bare into
           # the caller's CWD.
           git archive --format=tar.gz --prefix=ByeByte/ -o byebyte.tar.gz HEAD
-          debfile="build/deb/byebyte_$(tr -d '[:space:]' < VERSION)_all.deb"
+          debfile="build/deb/byebyte_$(tr -d '[:space:]' < packaging/VERSION)_all.deb"
           cp "${debfile}" .
           cp build/deb/SHA256SUMS .
           sha256sum byebyte.tar.gz >> SHA256SUMS
@@ -54,16 +53,16 @@ jobs:
         # from the start, extracted from the CHANGELOG entry that matches
         # this exact version -- never the auto-generated default.
         run: |
-          version="$(tr -d '[:space:]' < VERSION)"
+          version="$(tr -d '[:space:]' < packaging/VERSION)"
           awk -v v="$version" '
             $0 ~ "^## " v " " { p=1; next }
             p && /^## / { exit }
             p { print }
-          ' CHANGELOG.md > NOTES.md
+          ' docs/CHANGELOG.md > NOTES.md
           # trim leading/trailing blank lines
           sed -i -e '/./,$!d' -e ':a' -e '/^\n*$/{$d;N;ba' -e '}' NOTES.md
           if [ ! -s NOTES.md ]; then
-            echo "::error::no CHANGELOG.md section matches version ${version} -- refusing to ship a generic release"
+            echo "::error::no docs/CHANGELOG.md section matches version ${version} -- refusing to ship a generic release"
             exit 1
           fi
           echo "--- NOTES.md ---"
@@ -87,7 +86,7 @@ jobs:
           # Idempotent: if the release was already created by hand (e.g. with
           # release notes written ahead of the tag push), attach/replace the
           # build assets on it instead of failing on "tag already exists".
-          debfile="build/deb/byebyte_$(tr -d '[:space:]' < VERSION)_all.deb"
+          debfile="build/deb/byebyte_$(tr -d '[:space:]' < packaging/VERSION)_all.deb"
           assets=(byebyte.tar.gz "$(basename "${debfile}")" SHA256SUMS)
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
             gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" --clobber

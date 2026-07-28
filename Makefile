@@ -1,7 +1,26 @@
 # byebyte — the storage demon
-.PHONY: smoke attack install uninstall pill deb check-sutra
+.PHONY: smoke attack check check-sutra install uninstall pill deb
 
-VERSION := $(shell tr -d '[:space:]' < VERSION)
+# static checks only, matching kast/coldspot's grammar (REPO-STANDARD.md):
+# everything CI runs individually, in one local target, plus the vendored
+# spine's own integrity+freshness check. Deliberately excludes smoke/attack
+# (real daemon, real sockets) so it stays fast enough to run before every
+# commit. check-repo (the family's structural gate) hangs off this target.
+check: check-sutra
+	python3 -m py_compile bin/byebyted bin/byebyte bin/byebyte-healthcheck bin/byebyte-update \
+	    bin/sutra.py bin/sutra_update.py bin/sutra_xen.py
+	bash -n install.sh uninstall.sh tests/smoke.sh tests/test_signing.sh
+	shellcheck install.sh uninstall.sh tests/smoke.sh tests/test_signing.sh
+	@mjs=$$(mktemp --suffix=.mjs); \
+	cp 'extension/byebyte@asuramaya/extension.js' "$$mjs"; \
+	node --check "$$mjs"; \
+	rm -f "$$mjs"
+	python3 -c "import json; json.load(open('extension/byebyte@asuramaya/metadata.json'))"
+	groff -man -Tutf8 -ww man/byebyte.1 > /dev/null
+	groff -t -man -Tutf8 -ww man/byebyted.8 > /dev/null
+	@echo "check: all static checks passed"
+
+VERSION := $(shell tr -d '[:space:]' < packaging/VERSION)
 # DEBROOT is per-invocation-unique (a shared dev box runs concurrent smoke
 # passes — root and unprivileged, different agents — against the SAME
 # checkout; a fixed staging dir raced install/rm-rf across them and
@@ -117,7 +136,7 @@ deb:
 	install -m 0644 bin/sutra.py $(DEBROOT)/usr/bin/sutra.py
 	install -m 0644 bin/sutra_update.py $(DEBROOT)/usr/bin/sutra_update.py
 	install -m 0644 bin/sutra_xen.py $(DEBROOT)/usr/bin/sutra_xen.py
-	install -m 0644 VERSION $(DEBROOT)/usr/share/byebyte/VERSION
+	install -m 0644 packaging/VERSION $(DEBROOT)/usr/share/byebyte/VERSION
 	install -m 0644 release-signing/allowed_signers $(DEBROOT)/usr/share/byebyte/allowed_signers
 	install -m 0755 scripts/seed-owner-uid.py $(DEBROOT)/usr/share/byebyte/scripts/
 	install -m 0644 extension/byebyte@asuramaya/extension.js extension/byebyte@asuramaya/pill.js \

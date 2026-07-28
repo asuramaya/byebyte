@@ -781,7 +781,7 @@ DEBLOG=$(mktemp --tmpdir=/tmp byebyte-smoke-deb-build.XXXXXX.log)
 make deb > "$DEBLOG" 2>&1 \
     || { echo "SMOKE FAIL: make deb failed"; cat "$DEBLOG"; rm -f "$DEBLOG"; exit 1; }
 rm -f "$DEBLOG"
-DEBFILE="build/deb/byebyte_$(tr -d '[:space:]' < VERSION)_all.deb"
+DEBFILE="build/deb/byebyte_$(tr -d '[:space:]' < packaging/VERSION)_all.deb"
 CONTENTS=$(dpkg-deb --contents "$DEBFILE")
 for want in usr/bin/byebyted usr/bin/byebyte usr/bin/byebyte-healthcheck \
             usr/bin/byebyte-update usr/bin/sutra.py usr/bin/sutra_update.py \
