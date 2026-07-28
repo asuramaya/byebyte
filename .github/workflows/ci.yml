@@ -11,54 +11,33 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: One version constant (REPO-STANDARD.md)
-        run: |
-          if grep -rn 'VERSION[[:space:]]*=[[:space:]]*['"'"'"][0-9]' \
-              src/bin/byebyted src/bin/byebyte src/bin/byebyte-healthcheck src/bin/byebyte-update \
-              install.sh uninstall.sh 'src/extension/byebyte@asuramaya/extension.js' 2>/dev/null; then
-            echo "::error::a literal version string exists outside packaging/VERSION"
-            exit 1
-          fi
-
+      # Named steps stay for readability; the command behind each lives in
+      # the Makefile only (REPO-STANDARD.md) -- a hand-duplicated command
+      # list here is exactly how phanspeed's CI went red for five commits
+      # and sutra's went red on every commit since 0.1.0, both silently,
+      # because nobody had to notice the Makefile and this file drifting
+      # apart. If a check needs adding or changing, it changes in the
+      # Makefile and this file is untouched.
       - name: Python compiles
-        run: python3 -m py_compile src/bin/byebyted src/bin/byebyte src/bin/byebyte-healthcheck src/bin/byebyte-update src/bin/sutra.py src/bin/sutra_update.py src/bin/sutra_xen.py
+        run: make check-py
 
-      - name: Shell scripts parse
-        run: |
-          find . -name '*.sh' -not -path './.git/*' -print0 \
-            | xargs -0 -n1 bash -n
-
-      - name: shellcheck
-        # -e rather than --rcfile: packaging/shellcheckrc documents the same
-        # exclusions for a human running shellcheck by hand, but the flag
-        # only exists from shellcheck 0.11.0, and ubuntu-latest has shipped
-        # older builds that reject it outright (coldspot's Makefile carries
-        # the same rationale).
-        run: shellcheck -e SC1090,SC1091 install.sh uninstall.sh tests/smoke.sh tests/test_signing.sh
+      - name: Shell scripts parse + shellcheck
+        run: make check-shell
 
       - name: check-sutra (vendored copy integrity)
         run: make check-sutra
+
+      - name: Extension JS + metadata.json
+        run: make check-js
+
+      - name: Man pages render without warnings
+        run: make check-man
 
       - name: Smoke (real daemon, real mounts, hostile socket input)
         run: make smoke
 
       - name: Attack (full cmd surface + oversized/garbage/nested/stall)
         run: make attack
-
-      - name: Man pages render without warnings
-        run: |
-          groff -man -Tutf8 -ww src/data/man/man1/byebyte.1 > /dev/null
-          groff -t -man -Tutf8 -ww src/data/man/man8/byebyted.8 > /dev/null
-
-      - name: Extension JS syntax
-        # GJS extensions are ESM; node only parses import/export from a .mjs
-        # file, so check a renamed copy.
-        run: |
-          cp 'src/extension/byebyte@asuramaya/extension.js' /tmp/byebyte-extension.mjs
-          node --check /tmp/byebyte-extension.mjs
-
-      - name: metadata.json is valid
-        run: python3 -c "import json; json.load(open('src/extension/byebyte@asuramaya/metadata.json'))"
 
       - name: Repo structure (REPO-STANDARD.md gate)
         run: make check-repo

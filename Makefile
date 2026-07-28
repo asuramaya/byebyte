@@ -1,24 +1,37 @@
 # byebyte — the storage demon
-.PHONY: smoke attack check check-sutra check-repo install uninstall pill deb
+.PHONY: smoke attack check check-py check-shell check-js check-man check-sutra check-repo install uninstall pill deb
 
-# static checks only, matching kast/coldspot's grammar (REPO-STANDARD.md):
-# everything CI runs individually, in one local target, plus the vendored
-# spine's own integrity+freshness check. Deliberately excludes smoke/attack
-# (real daemon, real sockets) so it stays fast enough to run before every
-# commit. check-repo (the family's structural gate) hangs off this target.
-check: check-sutra
+# static checks, broken into sub-targets so ci.yml can invoke each by name
+# for readable per-step results without hand-duplicating any command list
+# of its own (REPO-STANDARD.md: CI holding a stale or wrong copy of
+# something the Makefile moved past is a recurring, real bug class across
+# this family -- phanspeed's CI was red for five commits over exactly this,
+# sutra's on every commit since 0.1.0). Every check either lives here, or
+# it isn't a check anyone can trust matches what `make check` itself runs.
+# Deliberately excludes smoke/attack (real daemon, real sockets) so it
+# stays fast enough to run before every commit. check-repo (the family's
+# structural gate) hangs off this target.
+check: check-sutra check-py check-shell check-js check-man
+	@echo "check: all static checks passed"
+
+check-py:
 	python3 -m py_compile src/bin/byebyted src/bin/byebyte src/bin/byebyte-healthcheck src/bin/byebyte-update \
 	    src/bin/sutra.py src/bin/sutra_update.py src/bin/sutra_xen.py
+
+check-shell:
 	bash -n install.sh uninstall.sh tests/smoke.sh tests/test_signing.sh
 	shellcheck -e SC1090,SC1091 install.sh uninstall.sh tests/smoke.sh tests/test_signing.sh
+
+check-js:
 	@mjs=$$(mktemp --suffix=.mjs); \
 	cp 'src/extension/byebyte@asuramaya/extension.js' "$$mjs"; \
 	node --check "$$mjs"; \
 	rm -f "$$mjs"
 	python3 -c "import json; json.load(open('src/extension/byebyte@asuramaya/metadata.json'))"
+
+check-man:
 	groff -man -Tutf8 -ww src/data/man/man1/byebyte.1 > /dev/null
 	groff -t -man -Tutf8 -ww src/data/man/man8/byebyted.8 > /dev/null
-	@echo "check: all static checks passed"
 
 VERSION := $(shell tr -d '[:space:]' < packaging/VERSION)
 # DEBROOT is per-invocation-unique (a shared dev box runs concurrent smoke
