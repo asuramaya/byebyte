@@ -36,19 +36,19 @@ issue commands. Two independent gates, so a mode-bit mistake alone can't open it
 ## Where everything lives
 
 `src/` is the one row that groups four directories rather than naming one thing: `bin/`,
-`data/` and `extension/` all live under it, so this map matters more than it used to, since
-the root listing no longer shows them individually.
+`data/`, `extension/` and `share/` all live under it, so this map matters more than it
+used to, since the root listing no longer shows them individually.
 
 | Path | What it is |
 |---|---|
 | `src/bin/byebyted` | the daemon. Truth engine, index, registry, control server |
 | `src/bin/byebyte` | the verb CLI, a thin socket client |
-| `src/bin/byebyte-healthcheck` | thin wrapper over `sutra.check_health`: is status.json fresh, does the socket answer a ping |
+| `src/bin/byebyte-healthcheck` | thin wrapper over `sutra.check_health`, plus its own check that the sutra copy it actually loaded matches its own installed anchor: is status.json fresh, does the socket answer a ping, is the vendor honest |
 | `src/bin/byebyte-update` | thin wrapper over `sutra_update.py`, pill name `byebyte`. `auto_enabled` is hardcoded `False`, so the timer only ever checks and never installs unattended |
-| `src/bin/sutra.py` | the family's shared daemon skeleton, vendored byte-identical from `sutra`: config load/clamp, `write_status`, the EWMA helper, `ControlServer` |
-| `src/bin/sutra_update.py` | the shared update spine: the three consent tiers, signature verification |
-| `src/bin/sutra_xen.py` | vendored unconditionally per the family's vendor script; unused by ByeByte today, same as every other pill |
-| `src/bin/*.version`, `src/bin/*.commit` | drift anchors for each vendored file: integrity hash and the canonical commit it was vendored from |
+| `src/share/byebyte/lib/sutra.py` | the family's shared daemon skeleton, vendored byte-identical from `sutra`: config load/clamp, `write_status`, the EWMA helper, `ControlServer` |
+| `src/share/byebyte/lib/sutra_update.py` | the shared update spine: the three consent tiers, signature verification |
+| `src/share/byebyte/lib/sutra_xen.py` | vendored unconditionally per the family's vendor script; unused by ByeByte today, same as every other pill |
+| `src/share/byebyte/lib/*.version`, `*.commit` | drift anchors for each vendored file: integrity hash and the canonical commit it was vendored from |
 | `src/extension/byebyte@asuramaya/` | the GNOME pill: `extension.js` is the tile, `pill.js` is the family's shared extension commons (status parsing, formatting, the update-surface widget) |
 | `src/data/config/config.json` | the seed config installed to `/etc/byebyte/config.json` on first install, never overwritten after |
 | `src/data/systemd/system/` | `byebyted.service`; `byebyte-sweep.service` + `.timer` (disabled by default, the unattended-reclaim opt-in); `byebyte-update.service` + `.timer` (daily, `--check` only) |
@@ -68,7 +68,8 @@ Unlike the family's user-scope pills, ByeByte's checkout install is root-scope t
 a real root daemon and system-wide state, so both layouts land in the same places.
 
 The **checkout** path (`sudo ./install.sh`) installs binaries to `$PREFIX/bin`
-(`$PREFIX` defaults to `/usr/local`), the vendored spine and the release-signing anchor to
+(`$PREFIX` defaults to `/usr/local`), the vendored sutra modules (with their `.version`/
+`.commit` anchors) to `$PREFIX/share/byebyte/lib`, and the release-signing anchor to
 `$PREFIX/share/byebyte`, seeds `/etc/byebyte/config.json` once, and enables `byebyted` plus
 the daily update-check timer. It never re-execs itself as root, an incident-driven
 doctrine after a past sibling repo misattributed the human user to root by self-elevating.
@@ -79,6 +80,18 @@ The **`.deb`** path (`sudo dpkg -i byebyte_*.deb`) installs the same files under
 instead of `/usr/local`, and its `postinst` runs the identical config-seed and
 systemd-enable logic via `packaging/scripts/seed-owner-uid.py`, the piece factored out specifically so
 the two paths can't drift.
+
+The vendored sutra modules used to sit right beside the binaries in `$PREFIX/bin`, byte-
+identical across every pill in the family under the same filenames. Two pills installed on
+one machine collided there: `dpkg` refused the second package outright, and `install.sh`'s
+plain `install` had no ownership tracking and silently overwrote the first pill's copy,
+anchors included. They now live in a private, per-pill `lib/` dir instead, and every binary
+that imports sutra carries a small bootstrap preamble right before the import, generated
+once by sutra and pasted verbatim rather than hand-derived per pill. It locates the lib dir
+relative to wherever the binary itself actually is, so the same unmodified preamble works
+under `/usr` from the `.deb`, under `/usr/local` from `install.sh`, or under this checkout's
+own `src/` when a binary runs straight out of the repo, the way `tests/smoke.sh` does.
+Ruling `3e44bd95`; the mechanism is sutra's own `BOOTSTRAP.md`.
 
 Both layouts have to ship the **full vendored set**: `sutra.py`, `sutra_update.py`,
 `sutra_xen.py`, and the release-signing anchor. Skip one and an install works until the
@@ -91,8 +104,9 @@ session.
 
 ## The update path
 
-`byebyte update` runs `src/bin/byebyte-update`, a thin wrapper over `src/bin/sutra_update.py`. That
-file is vendored byte-identical from `sutra`, and `make check-sutra` proves it: integrity
+`byebyte update` runs `src/bin/byebyte-update`, a thin wrapper over
+`src/share/byebyte/lib/sutra_update.py`. That file is vendored byte-identical from `sutra`,
+and `make check-sutra` proves it: integrity
 (the hash in the matching `.version` file) is a hard failure if it doesn't match. Freshness
 is a LAG-vs-DRIFT read against canonical git, when a canonical checkout is present (normally
 isn't in CI): the recorded `.commit` at or behind canonical HEAD is LAG and warns; not in

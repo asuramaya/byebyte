@@ -121,7 +121,7 @@ checksum bytes. Anything else is a hard failure. Two independent
 implementations of the same algorithm, matching the family's Update-path
 convergence doctrine:
 
-- `src/bin/sutra_update.py`'s `verify_dir()` — the update spine, run by `byebyte
+- `src/share/byebyte/lib/sutra_update.py`'s `verify_dir()` — the update spine, run by `byebyte
   update` / `byebyte-update`. `armed()` checks whether the anchor
   (`anchor_candidates` in `src/bin/byebyte-update`: the deb path, the
   source-install path, then the repo-relative dev fallback) carries any
@@ -151,12 +151,16 @@ exactly one named directory, never bare into the caller's CWD) and
 
 The `.deb` installs the full vendored set in both layouts — `sutra.py`,
 `sutra_update.py`, `sutra_xen.py` (vendored unconditionally, unused by
-ByeByte today, same as every other pill), the release-signing anchor
-(`/usr/share/byebyte/allowed_signers`), and the extension source
+ByeByte today, same as every other pill) plus their `.version`/`.commit`
+anchors, all under `/usr/share/byebyte/lib/`, a private per-pill dir rather
+than the shared `/usr/bin` two pills could otherwise collide in
+(BOOTSTRAP.md). The release-signing anchor
+(`/usr/share/byebyte/allowed_signers`) and the extension source
 (`/usr/share/byebyte/extension/byebyte@asuramaya/`, for the curl-bootstrap
-path's pill-activation instructions) — matching what a checkout install via
-`install.sh` ships into `$BINDIR`/`$SHAREDIR`. Never partial in either
-direction; `tests/smoke.sh` asserts the deb's contents directly.
+path's pill-activation instructions) sit alongside it — matching what a
+checkout install via `install.sh` ships into `$BINDIR`/`$SHAREDIR`. Never
+partial in either direction; `tests/smoke.sh` asserts the deb's contents
+directly.
 
 ## Release notes — the extracted CHANGELOG section, never `--generate-notes`
 

@@ -160,15 +160,30 @@ echo "-- binaries -> $BINDIR"
 for b in byebyted byebyte byebyte-healthcheck byebyte-update; do
   install -m 0755 -o root -g root "$SRC/src/bin/$b" "$BINDIR/$b"
 done
-# sutra + sutra_update are imported modules, not entry points (0644, no
-# +x) — but they're siblings byebyted/byebyte/byebyte-healthcheck/
-# byebyte-update all `import`, straight from BINDIR, exactly like Python's
-# own script-directory sys.path[0] rule expects. The .deb has always done
-# this (Makefile's deb: target); install.sh had fallen behind since sutra's
-# adoption — a source install would ModuleNotFoundError without this.
-install -m 0644 -o root -g root "$SRC/src/bin/sutra.py" "$BINDIR/sutra.py"
-install -m 0644 -o root -g root "$SRC/src/bin/sutra_update.py" "$BINDIR/sutra_update.py"
-install -m 0644 -o root -g root "$SRC/src/bin/sutra_xen.py" "$BINDIR/sutra_xen.py"
+# sutra + sutra_update + sutra_xen are imported modules, not entry points
+# (0644, no +x). They used to sit beside the bins in BINDIR, co-located so
+# Python's own script-directory sys.path[0] rule found them -- but any two
+# pills installing that way into the SAME BINDIR collide (install has no
+# ownership tracking; it silently overwrites, anchors included). They move
+# to SHAREDIR/lib instead, a private per-pill dir; each binary finds them
+# via a small bootstrap preamble, not co-location (BOOTSTRAP.md, ruling
+# 3e44bd95). .version/.commit anchors travel with them, always -- an
+# anchorless install dir is exactly how a mixed-version sutra sat
+# undetected on the operator's own machine before this fix.
+echo "-- vendored sutra -> $SHAREDIR/lib"
+install -d -m 0755 "$SHAREDIR/lib"
+for f in sutra.py sutra.version sutra.commit \
+         sutra_update.py sutra_update.version sutra_update.commit \
+         sutra_xen.py sutra_xen.version sutra_xen.commit; do
+  install -m 0644 -o root -g root "$SRC/src/share/byebyte/lib/$f" "$SHAREDIR/lib/$f"
+done
+# clean up any earlier install's copies from the old shared BINDIR -- owned
+# by nothing once install.sh stops writing them there, and would otherwise
+# linger forever as exactly the kind of anchorless stray this fix exists
+# to prevent.
+rm -f "$BINDIR"/sutra.py "$BINDIR"/sutra.version "$BINDIR"/sutra.commit \
+      "$BINDIR"/sutra_update.py "$BINDIR"/sutra_update.version "$BINDIR"/sutra_update.commit \
+      "$BINDIR"/sutra_xen.py "$BINDIR"/sutra_xen.version "$BINDIR"/sutra_xen.commit
 install -d -m 0755 "$SHAREDIR"
 install -m 0644 "$SRC/packaging/VERSION" "$SHAREDIR/VERSION"
 # release-signing trust anchor (docs/RELEASE-SIGNING.md) — empty until a key

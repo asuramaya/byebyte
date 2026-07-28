@@ -16,7 +16,7 @@ check: check-sutra check-py check-shell check-js check-man
 
 check-py:
 	python3 -m py_compile src/bin/byebyted src/bin/byebyte src/bin/byebyte-healthcheck src/bin/byebyte-update \
-	    src/bin/sutra.py src/bin/sutra_update.py src/bin/sutra_xen.py
+	    src/share/byebyte/lib/sutra.py src/share/byebyte/lib/sutra_update.py src/share/byebyte/lib/sutra_xen.py
 
 check-shell:
 	bash -n install.sh uninstall.sh tests/smoke.sh tests/test_signing.sh
@@ -64,7 +64,8 @@ smoke: check-sutra
 check-sutra:
 	@real_home=$$(getent passwd "$${SUDO_USER:-$$(id -un)}" | cut -d: -f6); \
 	canon="$${real_home:-$$HOME}/code/REPOS/sutra"; \
-	for f in src/bin/sutra.py src/bin/sutra_update.py src/bin/sutra_xen.py \
+	for f in src/share/byebyte/lib/sutra.py src/share/byebyte/lib/sutra_update.py \
+	         src/share/byebyte/lib/sutra_xen.py \
 	         src/extension/byebyte@asuramaya/pill.js; do \
 	    vf="$${f%.py}"; vf="$${vf%.js}.version"; \
 	    cf="$${f%.py}"; cf="$${cf%.js}.commit"; \
@@ -73,7 +74,7 @@ check-sutra:
 	    actual=$$(sha256sum "$$f" | cut -d' ' -f1); \
 	    if [ "$$sha" != "$$actual" ]; then \
 	        echo "check-sutra FAIL: $$f doesn't match $$vf" \
-	             "(hand-edited? re-vendor: bash ~/code/REPOS/sutra/vendor.sh src/bin src/extension/byebyte@asuramaya)"; \
+	             "(hand-edited? re-vendor: bash ~/code/REPOS/sutra/vendor.sh src/share/byebyte/lib src/extension/byebyte@asuramaya)"; \
 	        exit 1; \
 	    fi; \
 	    echo "check-sutra: integrity ok ($$f, $$ver, sha256 $$sha)"; \
@@ -134,11 +135,20 @@ pill:
 # binary here (byebyted, byebyte, byebyte-healthcheck, byebyte-update) is
 # meant to be run directly by a human or systemd — none is an internal
 # helper, so a private libdir + symlink layer would only add indirection
-# nothing here needs. Builds only; never installs the result.
+# nothing here needs. The vendored sutra modules are different: they used
+# to sit beside the bins in /usr/bin, where any two pills installed on one
+# machine collided (dpkg refuses the second package outright). They move to
+# /usr/share/byebyte/lib/ instead -- a private, per-pill dir each binary
+# finds via a small bootstrap preamble, not co-location (BOOTSTRAP.md,
+# ruling 3e44bd95). .version/.commit anchors travel with them, always --
+# an anchorless install dir is exactly how a mixed-version sutra sat
+# undetected on the operator's own machine before this fix. Builds only;
+# never installs the result.
 deb:
 	rm -rf $(DEBROOT)
 	install -d -m 0755 $(DEBROOT)/DEBIAN
 	install -d -m 0755 $(DEBROOT)/usr/bin
+	install -d -m 0755 $(DEBROOT)/usr/share/byebyte/lib
 	install -d -m 0755 $(DEBROOT)/usr/share/byebyte/scripts
 	install -d -m 0755 $(DEBROOT)/usr/share/byebyte/extension/byebyte@asuramaya
 	install -d -m 0755 $(DEBROOT)/usr/share/man/man1
@@ -146,9 +156,10 @@ deb:
 	install -d -m 0755 $(DEBROOT)/etc/byebyte
 	install -d -m 0755 $(DEBROOT)/lib/systemd/system
 	install -m 0755 src/bin/byebyted src/bin/byebyte src/bin/byebyte-healthcheck src/bin/byebyte-update $(DEBROOT)/usr/bin/
-	install -m 0644 src/bin/sutra.py $(DEBROOT)/usr/bin/sutra.py
-	install -m 0644 src/bin/sutra_update.py $(DEBROOT)/usr/bin/sutra_update.py
-	install -m 0644 src/bin/sutra_xen.py $(DEBROOT)/usr/bin/sutra_xen.py
+	install -m 0644 src/share/byebyte/lib/sutra.py src/share/byebyte/lib/sutra.version src/share/byebyte/lib/sutra.commit \
+	    src/share/byebyte/lib/sutra_update.py src/share/byebyte/lib/sutra_update.version src/share/byebyte/lib/sutra_update.commit \
+	    src/share/byebyte/lib/sutra_xen.py src/share/byebyte/lib/sutra_xen.version src/share/byebyte/lib/sutra_xen.commit \
+	    $(DEBROOT)/usr/share/byebyte/lib/
 	install -m 0644 packaging/VERSION $(DEBROOT)/usr/share/byebyte/VERSION
 	install -m 0644 packaging/release-signing/allowed_signers $(DEBROOT)/usr/share/byebyte/allowed_signers
 	install -m 0755 packaging/scripts/seed-owner-uid.py $(DEBROOT)/usr/share/byebyte/scripts/

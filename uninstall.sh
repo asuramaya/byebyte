@@ -39,7 +39,13 @@ echo "-- removing files"
 for b in byebyted byebyte byebyte-healthcheck byebyte-update; do
   rm -f "$BINDIR/$b"
 done
-rm -f "$BINDIR/sutra.py" "$BINDIR/sutra_update.py" "$BINDIR/sutra_xen.py"
+# sutra moved from BINDIR to SHAREDIR/lib (BOOTSTRAP.md, ruling 3e44bd95);
+# the SHAREDIR/lib copies are covered by the rm -rf "$SHAREDIR" below, but
+# an earlier install's BINDIR copies are owned by nothing and need their
+# own cleanup here too.
+rm -f "$BINDIR"/sutra.py "$BINDIR"/sutra.version "$BINDIR"/sutra.commit \
+      "$BINDIR"/sutra_update.py "$BINDIR"/sutra_update.version "$BINDIR"/sutra_update.commit \
+      "$BINDIR"/sutra_xen.py "$BINDIR"/sutra_xen.version "$BINDIR"/sutra_xen.commit
 rm -f "$UNITDIR/byebyted.service" "$UNITDIR/byebyte-update.service" "$UNITDIR/byebyte-update.timer" \
       "$UNITDIR/byebyte-sweep.service" "$UNITDIR/byebyte-sweep.timer"
 rm -rf "$SHAREDIR"

@@ -388,10 +388,10 @@ import importlib.util, sys
 from importlib.machinery import SourceFileLoader
 
 # src/bin/byebyted has no .py suffix, so spec_from_file_location can't infer a
-# loader from the extension — hand it one explicitly. It `import sutra` as
-# a sibling, so src/bin needs to be on sys.path first (normally the running
-# script's own dir goes there automatically; a manual load doesn't get that).
-sys.path.insert(0, "src/bin")
+# loader from the extension — hand it one explicitly. byebyted's own sutra
+# bootstrap preamble (BOOTSTRAP.md) runs as part of exec_module below and
+# puts src/share/byebyte/lib on sys.path itself, so `import sutra` inside it
+# resolves without any help from this harness.
 loader = SourceFileLoader("byebyted_mod", "src/bin/byebyted")
 spec = importlib.util.spec_from_loader("byebyted_mod", loader)
 mod = importlib.util.module_from_spec(spec)
@@ -800,8 +800,14 @@ rm -f "$DEBLOG"
 DEBFILE="build/deb/byebyte_$(tr -d '[:space:]' < packaging/VERSION)_all.deb"
 CONTENTS=$(dpkg-deb --contents "$DEBFILE")
 for want in usr/bin/byebyted usr/bin/byebyte usr/bin/byebyte-healthcheck \
-            usr/bin/byebyte-update usr/bin/sutra.py usr/bin/sutra_update.py \
-            usr/bin/sutra_xen.py usr/share/byebyte/allowed_signers \
+            usr/bin/byebyte-update \
+            usr/share/byebyte/lib/sutra.py usr/share/byebyte/lib/sutra.version \
+            usr/share/byebyte/lib/sutra.commit \
+            usr/share/byebyte/lib/sutra_update.py usr/share/byebyte/lib/sutra_update.version \
+            usr/share/byebyte/lib/sutra_update.commit \
+            usr/share/byebyte/lib/sutra_xen.py usr/share/byebyte/lib/sutra_xen.version \
+            usr/share/byebyte/lib/sutra_xen.commit \
+            usr/share/byebyte/allowed_signers \
             usr/share/byebyte/extension/byebyte@asuramaya/extension.js \
             usr/share/byebyte/extension/byebyte@asuramaya/pill.js \
             lib/systemd/system/byebyted.service \

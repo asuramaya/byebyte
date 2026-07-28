@@ -29,7 +29,7 @@ make attack          # full command surface, oversized/garbage/nested/stall inpu
 
 `check-sutra` failing on freshness (LAG, not DRIFT) means the shared spine moved and ByeByte
 hasn't caught up. Re-vendor before releasing rather than after:
-`bash ~/code/REPOS/sutra/vendor.sh src/bin src/extension/byebyte@asuramaya`.
+`bash ~/code/REPOS/sutra/vendor.sh src/share/byebyte/lib src/extension/byebyte@asuramaya`.
 
 ## 2. Tag and publish
 
