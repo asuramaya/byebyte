@@ -209,7 +209,7 @@ check-repo:
 	if [ ! -e src/data/man/man1/byebyte.1 ] && ! grep -q 'man1/byebyte.1' docs/ARCHITECTURE.md 2>/dev/null; then \
 	    echo "check-repo FAIL: no src/data/man/man1/byebyte.1 and no exemption for it"; fail=1; \
 	fi; \
-	rows=$$(find . -maxdepth 1 -mindepth 1 ! -name .git ! -name .osiris ! -name build ! -name .claude ! -name .mcp.json | wc -l); \
+	rows=$$(git ls-files | cut -d/ -f1 | sort -u | wc -l); \
 	if [ "$$rows" -gt 12 ]; then \
 	    echo "check-repo FAIL: root has $$rows rows, standard caps it at 12"; fail=1; \
 	else \
