@@ -57,7 +57,6 @@ the root listing no longer shows them individually.
 | `packaging/scripts/seed-owner-uid.py` | the config-seeding logic shared between `install.sh` and the `.deb`'s `postinst`, so they can't drift apart |
 | `packaging/deb/` | `.deb` maintainer scripts (`postinst`, `prerm`, `postrm`). `make deb` builds the package; it never installs it |
 | `packaging/packages.txt` | the apt packages the installer needs |
-| `packaging/shellcheckrc` | shellcheck's rule exceptions; passed explicitly via `-e` flags wherever shellcheck runs (`--rcfile` only exists from shellcheck 0.11.0, and it's no longer an auto-discovered dotfile anyway) |
 | `packaging/VERSION` | the one version constant. `src/bin/byebyted` and `src/bin/byebyte-update` both read it at runtime rather than carrying their own copy; CI asserts it equals the git tag at release |
 | `docs/CHANGELOG.md` | what changed, and when |
 | `tests/` | `smoke.sh`, `test_signing.sh`, `attack_socket.py` |
