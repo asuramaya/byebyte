@@ -12,8 +12,9 @@ and the signing key never goes near CI.
 Bump `VERSION`. It's the one version constant; `bin/byebyted`'s own `VERSION` string is
 asserted equal to it in CI, and both are asserted equal to the tag at release.
 
-Write the `docs/CHANGELOG.md` entry under a `## X.Y.Z — ...` heading that starts with the
-bare version number. This is not optional bookkeeping: the release workflow lifts that
+Write the `docs/CHANGELOG.md` entry under a `## X.Y.Z` heading that starts with the bare
+version number, formatted the same way every existing entry is. This is not optional
+bookkeeping: the release workflow lifts that
 section verbatim as the release notes, and refuses to publish when the section is missing.
 Whatever you write there is what the world reads.
 
@@ -31,7 +32,7 @@ hasn't caught up. Re-vendor before releasing rather than after:
 
 ## 2. Tag and publish
 
-ByeByte's trust anchor is armed — `release-signing/allowed_signers` and `install.sh`'s
+ByeByte's trust anchor is armed: `release-signing/allowed_signers` and `install.sh`'s
 embedded twin both carry the operator's four canonical keys. If a key has rotated since the
 last release, rebuild the anchor first:
 
@@ -40,7 +41,7 @@ last release, rebuild the anchor first:
 ```
 
 This rebuilds both copies from `~/.ssh/asuramaya-master/*.pub`, byte-identical, and never
-appends — a key retired upstream disappears here too. It's a full rebuild every time, so
+appends. A key retired upstream disappears here too. It's a full rebuild every time, so
 only run it when you mean to, and never between a tag and its signing (see the rule below).
 
 ```bash
@@ -55,7 +56,7 @@ the account could sign whatever they pushed, and the anchor would be protecting 
 > **An armed anchor with no signature is a broken update path.** Once the anchor carries
 > real keys, a client whose installed copy is armed will refuse a release with no `.sig`,
 > and it's right to. So tagging and signing belong to one sitting, with the operator
-> available shortly after — never tag and walk away.
+> available shortly after. Never tag and walk away.
 
 ## 3. The operator seals it
 
@@ -76,7 +77,7 @@ awaiting the seal.
 * **A sealed release is never re-cut.** If something is wrong with it, the fix is the next
   version. Re-cutting breaks every copy that already verified it.
 * **The signing key never enters CI**, in any form, for any reason.
-* **Arming commits are scoped** to the anchor files alone, never `git add -A` — a stray add
+* **Arming commits are scoped** to the anchor files alone, never `git add -A`. A stray add
   has put unrelated files into a public commit before.
 * **`--notes-file`, never `--generate-notes`.** A commit dump is not release notes.
 

@@ -8,7 +8,7 @@ written. If you want to *use* ByeByte, [USAGE.md](USAGE.md) is the document you 
 House doctrine, shared with the rest of the family: **a daemon that owns the truth, a verb
 CLI over it, and a GNOME pill on top.** State on disk is the seed, never the master.
 
-`bin/byebyted` is the only privileged actor. It owns the truth about bytes at rest —
+`bin/byebyted` is the only privileged actor. It owns the truth about bytes at rest:
 statvfs and tmpfs-usrquota polling, EWMA burn rate, ETA-to-full, a per-directory sqlite
 index, and the category registry that `purge` and `sweep` act through. `bin/byebyte` is a
 thin verb CLI that talks to it over a control socket and prints the answer. Nothing above
@@ -24,12 +24,12 @@ byebyte <verb> ──JSON over AF_UNIX──▶ byebyted ──writes──▶ s
 
 `/run/byebyte/status.json`, mode 0640, owned by the configured `owner_uid`, written
 atomically (temp file + rename) by the daemon's poll loop. The pill watches it with
-`Gio.FileMonitor` — event-driven, no polling, and it never needs root. `byebyte status`
+`Gio.FileMonitor`, which is event-driven, no polling, and never needs root. `byebyte status`
 reads the same file when it's fresh enough, and falls back to a live socket query
 otherwise.
 
 The control socket, `/run/byebyte/control.sock`, is newline-delimited JSON, mode 0660, with
-every connection additionally checked against `SO_PEERCRED` — only root or `owner_uid` may
+every connection additionally checked against `SO_PEERCRED`: only root or `owner_uid` may
 issue commands. Two independent gates, so a mode-bit mistake alone can't open it up.
 `BYEBYTE_RUNTIME_DIR` overrides both paths, for testing.
 
@@ -40,11 +40,11 @@ issue commands. Two independent gates, so a mode-bit mistake alone can't open it
 | `bin/byebyted` | the daemon. Truth engine, index, registry, control server |
 | `bin/byebyte` | the verb CLI, a thin socket client |
 | `bin/byebyte-healthcheck` | thin wrapper over `sutra.check_health`: is status.json fresh, does the socket answer a ping |
-| `bin/byebyte-update` | thin wrapper over `sutra_update.py`, pill name `byebyte`. `auto_enabled` is hardcoded `False` — the timer only ever checks, never installs unattended |
+| `bin/byebyte-update` | thin wrapper over `sutra_update.py`, pill name `byebyte`. `auto_enabled` is hardcoded `False`, so the timer only ever checks and never installs unattended |
 | `bin/sutra.py` | the family's shared daemon skeleton, vendored byte-identical from `sutra`: config load/clamp, `write_status`, the EWMA helper, `ControlServer` |
 | `bin/sutra_update.py` | the shared update spine: the three consent tiers, signature verification |
 | `bin/sutra_xen.py` | vendored unconditionally per the family's vendor script; unused by ByeByte today, same as every other pill |
-| `bin/*.version`, `bin/*.commit` | drift anchors for each vendored file — integrity hash and the canonical commit it was vendored from |
+| `bin/*.version`, `bin/*.commit` | drift anchors for each vendored file: integrity hash and the canonical commit it was vendored from |
 | `extension/byebyte@asuramaya/` | the GNOME pill: `extension.js` is the tile, `pill.js` is the family's shared extension commons (status parsing, formatting, the update-surface widget) |
 | `config/config.json` | the seed config installed to `/etc/byebyte/config.json` on first install, never overwritten after |
 | `systemd/system/` | `byebyted.service`; `byebyte-sweep.service` + `.timer` (disabled by default, the unattended-reclaim opt-in); `byebyte-update.service` + `.timer` (daily, `--check` only) |
@@ -67,9 +67,9 @@ a real root daemon and system-wide state, so both layouts land in the same place
 The **checkout** path (`sudo ./install.sh`) installs binaries to `$PREFIX/bin`
 (`$PREFIX` defaults to `/usr/local`), the vendored spine and the release-signing anchor to
 `$PREFIX/share/byebyte`, seeds `/etc/byebyte/config.json` once, and enables `byebyted` plus
-the daily update-check timer. It never re-execs itself as root — an incident-driven
-doctrine (a past sibling repo misattributed the human user to root by self-elevating), so
-`install.sh` checks `EUID` itself and prints guidance if `sudo` was forgotten, rather than
+the daily update-check timer. It never re-execs itself as root, an incident-driven
+doctrine after a past sibling repo misattributed the human user to root by self-elevating.
+So `install.sh` checks `EUID` itself and prints guidance if `sudo` was forgotten, rather than
 quietly re-invoking itself.
 
 The **`.deb`** path (`sudo dpkg -i byebyte_*.deb`) installs the same files under `/usr`
@@ -77,9 +77,9 @@ instead of `/usr/local`, and its `postinst` runs the identical config-seed and
 systemd-enable logic via `scripts/seed-owner-uid.py`, the piece factored out specifically so
 the two paths can't drift.
 
-Both layouts have to ship the **full vendored set** — `sutra.py`, `sutra_update.py`,
-`sutra_xen.py`, and the release-signing anchor — or an install works until the first update
-and then dies on an import. `tests/smoke.sh` asserts the `.deb`'s contents directly for
+Both layouts have to ship the **full vendored set**: `sutra.py`, `sutra_update.py`,
+`sutra_xen.py`, and the release-signing anchor. Skip one and an install works until the
+first update, then dies on an import. `tests/smoke.sh` asserts the `.deb`'s contents directly for
 exactly this reason; it's a mistake this family has made more than once.
 
 The GNOME pill is always a separate, no-root step (`make pill`, or `.deb`'s own activation
@@ -105,8 +105,8 @@ ByeByte's `install.sh` bootstrap can't depend on the Python it's about to instal
   `release-signing/` file exists on disk yet at that point.
 
 Both degrade to SHA256-only-with-a-warning while the anchor is unarmed, and fail closed
-forever once it's armed. The full trust chain — why SSH signatures, why a FIDO2 key, the
-principal/namespace split, the arm-then-seal ceremony — is in
+forever once it's armed. The full trust chain (why SSH signatures, why a FIDO2 key, the
+principal/namespace split, the arm-then-seal ceremony) is in
 [RELEASE-SIGNING.md](RELEASE-SIGNING.md).
 
 ## The invariants
@@ -117,7 +117,7 @@ Hardcoded in the daemon, not configurable, house security doctrine:
    it.** Config can disable a category (`purge_disabled`); it can never add a raw path or a
    new category. A tampered config cannot weaken safety.
 2. **Emergency verbs work at 100% full.** `ghosts`, `ballast release` and a targeted `purge`
-   have to run from a bare TTY when things are worst — `ballast release`'s own code path
+   have to run from a bare TTY when things are worst. `ballast release`'s own code path
    allocates nothing before the unlink, so freeing space never itself needs free space.
 3. **Headroom is effective headroom**: `min(free, quota remaining)` per mount, read via
    `quotactl_fd(2)` on x86_64. Born from a real incident: EDQUOT on a tmpfs `/tmp` while
@@ -130,7 +130,7 @@ Hardcoded in the daemon, not configurable, house security doctrine:
 ## The category registry
 
 Eight categories, id → what matches, all in `bin/byebyted`: `hf-hub` (Hugging Face hub
-cache), `pip-cache`, `uv-cache`, `thumbnails`, `project-artifacts` (kondo-style —
+cache), `pip-cache`, `uv-cache`, `thumbnails`, `project-artifacts` (kondo-style:
 `node_modules` beside `package.json`, a `.venv` containing `pyvenv.cfg`, `target` beside
 `Cargo.toml`; the marker is required, never inferred), `rotated-logs`, `journald` (shells
 out to `journalctl --vacuum-size`, deletes nothing itself), `snap-old` (disabled snap
@@ -140,13 +140,13 @@ boundaries or leave the matched root.
 `purge <category>` acts on one category at a time (`--all` is refused) and is dry-run by
 default. `sweep` reclaims unattended, gated by double consent: the `byebyte-sweep.timer`
 unit enabled (opt-in #1) and the category named in `sweep_categories` (opt-in #2, itself
-constrained to a subset of this same registry — config can arm a category, never invent
+constrained to a subset of this same registry; config can arm a category, never invent
 one). Either opt-in missing means every category only previews and ledgers a `dry_run`
 entry. Kernel removal (`kernels`) stays report-only unconditionally, even under `sweep`,
 since unattended removal is a materially different capability that hasn't been authorized.
 
 Every purge, sweep act, and ballast release appends one line to
-`/var/lib/byebyte/ledger.jsonl` — timestamp, category, `target`, bytes, status. Lines
+`/var/lib/byebyte/ledger.jsonl`: timestamp, category, `target`, bytes, status. Lines
 written before the `target` field existed used `path` for the same thing; history is never
 rewritten, and readers treat `path` as a legacy alias.
 
@@ -163,7 +163,7 @@ fastest. When `CAP_SYS_ADMIN` is available (root, x86_64), a background `fanotif
 additionally names *which directory* each pid is writing to, aggregated in memory and capped
 at `burn_path_lru` entries (oldest evicted first) so a hostile write pattern can't grow it
 without bound. Absent the capability or on another architecture, `burn` names pids only,
-exactly as before — never an error.
+exactly as before, never an error.
 
 ## Conventions worth knowing before you edit
 
@@ -173,11 +173,11 @@ exactly as before — never an error.
 * The category registry is the only path to deletion. A new cleanup idea is a new detector
   with its own positive match, never a config-driven path.
 * Device names, discovered devices, and anything else that comes from outside the machine
-  don't apply here — ByeByte's only external input is the filesystem itself, so path
+  don't apply here. ByeByte's only external input is the filesystem itself, so path
   handling (symlink resolution, device-boundary checks, realpath containment) is the
   equivalent hostile-input surface, and every detector goes through it.
-* Owner-home paths are derived from `owner_uid`'s passwd entry, never `$HOME` — the daemon
-  runs as root and `$HOME` there means nothing.
+* Owner-home paths are derived from `owner_uid`'s passwd entry, never `$HOME`. The daemon
+  runs as root, and `$HOME` there means nothing.
 
 ## Standard exemptions
 

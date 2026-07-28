@@ -14,12 +14,12 @@ byebyte status              # headroom, burn rate, ETA-to-full, quota per mount
 ```
 
 Where `df` gives a percentage, `status` gives a deadline: free space, burn rate, and
-time-until-full, including quota headroom on tmpfs — where "disk full" errors happen while
+time-until-full, including quota headroom on tmpfs, where "disk full" errors happen while
 `df` still swears everything is fine.
 
 ```bash
 byebyte why [path] [--limit N]     # instant du-tree from the index, age-tagged
-byebyte blame [--since T]          # what grew since T — 1d, 1w, or YYYY-MM-DD
+byebyte blame [--since T]          # what grew since T (1d, 1w, or YYYY-MM-DD)
 ```
 
 `why` answers "what's big"; `blame` answers "what got bigger." Both read the index rather
@@ -39,7 +39,7 @@ The index refreshes nightly on its own; `scan` is for when you don't want to wai
 byebyte purge <category> [--yes]
 ```
 
-Deletes what a compiled-in category detector positively matches — never a path you type in.
+Deletes what a compiled-in category detector positively matches, never a path you type in.
 Dry-run by default; `--yes` executes. `--all` is refused on purpose, one category per act.
 Categories: `hf-hub`, `pip-cache`, `uv-cache`, `thumbnails`, `project-artifacts`,
 `rotated-logs`, `journald`, `snap-old`. Every deletion is appended to
@@ -49,8 +49,8 @@ Categories: `hf-hub`, `pip-cache`, `uv-cache`, `thumbnails`, `project-artifacts`
 byebyte ghosts
 ```
 
-Deleted-but-open files still holding disk blocks — the classic "`df` and `du` disagree"
-mystery — grouped by the process holding them and the mount they live on. Report-only; it
+Deleted-but-open files still holding disk blocks: the classic "`df` and `du` disagree"
+mystery, grouped by the process holding them and the mount they live on. Report-only; it
 never signals anything, it just tells you who to restart.
 
 ```bash
@@ -65,7 +65,7 @@ begin with.
 byebyte kernels
 ```
 
-Lists removable kernel packages — installed, not running, not the newest — and prints the
+Lists removable kernel packages (installed, not running, not the newest) and prints the
 exact `apt autoremove` line. It never runs `apt` itself.
 
 ```bash
@@ -81,7 +81,7 @@ pile of ghosts, quota headroom running low.
 byebyte burn [--seconds N] [--limit N]
 ```
 
-Live per-process write rates, sampled over `N` seconds (default 5, clamped 1–30). As root,
+Live per-process write rates, sampled over `N` seconds (default 5, clamped 1-30). As root,
 with `CAP_SYS_ADMIN` available, each writer also names the directory it's writing to. Absent
 that capability, writers are named by pid only.
 
@@ -93,9 +93,9 @@ byebyte sweep --history [--limit N]
 ```
 
 The unattended reclaim policy, off by default and double-consent when it isn't. Consent #1
-is the `byebyte-sweep.timer` unit — disabled unless you enable it. Consent #2 is naming a
+is the `byebyte-sweep.timer` unit, disabled unless you enable it. Consent #2 is naming a
 category in `sweep_categories` in `/etc/byebyte/config.json`, itself always a subset of
-`purge`'s own compiled-in categories — config can arm a category, never invent one. Missing
+`purge`'s own compiled-in categories; config can arm a category, never invent one. Missing
 either consent means every call only previews and ledgers a `dry_run` entry; nothing is
 deleted. Kernel removal is never armable through `sweep`, regardless of config. `--history`
 replays past sweep acts and previews from the ledger, most recent first.
@@ -106,7 +106,7 @@ replays past sweep acts and previews from the ledger, most recent first.
 byebyte update [--check] [--json]
 ```
 
-`--check` reports whether a newer release exists — the same call the daily timer makes,
+`--check` reports whether a newer release exists. It's the same call the daily timer makes,
 notify-only. A bare `update` is the manual-install consent tier; there is no unattended
 install tier wired up from this CLI. Before installing anything, `update` verifies the
 release against its published `SHA256SUMS` manifest, and its SSH signature once the trust
@@ -115,8 +115,8 @@ anchor is armed. See [RELEASE-SIGNING.md](RELEASE-SIGNING.md) for what that mean
 ## The Quick Settings tile
 
 The **byebyte** tile sits in GNOME's Quick Settings once the pill is installed
-(`make pill`, then `gnome-extensions enable byebyte@asuramaya`, then log out and back in —
-Wayland only loads extensions at login). Collapsed, it shows the tightest mount's headroom
+(`make pill`, then `gnome-extensions enable byebyte@asuramaya`, then log out and back in,
+since Wayland only loads extensions at login). Collapsed, it shows the tightest mount's headroom
 and ETA, heating up as the deadline shrinks and turning red on a write failure. Expanded, it
 lists per-mount headroom and the index's top growers. An update row appears once
 `byebyte update --check --json` reports one available, and installs with a click
@@ -131,7 +131,7 @@ it is instant rather than blocking on a live query.
 `/etc/byebyte/config.json` is the seed, never the master: every key is typed and clamped on
 load, unknown keys are ignored, and a tampered file can tune numbers within their documented
 ranges but can never grant the daemon a new ability. It's seeded once at install
-(`owner_uid` from the installing `sudo` call) and never overwritten by a reinstall — edit it
+(`owner_uid` from the installing `sudo` call) and never overwritten by a reinstall. Edit it
 by hand and restart `byebyted` to pick up changes.
 
 The full key/default/clamp table is in `man byebyted`. The two worth knowing about day to
@@ -142,7 +142,7 @@ arm for unattended reclaim, see above).
 
 **`byebyte: command not found`**
 `/usr/local/bin` (or `/usr/bin` for a `.deb` install) isn't on your `PATH`, or the daemon
-isn't installed yet — `man byebyte` won't render either. Check `sudo systemctl status
+isn't installed yet, so `man byebyte` won't render either. Check `sudo systemctl status
 byebyted`.
 
 **No byebyte tile in Quick Settings**
@@ -155,7 +155,7 @@ Check `byebyte-healthcheck`, or `sudo systemctl status byebyted` directly. The d
 running.
 
 **A quota-backed mount shows full while `df` disagrees**
-That's the invariant this tool exists for — effective headroom is
+That's the invariant this tool exists for: effective headroom is
 `min(free, quota remaining)`, and `df` can't see the quota half. `byebyte status` is the
 correct number; trust it over `df` on a quota-backed mount.
 
