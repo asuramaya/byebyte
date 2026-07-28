@@ -27,7 +27,10 @@ import sys
 
 import sutra_update
 
-_SRC_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_SRC_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# three dirnames: byebyte-update -> src/bin -> src -> the repo root, since
+# this file lives at src/bin/byebyte-update now (REPO-STANDARD.md tree
+# pass) rather than bin/byebyte-update.
 # .deb installs share/ under /usr; install.sh's source install defaults
 # PREFIX to /usr/local — both are real, so both are checked before falling
 # back to the repo-relative path for a dev checkout that's never been
@@ -37,7 +40,7 @@ VERSION_CANDIDATES = ("/usr/share/byebyte/VERSION",
                       os.path.join(_SRC_DIR, "packaging", "VERSION"))
 ANCHOR_CANDIDATES = ["/usr/share/byebyte/allowed_signers",
                      "/usr/local/share/byebyte/allowed_signers",
-                     os.path.join(_SRC_DIR, "release-signing", "allowed_signers")]
+                     os.path.join(_SRC_DIR, "packaging", "release-signing", "allowed_signers")]
 
 
 def installed_version():

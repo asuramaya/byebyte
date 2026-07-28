@@ -27,7 +27,11 @@ import time
 
 import sutra
 
-_SRC_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_SRC_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# three dirnames: byebyted -> src/bin -> src -> the repo root, since this
+# file lives at src/bin/byebyted now (REPO-STANDARD.md tree pass) rather
+# than bin/byebyted. A depth-relative path like this breaks silently on a
+# move like that one level deeper -- checked directly, not just by smoke.
 # packaging/VERSION is the one version constant (REPO-STANDARD.md); a
 # hardcoded twin kept equal only by a CI assertion is two truths with a
 # referee. .deb installs share/ under /usr, install.sh's source install

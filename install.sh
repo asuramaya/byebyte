@@ -141,7 +141,7 @@ bootstrap_from_release() {
   echo "  (then log out and back in once — Wayland reloads extensions at login)"
 }
 
-if [[ ! -f "$SRC/bin/byebyted" ]]; then
+if [[ ! -f "$SRC/src/bin/byebyted" ]]; then
   bootstrap_from_release
   exit 0
 fi
@@ -158,7 +158,7 @@ echo "== byebyte ${VERSION} installer =="
 # 1. binaries + version marker (root-owned, not group/world writable)
 echo "-- binaries -> $BINDIR"
 for b in byebyted byebyte byebyte-healthcheck byebyte-update; do
-  install -m 0755 -o root -g root "$SRC/bin/$b" "$BINDIR/$b"
+  install -m 0755 -o root -g root "$SRC/src/bin/$b" "$BINDIR/$b"
 done
 # sutra + sutra_update are imported modules, not entry points (0644, no
 # +x) — but they're siblings byebyted/byebyte/byebyte-healthcheck/
@@ -166,20 +166,20 @@ done
 # own script-directory sys.path[0] rule expects. The .deb has always done
 # this (Makefile's deb: target); install.sh had fallen behind since sutra's
 # adoption — a source install would ModuleNotFoundError without this.
-install -m 0644 -o root -g root "$SRC/bin/sutra.py" "$BINDIR/sutra.py"
-install -m 0644 -o root -g root "$SRC/bin/sutra_update.py" "$BINDIR/sutra_update.py"
-install -m 0644 -o root -g root "$SRC/bin/sutra_xen.py" "$BINDIR/sutra_xen.py"
+install -m 0644 -o root -g root "$SRC/src/bin/sutra.py" "$BINDIR/sutra.py"
+install -m 0644 -o root -g root "$SRC/src/bin/sutra_update.py" "$BINDIR/sutra_update.py"
+install -m 0644 -o root -g root "$SRC/src/bin/sutra_xen.py" "$BINDIR/sutra_xen.py"
 install -d -m 0755 "$SHAREDIR"
 install -m 0644 "$SRC/packaging/VERSION" "$SHAREDIR/VERSION"
 # release-signing trust anchor (docs/RELEASE-SIGNING.md) — empty until a key
 # is provisioned; byebyte-update degrades to SHA256-only until it isn't
-install -m 0644 "$SRC/release-signing/allowed_signers" "$SHAREDIR/allowed_signers"
+install -m 0644 "$SRC/packaging/release-signing/allowed_signers" "$SHAREDIR/allowed_signers"
 
 # 1b. man pages
 echo "-- man pages -> $PREFIX/share/man"
 install -d -m 0755 "$PREFIX/share/man/man1" "$PREFIX/share/man/man8"
-install -m 0644 "$SRC/man/byebyte.1" "$PREFIX/share/man/man1/byebyte.1"
-install -m 0644 "$SRC/man/byebyted.8" "$PREFIX/share/man/man8/byebyted.8"
+install -m 0644 "$SRC/src/data/man/man1/byebyte.1" "$PREFIX/share/man/man1/byebyte.1"
+install -m 0644 "$SRC/src/data/man/man8/byebyted.8" "$PREFIX/share/man/man8/byebyted.8"
 
 # 2. config: seeded once, then NEVER overwritten (kept across reinstalls).
 # Config is the seed, never the master — a tampered one can't weaken the
@@ -195,10 +195,10 @@ else
     echo "   owner_uid to 1000; edit /etc/byebyte/config.json if that's wrong."
   fi
   install -d -m 0755 /etc/byebyte
-  # shared with the .deb's postinst (scripts/seed-owner-uid.py) so the two
-  # installers can't drift on what "seeding" means
-  python3 "$SRC/scripts/seed-owner-uid.py" \
-    "$SRC/config/config.json" /etc/byebyte/config.json "$OWNER_UID"
+  # shared with the .deb's postinst (packaging/scripts/seed-owner-uid.py) so
+  # the two installers can't drift on what "seeding" means
+  python3 "$SRC/packaging/scripts/seed-owner-uid.py" \
+    "$SRC/src/data/config/config.json" /etc/byebyte/config.json "$OWNER_UID"
   chmod 0644 /etc/byebyte/config.json
 fi
 
@@ -210,11 +210,11 @@ fi
 # whether this timer is enabled (family doctrine: updates and unattended
 # reclaim are both click-to-install/opt-in, never on by default).
 echo "-- systemd units + enabling"
-install -m 0644 "$SRC/systemd/system/byebyted.service"       "$UNITDIR/byebyted.service"
-install -m 0644 "$SRC/systemd/system/byebyte-update.service" "$UNITDIR/byebyte-update.service"
-install -m 0644 "$SRC/systemd/system/byebyte-update.timer"   "$UNITDIR/byebyte-update.timer"
-install -m 0644 "$SRC/systemd/system/byebyte-sweep.service"  "$UNITDIR/byebyte-sweep.service"
-install -m 0644 "$SRC/systemd/system/byebyte-sweep.timer"    "$UNITDIR/byebyte-sweep.timer"
+install -m 0644 "$SRC/src/data/systemd/system/byebyted.service"       "$UNITDIR/byebyted.service"
+install -m 0644 "$SRC/src/data/systemd/system/byebyte-update.service" "$UNITDIR/byebyte-update.service"
+install -m 0644 "$SRC/src/data/systemd/system/byebyte-update.timer"   "$UNITDIR/byebyte-update.timer"
+install -m 0644 "$SRC/src/data/systemd/system/byebyte-sweep.service"  "$UNITDIR/byebyte-sweep.service"
+install -m 0644 "$SRC/src/data/systemd/system/byebyte-sweep.timer"    "$UNITDIR/byebyte-sweep.timer"
 systemctl daemon-reload
 systemctl enable byebyted.service
 # `enable --now` on an ALREADY-active unit is a no-op start — it would leave

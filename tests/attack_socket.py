@@ -36,7 +36,7 @@ env["BYEBYTE_RUNTIME_DIR"] = RD
 env["BYEBYTE_STATE_DIR"] = os.path.join(RD, "state")
 env["BYEBYTE_TEST_HOME"] = os.path.join(FIX, "home")
 proc = subprocess.Popen(
-    [sys.executable, os.path.join(HERE, "bin", "byebyted"),
+    [sys.executable, os.path.join(HERE, "src", "bin", "byebyted"),
      "--config", os.path.join(RD, "config.json")],
     env=env)
 

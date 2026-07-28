@@ -1,8 +1,9 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-or-later
 # byebyte postinst — shares the config-seed logic with install.sh via
-# /usr/share/byebyte/scripts/seed-owner-uid.py (packaged from scripts/ in
-# the source tree) so the two installers can't drift apart.
+# /usr/share/byebyte/scripts/seed-owner-uid.py (packaged from
+# packaging/scripts/ in the source tree) so the two installers can't drift
+# apart.
 set -e
 
 CONFIG=/etc/byebyte/config.json

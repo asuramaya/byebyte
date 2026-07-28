@@ -9,8 +9,8 @@ and the signing key never goes near CI.
 
 ## 1. Prepare
 
-Bump `packaging/VERSION`. It's the one version constant: `bin/byebyted` and
-`bin/byebyte-update` both read it at runtime rather than carrying their own copy, and CI
+Bump `packaging/VERSION`. It's the one version constant: `src/bin/byebyted` and
+`src/bin/byebyte-update` both read it at runtime rather than carrying their own copy, and CI
 asserts it equals the tag at release.
 
 Write the `docs/CHANGELOG.md` entry under a `## X.Y.Z` heading that starts with the bare
@@ -29,11 +29,11 @@ make attack          # full command surface, oversized/garbage/nested/stall inpu
 
 `check-sutra` failing on freshness (LAG, not DRIFT) means the shared spine moved and ByeByte
 hasn't caught up. Re-vendor before releasing rather than after:
-`bash ~/code/REPOS/sutra/vendor.sh bin extension/byebyte@asuramaya`.
+`bash ~/code/REPOS/sutra/vendor.sh src/bin src/extension/byebyte@asuramaya`.
 
 ## 2. Tag and publish
 
-ByeByte's trust anchor is armed: `release-signing/allowed_signers` and `install.sh`'s
+ByeByte's trust anchor is armed: `packaging/release-signing/allowed_signers` and `install.sh`'s
 embedded twin both carry the operator's four canonical keys. If a key has rotated since the
 last release, rebuild the anchor first:
 

@@ -19,16 +19,18 @@ The relevant attacker is an **unprivileged local process** abusing the root
 daemon. The daemon has **no network attack surface at all** — `byebyted` never
 opens anything but an `AF_UNIX` socket and never speaks to the internet.
 
-Hardening in place (see `bin/byebyted` and `systemd/system/byebyted.service`):
+Hardening in place (see `src/bin/byebyted` and `src/data/systemd/system/byebyted.service`):
 
 - **SO_PEERCRED authorization** — only root and the configured `owner_uid`
   may issue commands, checked on every connection *on top of* the socket's
   file mode (`0660`, chowned to `owner_uid`). Two independent gates.
 - **All input is hostile by default** — bounded reads (4 KiB line cap, 5 s
-  socket timeout), JSON only, exactly two commands (`ping`, `status`);
-  anything else — garbage bytes, unknown commands, non-objects — is answered
-  with `{"error": ...}` and the connection dies. Malformed input can never
-  crash the daemon; `make smoke` fuzzes this on every run.
+  socket timeout), JSON only, a fixed set of known commands (`ping`,
+  `status`, `why`, `blame`, `scan`, `purge`, `ghosts`, `ballast`, `kernels`,
+  `advise`, `burn`, `sweep`); anything else — garbage bytes, unknown
+  commands, non-objects — is answered with `{"error": ...}` and the
+  connection dies. Malformed input can never crash the daemon; `make smoke`
+  and `make attack` fuzz this on every run.
 - **Config is the seed, never the master** — `/etc/byebyte/config.json` is
   typed, clamped, and unknown-key-ignoring on load. A tampered config can
   tune numbers within compiled-in clamps and select mounts; it cannot grant
@@ -50,9 +52,10 @@ piece**, so it gets its own rules:
   notifies and logs, it never installs unattended. The service unit runs it
   as an **unprivileged `DynamicUser`**, because checking needs no privilege.
 - Installing a new version stays a **deliberate, interactive act**
-  (click-to-install doctrine). In this version the install path is an
-  explicit stub: it installs *nothing* until signed/checksummed release
-  assets exist — updates come from `git pull && sudo ./install.sh`.
+  (click-to-install doctrine): a bare `byebyte update`, never the timer.
+  Every install verifies the release's `SHA256SUMS` manifest, and its SSH
+  signature once the trust anchor is armed (it is, as of the release after
+  v0.11.0) — see [RELEASE-SIGNING.md](../docs/RELEASE-SIGNING.md).
 - The check is bounded: 5 s timeout, 1 MiB response cap, HTTPS to
   `api.github.com` only.
 

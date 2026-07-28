@@ -32,6 +32,17 @@ list of things it's allowed to touch, never a path you type in:
 On a btrfs mount, `why` and `blame` read the filesystem's own subvolume and snapshot
 accounting instead of a plain walk, which lies about space that snapshots pin.
 
+## Map
+
+| | |
+|---|---|
+| Use it | [docs/USAGE.md](docs/USAGE.md), or `man byebyte` |
+| Change it | [.github/CONTRIBUTING.md](.github/CONTRIBUTING.md) |
+| Understand how it's built | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| Cut a release | [docs/RELEASING.md](docs/RELEASING.md) |
+| See what changed | [docs/CHANGELOG.md](docs/CHANGELOG.md) |
+| Report a vulnerability | [.github/SECURITY.md](.github/SECURITY.md) |
+
 ## Install
 
 Two deliberate steps: one needs root, one never does:
@@ -119,7 +130,7 @@ add one. `install.sh` and `byebyte update` fetch over HTTPS and verify checksum 
 before installing anything.
 
 The full threat model, and how to report a vulnerability privately, is in
-[SECURITY.md](SECURITY.md).
+[.github/SECURITY.md](.github/SECURITY.md).
 
 Free software, GPLv3, stdlib-only Python. No telemetry, no product, no website. The dream
 is upstream. byebyte belongs to a family of small GNOME utilities that share a runtime

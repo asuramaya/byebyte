@@ -67,7 +67,7 @@ EOF
 
 BYEBYTE_RUNTIME_DIR=$RD BYEBYTE_STATE_DIR=$RD/state BYEBYTE_TEST_HOME=$HOME_FIX \
     BYEBYTE_TEST_BOOT=$BOOT_FIX \
-    python3 bin/byebyted --config "$RD/config.json" &
+    python3 src/bin/byebyted --config "$RD/config.json" &
 DPID=$!
 
 for _ in $(seq 1 40); do
@@ -119,9 +119,9 @@ assert ask(b'{"cmd":"ping"}\n')["ok"] is True, "daemon died after abuse"
 print("socket ok: ping, status, hostile input survived")
 PY
 
-BYEBYTE_RUNTIME_DIR=$RD python3 bin/byebyte status | grep -q "free" \
+BYEBYTE_RUNTIME_DIR=$RD python3 src/bin/byebyte status | grep -q "free" \
     || { echo "SMOKE FAIL: CLI status empty"; exit 1; }
-BYEBYTE_RUNTIME_DIR=$RD python3 bin/byebyte status --json | python3 -c \
+BYEBYTE_RUNTIME_DIR=$RD python3 src/bin/byebyte status --json | python3 -c \
     "import json,sys; json.load(sys.stdin)" \
     || { echo "SMOKE FAIL: CLI json invalid"; exit 1; }
 
@@ -184,9 +184,9 @@ print("index ok: scan, why ranks the pig, blame sees +3M growth, hostile input s
 PY
 
 # CLI verbs end-to-end (human output)
-BYEBYTE_RUNTIME_DIR=$RD python3 bin/byebyte why "$FIX" | grep -q "/big" \
+BYEBYTE_RUNTIME_DIR=$RD python3 src/bin/byebyte why "$FIX" | grep -q "/big" \
     || { echo "SMOKE FAIL: CLI why missing /big"; exit 1; }
-BYEBYTE_RUNTIME_DIR=$RD python3 bin/byebyte blame --since 1h | grep -q "growth" \
+BYEBYTE_RUNTIME_DIR=$RD python3 src/bin/byebyte blame --since 1h | grep -q "growth" \
     || { echo "SMOKE FAIL: CLI blame missing growth"; exit 1; }
 
 # --- M3: purge — registry-gated, marker-gated, ledgered, hostile-input-proof
@@ -258,7 +258,7 @@ PY
 # purge --all exits non-zero by design (the refusal IS the success case),
 # so capture output first — piping straight into grep under pipefail would
 # report the CLI's expected exit(1) as a grep failure
-out=$(BYEBYTE_RUNTIME_DIR=$RD python3 bin/byebyte purge --all 2>&1) || true
+out=$(BYEBYTE_RUNTIME_DIR=$RD python3 src/bin/byebyte purge --all 2>&1) || true
 echo "$out" | grep -q "one category per act" \
     || { echo "SMOKE FAIL: purge --all not refused"; exit 1; }
 
@@ -387,12 +387,12 @@ python3 - <<'PY'
 import importlib.util, sys
 from importlib.machinery import SourceFileLoader
 
-# bin/byebyted has no .py suffix, so spec_from_file_location can't infer a
+# src/bin/byebyted has no .py suffix, so spec_from_file_location can't infer a
 # loader from the extension — hand it one explicitly. It `import sutra` as
-# a sibling, so bin/ needs to be on sys.path first (normally the running
+# a sibling, so src/bin needs to be on sys.path first (normally the running
 # script's own dir goes there automatically; a manual load doesn't get that).
-sys.path.insert(0, "bin")
-loader = SourceFileLoader("byebyted_mod", "bin/byebyted")
+sys.path.insert(0, "src/bin")
+loader = SourceFileLoader("byebyted_mod", "src/bin/byebyted")
 spec = importlib.util.spec_from_loader("byebyted_mod", loader)
 mod = importlib.util.module_from_spec(spec)
 loader.exec_module(mod)
@@ -458,7 +458,7 @@ if [ "$btrfs_ready" -eq 1 ] && sudo -n true 2>/dev/null; then
         sudo -n btrfs quota rescan -w "$BTRFS_MNT" >/dev/null 2>&1 || true
 
         # read as root, same as the real daemon always does in production
-        sudo -n python3 - "$(pwd)/bin/byebyted" "$BTRFS_MNT" <<'PY'
+        sudo -n python3 - "$(pwd)/src/bin/byebyted" "$BTRFS_MNT" <<'PY'
 import importlib.util, os, sys
 from importlib.machinery import SourceFileLoader
 
@@ -617,7 +617,7 @@ print(f"advise ok: {len(doc['findings'])} finding(s), fast_grower on "
       f"{growers[0]['path']}")
 PY
 
-BYEBYTE_RUNTIME_DIR=$RD python3 bin/byebyte advise | grep -q "growth" \
+BYEBYTE_RUNTIME_DIR=$RD python3 src/bin/byebyte advise | grep -q "growth" \
     || { echo "SMOKE FAIL: CLI advise missing growth grower"; exit 1; }
 
 # --- M4: burn — a real disk-backed writer is named at its actual rate
@@ -683,7 +683,7 @@ print(f"burn ok: named pid {child.pid} at {writer['bytes_per_sec']/1e6:.1f}MB/s{
       "hostile input survived")
 PY
 
-BYEBYTE_RUNTIME_DIR=$RD python3 bin/byebyte burn --seconds 1 --json | python3 -c \
+BYEBYTE_RUNTIME_DIR=$RD python3 src/bin/byebyte burn --seconds 1 --json | python3 -c \
     "import json,sys; json.load(sys.stdin)" \
     || { echo "SMOKE FAIL: CLI burn json invalid"; exit 1; }
 
@@ -763,10 +763,10 @@ print(f"sweep ok: dry-run previews unarmed categories, armed hf-hub freed "
       f"{hf['freed_bytes']}B for real, both paths ledgered, history replays")
 PY
 
-BYEBYTE_RUNTIME_DIR=$RD python3 bin/byebyte sweep --dry --json | python3 -c \
+BYEBYTE_RUNTIME_DIR=$RD python3 src/bin/byebyte sweep --dry --json | python3 -c \
     "import json,sys; json.load(sys.stdin)" \
     || { echo "SMOKE FAIL: CLI sweep json invalid"; exit 1; }
-BYEBYTE_RUNTIME_DIR=$RD python3 bin/byebyte sweep --history | grep -q "sweep:hf-hub" \
+BYEBYTE_RUNTIME_DIR=$RD python3 src/bin/byebyte sweep --history | grep -q "sweep:hf-hub" \
     || { echo "SMOKE FAIL: CLI sweep --history missing hf-hub"; exit 1; }
 
 # --- M4: make deb — builds a real .deb; contents include bins+units+man.

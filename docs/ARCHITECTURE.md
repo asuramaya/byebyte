@@ -8,9 +8,9 @@ written. If you want to *use* ByeByte, [USAGE.md](USAGE.md) is the document you 
 House doctrine, shared with the rest of the family: **a daemon that owns the truth, a verb
 CLI over it, and a GNOME pill on top.** State on disk is the seed, never the master.
 
-`bin/byebyted` is the only privileged actor. It owns the truth about bytes at rest:
+`src/bin/byebyted` is the only privileged actor. It owns the truth about bytes at rest:
 statvfs and tmpfs-usrquota polling, EWMA burn rate, ETA-to-full, a per-directory sqlite
-index, and the category registry that `purge` and `sweep` act through. `bin/byebyte` is a
+index, and the category registry that `purge` and `sweep` act through. `src/bin/byebyte` is a
 thin verb CLI that talks to it over a control socket and prints the answer. Nothing above
 that socket ever needs privilege.
 
@@ -35,26 +35,30 @@ issue commands. Two independent gates, so a mode-bit mistake alone can't open it
 
 ## Where everything lives
 
+`src/` is the one row that groups four directories rather than naming one thing: `bin/`,
+`data/` and `extension/` all live under it, so this map matters more than it used to, since
+the root listing no longer shows them individually.
+
 | Path | What it is |
 |---|---|
-| `bin/byebyted` | the daemon. Truth engine, index, registry, control server |
-| `bin/byebyte` | the verb CLI, a thin socket client |
-| `bin/byebyte-healthcheck` | thin wrapper over `sutra.check_health`: is status.json fresh, does the socket answer a ping |
-| `bin/byebyte-update` | thin wrapper over `sutra_update.py`, pill name `byebyte`. `auto_enabled` is hardcoded `False`, so the timer only ever checks and never installs unattended |
-| `bin/sutra.py` | the family's shared daemon skeleton, vendored byte-identical from `sutra`: config load/clamp, `write_status`, the EWMA helper, `ControlServer` |
-| `bin/sutra_update.py` | the shared update spine: the three consent tiers, signature verification |
-| `bin/sutra_xen.py` | vendored unconditionally per the family's vendor script; unused by ByeByte today, same as every other pill |
-| `bin/*.version`, `bin/*.commit` | drift anchors for each vendored file: integrity hash and the canonical commit it was vendored from |
-| `extension/byebyte@asuramaya/` | the GNOME pill: `extension.js` is the tile, `pill.js` is the family's shared extension commons (status parsing, formatting, the update-surface widget) |
-| `config/config.json` | the seed config installed to `/etc/byebyte/config.json` on first install, never overwritten after |
-| `systemd/system/` | `byebyted.service`; `byebyte-sweep.service` + `.timer` (disabled by default, the unattended-reclaim opt-in); `byebyte-update.service` + `.timer` (daily, `--check` only) |
-| `man/byebyte.1`, `man/byebyted.8` | the man pages, groff source, kept in sync with USAGE.md by hand |
-| `release-signing/allowed_signers` | the release-verification trust anchor. See [RELEASE-SIGNING.md](RELEASE-SIGNING.md) |
-| `scripts/seed-owner-uid.py` | the config-seeding logic shared between `install.sh` and the `.deb`'s `postinst`, so they can't drift apart |
+| `src/bin/byebyted` | the daemon. Truth engine, index, registry, control server |
+| `src/bin/byebyte` | the verb CLI, a thin socket client |
+| `src/bin/byebyte-healthcheck` | thin wrapper over `sutra.check_health`: is status.json fresh, does the socket answer a ping |
+| `src/bin/byebyte-update` | thin wrapper over `sutra_update.py`, pill name `byebyte`. `auto_enabled` is hardcoded `False`, so the timer only ever checks and never installs unattended |
+| `src/bin/sutra.py` | the family's shared daemon skeleton, vendored byte-identical from `sutra`: config load/clamp, `write_status`, the EWMA helper, `ControlServer` |
+| `src/bin/sutra_update.py` | the shared update spine: the three consent tiers, signature verification |
+| `src/bin/sutra_xen.py` | vendored unconditionally per the family's vendor script; unused by ByeByte today, same as every other pill |
+| `src/bin/*.version`, `src/bin/*.commit` | drift anchors for each vendored file: integrity hash and the canonical commit it was vendored from |
+| `src/extension/byebyte@asuramaya/` | the GNOME pill: `extension.js` is the tile, `pill.js` is the family's shared extension commons (status parsing, formatting, the update-surface widget) |
+| `src/data/config/config.json` | the seed config installed to `/etc/byebyte/config.json` on first install, never overwritten after |
+| `src/data/systemd/system/` | `byebyted.service`; `byebyte-sweep.service` + `.timer` (disabled by default, the unattended-reclaim opt-in); `byebyte-update.service` + `.timer` (daily, `--check` only) |
+| `src/data/man/man1/byebyte.1`, `src/data/man/man8/byebyted.8` | the man pages, groff source, kept in sync with USAGE.md by hand, split by section (a daemon manual belongs in section 8) |
+| `packaging/release-signing/allowed_signers` | the release-verification trust anchor. See [RELEASE-SIGNING.md](RELEASE-SIGNING.md) |
+| `packaging/scripts/seed-owner-uid.py` | the config-seeding logic shared between `install.sh` and the `.deb`'s `postinst`, so they can't drift apart |
 | `packaging/deb/` | `.deb` maintainer scripts (`postinst`, `prerm`, `postrm`). `make deb` builds the package; it never installs it |
-| `packages.txt` | the apt packages the installer needs |
-| `.shellcheckrc` | shellcheck's rule exceptions |
-| `packaging/VERSION` | the one version constant. `bin/byebyted` and `bin/byebyte-update` both read it at runtime rather than carrying their own copy; CI asserts it equals the git tag at release |
+| `packaging/packages.txt` | the apt packages the installer needs |
+| `packaging/shellcheckrc` | shellcheck's rule exceptions; passed explicitly via `-e` flags wherever shellcheck runs (`--rcfile` only exists from shellcheck 0.11.0, and it's no longer an auto-discovered dotfile anyway) |
+| `packaging/VERSION` | the one version constant. `src/bin/byebyted` and `src/bin/byebyte-update` both read it at runtime rather than carrying their own copy; CI asserts it equals the git tag at release |
 | `docs/CHANGELOG.md` | what changed, and when |
 | `tests/` | `smoke.sh`, `test_signing.sh`, `attack_socket.py` |
 | `install.sh`, `uninstall.sh` | the root installer and its symmetric removal |
@@ -74,7 +78,7 @@ quietly re-invoking itself.
 
 The **`.deb`** path (`sudo dpkg -i byebyte_*.deb`) installs the same files under `/usr`
 instead of `/usr/local`, and its `postinst` runs the identical config-seed and
-systemd-enable logic via `scripts/seed-owner-uid.py`, the piece factored out specifically so
+systemd-enable logic via `packaging/scripts/seed-owner-uid.py`, the piece factored out specifically so
 the two paths can't drift.
 
 Both layouts have to ship the **full vendored set**: `sutra.py`, `sutra_update.py`,
@@ -88,7 +92,7 @@ session.
 
 ## The update path
 
-`byebyte update` runs `bin/byebyte-update`, a thin wrapper over `bin/sutra_update.py`. That
+`byebyte update` runs `src/bin/byebyte-update`, a thin wrapper over `src/bin/sutra_update.py`. That
 file is vendored byte-identical from `sutra`, and `make check-sutra` proves it: integrity
 (the hash in the matching `.version` file) is a hard failure if it doesn't match. Freshness
 is a LAG-vs-DRIFT read against canonical git, when a canonical checkout is present (normally
@@ -102,7 +106,7 @@ ByeByte's `install.sh` bootstrap can't depend on the Python it's about to instal
   checkout or `.deb` install already exists.
 - `install.sh`'s own `verify_signature()`, used by the `curl -fsSL … | sudo bash` bootstrap,
   against an embedded copy of the anchor (`RELEASE_ALLOWED_SIGNERS`) since no
-  `release-signing/` file exists on disk yet at that point.
+  `packaging/release-signing/` file exists on disk yet at that point.
 
 Both degrade to SHA256-only-with-a-warning while the anchor is unarmed, and fail closed
 forever once it's armed. The full trust chain (why SSH signatures, why a FIDO2 key, the
@@ -129,7 +133,7 @@ Hardcoded in the daemon, not configurable, house security doctrine:
 
 ## The category registry
 
-Eight categories, id → what matches, all in `bin/byebyted`: `hf-hub` (Hugging Face hub
+Eight categories, id → what matches, all in `src/bin/byebyted`: `hf-hub` (Hugging Face hub
 cache), `pip-cache`, `uv-cache`, `thumbnails`, `project-artifacts` (kondo-style:
 `node_modules` beside `package.json`, a `.venv` containing `pyvenv.cfg`, `target` beside
 `Cargo.toml`; the marker is required, never inferred), `rotated-logs`, `journald` (shells
@@ -154,7 +158,7 @@ rewritten, and readers treat `path` as a legacy alias.
 
 On a btrfs mount, a plain directory walk lies about space, since subvolumes and snapshots
 share extents. When the `btrfs` CLI is present (a soft dependency, documented in
-`packages.txt`), `byebyted` shells out to it for read-only subvolume/snapshot/qgroup
+`packaging/packages.txt`), `byebyted` shells out to it for read-only subvolume/snapshot/qgroup
 accounting; absent the CLI or with quotas disabled, `why` and `blame` degrade to the plain
 walk plus a one-line notice, never an error. Nothing here ever mutates the filesystem.
 

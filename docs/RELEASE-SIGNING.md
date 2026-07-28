@@ -1,6 +1,6 @@
 # Release signing
 
-Status: **armed** — `release-signing/allowed_signers` (and its
+Status: **armed** — `packaging/release-signing/allowed_signers` (and its
 `install.sh`-embedded twin, `RELEASE_ALLOWED_SIGNERS`) carry the operator's
 four canonical keys as of the arming commit that followed v0.11.0's tag. v0.11.0
 itself shipped, and still verifies, as hash-only-with-a-warning: its own
@@ -45,7 +45,7 @@ attached.
 phanspeed/coldspot split their policy because they run an unattended daily
 *install* path (their update timer can auto-install once armed). ByeByte's
 `byebyte-update.timer` only ever runs `--check` (`auto_enabled` is hardcoded
-`False` in `bin/byebyte-update` — family doctrine: updates are
+`False` in `src/bin/byebyte-update` — family doctrine: updates are
 click-to-install) — it notifies, it never reaches `sutra_update.py`'s
 verify/install code at all. So every real consumer of this anchor is
 already a human-triggered action: a bare `byebyte update` (or
@@ -74,7 +74,7 @@ byebyte namespaces="byebyte-release,pills-tag" sk-ssh-ed25519@openssh.com <b64> 
 ~/code/REPOS/mudra/bin/mudra sync-signers ByeByte
 ```
 
-Rebuilds `release-signing/allowed_signers` **and** `install.sh`'s embedded
+Rebuilds `packaging/release-signing/allowed_signers` **and** `install.sh`'s embedded
 `RELEASE_ALLOWED_SIGNERS` twin — byte-identical, trailing newline included —
 from ALL 4 canonical pubkeys in `~/.ssh/asuramaya-master/*.pub` (the
 operator's own key home). Always a full rebuild, never an append. Refuses
@@ -111,7 +111,7 @@ gh release upload vX.Y.Z SHA256SUMS.sig
 
 ```sh
 sha256sum -c SHA256SUMS                                       # artifact matches the manifest
-ssh-keygen -Y verify -f release-signing/allowed_signers \
+ssh-keygen -Y verify -f packaging/release-signing/allowed_signers \
   -I byebyte -n byebyte-release -s SHA256SUMS.sig \
   < SHA256SUMS                                                 # manifest carries the operator's hand
 ```
@@ -121,16 +121,16 @@ checksum bytes. Anything else is a hard failure. Two independent
 implementations of the same algorithm, matching the family's Update-path
 convergence doctrine:
 
-- `bin/sutra_update.py`'s `verify_dir()` — the update spine, run by `byebyte
+- `src/bin/sutra_update.py`'s `verify_dir()` — the update spine, run by `byebyte
   update` / `byebyte-update`. `armed()` checks whether the anchor
-  (`anchor_candidates` in `bin/byebyte-update`: the deb path, the
+  (`anchor_candidates` in `src/bin/byebyte-update`: the deb path, the
   source-install path, then the repo-relative dev fallback) carries any
   real line; while unarmed, degrades to hash-only with a printed warning.
   Once armed: requires a `SHA256SUMS.sig` asset, fails closed on a missing
   signature or a verification failure.
 - `install.sh`'s `verify_signature()` — the `curl -fsSL .../install.sh |
   sudo bash` bootstrap's own copy of the same check, using the embedded
-  `RELEASE_ALLOWED_SIGNERS` (no sibling `release-signing/` file exists yet
+  `RELEASE_ALLOWED_SIGNERS` (no sibling `packaging/release-signing/` file exists yet
   at that point — the anchor has to travel embedded in the one file that
   WAS fetched). `tests/test_signing.sh` exercises both `has_signing_key()`
   and `verify_signature()` with a real (throwaway, non-hardware) ed25519
@@ -146,7 +146,7 @@ Per `~/code/REPOS/RELEASE.md`'s artifact ruling: every release ships **a
 release.yml` appends the tarball's hash to that same manifest. The tarball
 is built with `--prefix=ByeByte/` (extraction hygiene: it extracts into
 exactly one named directory, never bare into the caller's CWD) and
-`.gitattributes` keeps CI/dev-only paths (`.github`, `tests`, `Makefile`,
+`.gitattributes` keeps CI/dev-only paths (`.github/workflows`, `tests`, `Makefile`,
 ...) out of it.
 
 The `.deb` installs the full vendored set in both layouts — `sutra.py`,

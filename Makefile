@@ -1,5 +1,5 @@
 # byebyte — the storage demon
-.PHONY: smoke attack check check-sutra install uninstall pill deb
+.PHONY: smoke attack check check-sutra check-repo install uninstall pill deb
 
 # static checks only, matching kast/coldspot's grammar (REPO-STANDARD.md):
 # everything CI runs individually, in one local target, plus the vendored
@@ -7,17 +7,17 @@
 # (real daemon, real sockets) so it stays fast enough to run before every
 # commit. check-repo (the family's structural gate) hangs off this target.
 check: check-sutra
-	python3 -m py_compile bin/byebyted bin/byebyte bin/byebyte-healthcheck bin/byebyte-update \
-	    bin/sutra.py bin/sutra_update.py bin/sutra_xen.py
+	python3 -m py_compile src/bin/byebyted src/bin/byebyte src/bin/byebyte-healthcheck src/bin/byebyte-update \
+	    src/bin/sutra.py src/bin/sutra_update.py src/bin/sutra_xen.py
 	bash -n install.sh uninstall.sh tests/smoke.sh tests/test_signing.sh
-	shellcheck install.sh uninstall.sh tests/smoke.sh tests/test_signing.sh
+	shellcheck -e SC1090,SC1091 install.sh uninstall.sh tests/smoke.sh tests/test_signing.sh
 	@mjs=$$(mktemp --suffix=.mjs); \
-	cp 'extension/byebyte@asuramaya/extension.js' "$$mjs"; \
+	cp 'src/extension/byebyte@asuramaya/extension.js' "$$mjs"; \
 	node --check "$$mjs"; \
 	rm -f "$$mjs"
-	python3 -c "import json; json.load(open('extension/byebyte@asuramaya/metadata.json'))"
-	groff -man -Tutf8 -ww man/byebyte.1 > /dev/null
-	groff -t -man -Tutf8 -ww man/byebyted.8 > /dev/null
+	python3 -c "import json; json.load(open('src/extension/byebyte@asuramaya/metadata.json'))"
+	groff -man -Tutf8 -ww src/data/man/man1/byebyte.1 > /dev/null
+	groff -t -man -Tutf8 -ww src/data/man/man8/byebyted.8 > /dev/null
 	@echo "check: all static checks passed"
 
 VERSION := $(shell tr -d '[:space:]' < packaging/VERSION)
@@ -51,8 +51,8 @@ smoke: check-sutra
 check-sutra:
 	@real_home=$$(getent passwd "$${SUDO_USER:-$$(id -un)}" | cut -d: -f6); \
 	canon="$${real_home:-$$HOME}/code/REPOS/sutra"; \
-	for f in bin/sutra.py bin/sutra_update.py bin/sutra_xen.py \
-	         extension/byebyte@asuramaya/pill.js; do \
+	for f in src/bin/sutra.py src/bin/sutra_update.py src/bin/sutra_xen.py \
+	         src/extension/byebyte@asuramaya/pill.js; do \
 	    vf="$${f%.py}"; vf="$${vf%.js}.version"; \
 	    cf="$${f%.py}"; cf="$${cf%.js}.commit"; \
 	    ver=$$(cut -d' ' -f1 "$$vf" 2>/dev/null); \
@@ -60,7 +60,7 @@ check-sutra:
 	    actual=$$(sha256sum "$$f" | cut -d' ' -f1); \
 	    if [ "$$sha" != "$$actual" ]; then \
 	        echo "check-sutra FAIL: $$f doesn't match $$vf" \
-	             "(hand-edited? re-vendor: bash ~/code/REPOS/sutra/vendor.sh bin extension/byebyte@asuramaya)"; \
+	             "(hand-edited? re-vendor: bash ~/code/REPOS/sutra/vendor.sh src/bin src/extension/byebyte@asuramaya)"; \
 	        exit 1; \
 	    fi; \
 	    echo "check-sutra: integrity ok ($$f, $$ver, sha256 $$sha)"; \
@@ -113,7 +113,7 @@ uninstall:
 # the pill only ever needs your own $$HOME and gnome-shell session — never root
 pill:
 	mkdir -p $(HOME)/.local/share/gnome-shell/extensions
-	cp -r extension/byebyte@asuramaya $(HOME)/.local/share/gnome-shell/extensions/
+	cp -r src/extension/byebyte@asuramaya $(HOME)/.local/share/gnome-shell/extensions/
 	@echo "pill installed — now: gnome-extensions enable byebyte@asuramaya"
 	@echo "then log out and back in once (Wayland reloads extensions at login)"
 
@@ -132,21 +132,21 @@ deb:
 	install -d -m 0755 $(DEBROOT)/usr/share/man/man8
 	install -d -m 0755 $(DEBROOT)/etc/byebyte
 	install -d -m 0755 $(DEBROOT)/lib/systemd/system
-	install -m 0755 bin/byebyted bin/byebyte bin/byebyte-healthcheck bin/byebyte-update $(DEBROOT)/usr/bin/
-	install -m 0644 bin/sutra.py $(DEBROOT)/usr/bin/sutra.py
-	install -m 0644 bin/sutra_update.py $(DEBROOT)/usr/bin/sutra_update.py
-	install -m 0644 bin/sutra_xen.py $(DEBROOT)/usr/bin/sutra_xen.py
+	install -m 0755 src/bin/byebyted src/bin/byebyte src/bin/byebyte-healthcheck src/bin/byebyte-update $(DEBROOT)/usr/bin/
+	install -m 0644 src/bin/sutra.py $(DEBROOT)/usr/bin/sutra.py
+	install -m 0644 src/bin/sutra_update.py $(DEBROOT)/usr/bin/sutra_update.py
+	install -m 0644 src/bin/sutra_xen.py $(DEBROOT)/usr/bin/sutra_xen.py
 	install -m 0644 packaging/VERSION $(DEBROOT)/usr/share/byebyte/VERSION
-	install -m 0644 release-signing/allowed_signers $(DEBROOT)/usr/share/byebyte/allowed_signers
-	install -m 0755 scripts/seed-owner-uid.py $(DEBROOT)/usr/share/byebyte/scripts/
-	install -m 0644 extension/byebyte@asuramaya/extension.js extension/byebyte@asuramaya/pill.js \
-	    extension/byebyte@asuramaya/metadata.json $(DEBROOT)/usr/share/byebyte/extension/byebyte@asuramaya/
-	install -m 0644 man/byebyte.1 $(DEBROOT)/usr/share/man/man1/byebyte.1
-	install -m 0644 man/byebyted.8 $(DEBROOT)/usr/share/man/man8/byebyted.8
-	install -m 0644 config/config.json $(DEBROOT)/etc/byebyte/config.json
-	install -m 0644 systemd/system/byebyted.service systemd/system/byebyte-update.service \
-	    systemd/system/byebyte-update.timer systemd/system/byebyte-sweep.service \
-	    systemd/system/byebyte-sweep.timer $(DEBROOT)/lib/systemd/system/
+	install -m 0644 packaging/release-signing/allowed_signers $(DEBROOT)/usr/share/byebyte/allowed_signers
+	install -m 0755 packaging/scripts/seed-owner-uid.py $(DEBROOT)/usr/share/byebyte/scripts/
+	install -m 0644 src/extension/byebyte@asuramaya/extension.js src/extension/byebyte@asuramaya/pill.js \
+	    src/extension/byebyte@asuramaya/metadata.json $(DEBROOT)/usr/share/byebyte/extension/byebyte@asuramaya/
+	install -m 0644 src/data/man/man1/byebyte.1 $(DEBROOT)/usr/share/man/man1/byebyte.1
+	install -m 0644 src/data/man/man8/byebyted.8 $(DEBROOT)/usr/share/man/man8/byebyted.8
+	install -m 0644 src/data/config/config.json $(DEBROOT)/etc/byebyte/config.json
+	install -m 0644 src/data/systemd/system/byebyted.service src/data/systemd/system/byebyte-update.service \
+	    src/data/systemd/system/byebyte-update.timer src/data/systemd/system/byebyte-sweep.service \
+	    src/data/systemd/system/byebyte-sweep.timer $(DEBROOT)/lib/systemd/system/
 	install -m 0755 packaging/deb/postinst $(DEBROOT)/DEBIAN/postinst
 	install -m 0755 packaging/deb/prerm $(DEBROOT)/DEBIAN/prerm
 	install -m 0755 packaging/deb/postrm $(DEBROOT)/DEBIAN/postrm
@@ -178,3 +178,59 @@ deb:
 
 # signing anchor rebuild is centralized in mudra now, not a per-repo target:
 #   ~/code/REPOS/mudra/bin/mudra sync-signers ByeByte
+
+# The family's structural gate (REPO-STANDARD.md §5), mechanical only: it
+# cannot judge whether a document is any good, only that the shape it's
+# supposed to have is actually there and nothing contradicts it. Copied from
+# coldspot, the family's reference implementation of this target, with one
+# addition: `build` is excluded from the root row count the same way
+# coldspot excludes .claude/.mcp.json/.ruff_cache -- it's gitignored,
+# generated-only, and counting it would make `make deb` (which this same
+# Makefile runs) able to fail its OWN structural gate.
+check-repo:
+	@fail=0; \
+	for f in README.md LICENSE Makefile install.sh uninstall.sh .gitignore .gitattributes \
+	         docs/USAGE.md docs/ARCHITECTURE.md docs/RELEASING.md; do \
+	    if [ ! -e "$$f" ]; then echo "check-repo FAIL: missing $$f"; fail=1; fi; \
+	done; \
+	if [ ! -e src/data/man/man1/byebyte.1 ] && ! grep -q 'man1/byebyte.1' docs/ARCHITECTURE.md 2>/dev/null; then \
+	    echo "check-repo FAIL: no src/data/man/man1/byebyte.1 and no exemption for it"; fail=1; \
+	fi; \
+	rows=$$(find . -maxdepth 1 -mindepth 1 ! -name .git ! -name .osiris ! -name build ! -name .claude ! -name .mcp.json | wc -l); \
+	if [ "$$rows" -gt 12 ]; then \
+	    echo "check-repo FAIL: root has $$rows rows, standard caps it at 12"; fail=1; \
+	else \
+	    echo "check-repo: root row count ok ($$rows)"; \
+	fi; \
+	if ! grep -q '^## Map' README.md 2>/dev/null; then \
+	    echo "check-repo FAIL: README.md has no navigation block (## Map)"; fail=1; \
+	fi; \
+	for h in Troubleshooting "Repo Layout"; do \
+	    if grep -q "^## $$h" README.md 2>/dev/null; then \
+	        echo "check-repo FAIL: README.md carries a post-install heading ('$$h') that belongs in docs/USAGE.md"; fail=1; \
+	    fi; \
+	done; \
+	if [ ! -f packaging/VERSION ]; then \
+	    echo "check-repo FAIL: no packaging/VERSION"; fail=1; \
+	fi; \
+	if grep -rn "VERSION[[:space:]]*=[[:space:]]*['\"][0-9]" \
+	    src/bin/byebyted src/bin/byebyte src/bin/byebyte-healthcheck src/bin/byebyte-update \
+	    install.sh uninstall.sh "src/extension/byebyte@asuramaya/extension.js" 2>/dev/null; then \
+	    echo "check-repo FAIL: a literal version string exists outside packaging/VERSION"; fail=1; \
+	fi; \
+	if grep -v '^[[:space:]]*#' .github/workflows/release.yml 2>/dev/null | grep -q -- '--generate-notes'; then \
+	    echo "check-repo FAIL: release.yml still uses --generate-notes, not --notes-file"; fail=1; \
+	fi; \
+	stray=$$(find docs -name '*.md' -not -path '*/.*' | while read -r f; do git ls-files --error-unmatch "$$f" >/dev/null 2>&1 || echo "$$f"; done); \
+	if [ -n "$$stray" ]; then \
+	    echo "check-repo FAIL: untracked *.md under docs/: $$stray"; fail=1; \
+	fi; \
+	spec=$$(find . -name '*-SPEC.md' -not -path './.git/*'); \
+	if [ -n "$$spec" ]; then \
+	    echo "check-repo FAIL: *-SPEC.md left in the repo (specs belong in the seat's office): $$spec"; fail=1; \
+	fi; \
+	if [ -f docs/ARCHITECTURE.md ] && grep -q '^## Standard exemptions' docs/ARCHITECTURE.md; then \
+	    bad=$$(awk '/^## Standard exemptions/{f=1;next} f && /^\|/ && !/^\| *Item *\|/ && !/^\|---/{ n=gsub(/\|/,"|"); if (n<3) print }' docs/ARCHITECTURE.md); \
+	    if [ -n "$$bad" ]; then echo "check-repo FAIL: exemptions table has a row missing a column"; fail=1; fi; \
+	fi; \
+	if [ "$$fail" -eq 0 ]; then echo "check-repo: all mechanical checks passed"; else exit 1; fi
