@@ -53,15 +53,12 @@ include src/share/byebyte/lib/sutra.mk
 # three .py modules by default; this opts pill.js into the same
 # integrity+freshness check via sutra.mk's own escape hatch -- verbatim
 # adoption without this would have silently dropped a guard three of five
-# pills carry, the exact defect Till's RAMstein pilot caught).
-# `export` is load-bearing, not decoration: check-sutra's SUTRA_EXT_DIR
-# branch tests the Make variable ($(SUTRA_EXT_DIR), Make-level) but reads
-# the VALUE via shell parameter expansion ($${SUTRA_EXT_DIR%/}) -- without
-# exporting, that shell subprocess never sees it, extdir comes out empty,
-# and pill.js silently reads as "not vendored here, skipping" instead of
-# being checked. Reproduced directly; flagged upstream (real bug in
-# sutra.mk 0.11.0, not a usage error).
-export SUTRA_EXT_DIR := src/extension/byebyte@asuramaya
+# pills carry, the exact defect Till's RAMstein pilot caught). 0.11.0
+# tested this Make variable at Make level but read its value via shell
+# parameter expansion, so a plain `:=` here silently checked nothing
+# without an `export` alongside it. Fixed Make-level in 0.11.1
+# ($(patsubst %/,%,$(SUTRA_EXT_DIR))) -- no export needed anymore.
+SUTRA_EXT_DIR := src/extension/byebyte@asuramaya
 
 # sutra.mk's check-vendored-path validates one binary per call; ByeByte
 # carries the bootstrap preamble in all four (byebyted, byebyte,

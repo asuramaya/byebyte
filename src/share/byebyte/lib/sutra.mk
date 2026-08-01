@@ -61,6 +61,25 @@ _SUTRA_CANON := $(HOME)/code/REPOS/sutra
 # cannot just join the same `for mod in ...` loop -- it needs its own path.
 # SUTRA_EXT_DIR opts a pill in; empty (the default) skips it exactly like
 # a pill with no extension should.
+#
+# PILOT FIX 5 (Werner, found mid-adoption in a real pill; confirmed by
+# Alfred, msg 2768): the first cut of the branch below tested "$(SUTRA_EXT_DIR)"
+# -- a Make-level expansion, substituted at parse time -- but then read the
+# value back as "$${SUTRA_EXT_DIR%/}", a SHELL-level parameter expansion.
+# SUTRA_EXT_DIR is a Makefile variable, never exported to the recipe's
+# shell environment, so the shell's own $SUTRA_EXT_DIR was always empty:
+# the `-n` test correctly saw a non-empty value and took the branch, then
+# extdir resolved to nothing, the pill.js path became just "/pill.js", and
+# _sutra_check_one's own not-vendored-here fallback reported a clean skip.
+# check-sutra therefore exited 0 while covering nothing -- the exact defect
+# PILOT FIX 1 above exists to close, reintroduced inside its own fix, and
+# more dangerous than an ordinary failure because it reads as routine
+# output rather than a red run. Fixed below by using $(SUTRA_EXT_DIR)
+# (Make-level, via patsubst for the trailing-slash strip) consistently
+# instead of mixing it with a shell-level read -- this removes the
+# export/parse-order question entirely rather than requiring a pill to
+# `export SUTRA_EXT_DIR` around the include, which was the workaround
+# before this was understood.
 SUTRA_EXT_DIR ?=
 
 .PHONY: check-sutra
@@ -101,7 +120,7 @@ check-sutra:
 	    _sutra_check_one "$$mod" "$$libdir$$mod.py" "$$libdir$$mod.version" "$$libdir$$mod.commit" "$$mod.py" || fail=1; \
 	done; \
 	if [ -n "$(SUTRA_EXT_DIR)" ]; then \
-	    extdir="$${SUTRA_EXT_DIR%/}"; \
+	    extdir="$(patsubst %/,%,$(SUTRA_EXT_DIR))"; \
 	    _sutra_check_one "pill.js" "$$extdir/pill.js" "$$extdir/pill.version" "$$extdir/pill.commit" "pill.js" || fail=1; \
 	fi; \
 	if [ ! -d "$$canon/.git" ]; then \
