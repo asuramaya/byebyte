@@ -11,7 +11,10 @@ Also verifies the sutra copy actually running here against its own
 installed anchor (BOOTSTRAP.md) -- `make check-sutra` only ever proves the
 dev-tree copy is honest; the machine runs whatever got installed, and an
 anchorless install dir is exactly how a mixed-version sutra sat undetected
-on a real machine before this check existed (ruling 3e44bd95).
+on a real machine before this check existed (ruling 3e44bd95). Three
+states, not two: a missing anchor means an install that predates this
+check, not a tampered one -- it can't be verified, which is different
+from having been checked and found wrong.
 
 Passive by design: it diagnoses and reports, it never restarts anything —
 systemd's Restart= owns recovery, and a monitoring probe that mutates what
@@ -42,14 +45,18 @@ SOCKET_PATH = os.path.join(RUNTIME_DIR, "control.sock")
 
 
 def check_vendor_integrity():
-    """sha256 of whatever `import sutra` actually loaded, against the
-    .version anchor beside it -- the installed copy, never the dev tree."""
+    """True/False for whether the installed sutra.py's own sha256 matches
+    the .version anchor beside it -- the installed copy, never the dev
+    tree. None when the anchor is missing: an install from before this
+    check shipped, not evidence of tampering, and not something a hash
+    comparison can answer either way."""
     path = os.path.abspath(sutra.__file__)
     vpath = os.path.splitext(path)[0] + ".version"
-    if not os.path.exists(vpath):
-        return False, f"no integrity anchor for {path} (expected {vpath})"
-    with open(vpath) as f:
-        recorded = f.read().split()[-1]
+    try:
+        with open(vpath) as f:
+            recorded = f.read().split()[-1]
+    except (OSError, IndexError):
+        return None, f"no integrity anchor for {path} (older install, can't verify)"
     with open(path, "rb") as f:
         actual = hashlib.sha256(f.read()).hexdigest()
     if actual != recorded:
@@ -59,15 +66,16 @@ def check_vendor_integrity():
 
 def main():
     vendor_ok, vendor_reason = check_vendor_integrity()
-    if not vendor_ok:
+    if vendor_ok is False:
         print(f"byebyte-healthcheck: UNHEALTHY — {vendor_reason}")
         return 1
     healthy, reason, info = sutra.check_health(STATUS_PATH, SOCKET_PATH)
     if not healthy:
         print(f"byebyte-healthcheck: UNHEALTHY — {reason}")
         return 1
+    vendor_note = "sutra anchor unknown" if vendor_ok is None else "sutra vendor ok"
     print(f"byebyte-healthcheck: ok (status {info['age']:.0f}s old, "
-          f"byebyted {info['version']} answering, sutra vendor ok)")
+          f"byebyted {info['version']} answering, {vendor_note})")
     return 0
 
 
