@@ -1,5 +1,5 @@
 # byebyte — the storage demon
-.PHONY: smoke attack check check-py check-shell check-js check-man check-sutra check-repo install uninstall pill deb
+.PHONY: smoke attack check check-py check-shell check-js check-man check-repo install uninstall pill deb
 
 # static checks, broken into sub-targets so ci.yml can invoke each by name
 # for readable per-step results without hand-duplicating any command list
@@ -11,7 +11,7 @@
 # Deliberately excludes smoke/attack (real daemon, real sockets) so it
 # stays fast enough to run before every commit. check-repo (the family's
 # structural gate) hangs off this target.
-check: check-sutra check-py check-shell check-js check-man
+check: check-sutra check-vendored-path-all check-py check-shell check-js check-man
 	@echo "check: all static checks passed"
 
 check-py:
@@ -29,11 +29,48 @@ check-js:
 	rm -f "$$mjs"
 	python3 -c "import json; json.load(open('src/extension/byebyte@asuramaya/metadata.json'))"
 
+# -t -k, not just -Tutf8 -ww: the bare form exits 0 while silently skipping
+# the table and UTF-8 preprocessor passes, so a malformed table would render
+# clean (family hardening, Alfred msg 1628 -- matches pill-ci.yml's own
+# man-pages step, so local `make check` and CI check the same thing).
 check-man:
-	groff -man -Tutf8 -ww src/data/man/man1/byebyte.1 > /dev/null
-	groff -t -man -Tutf8 -ww src/data/man/man8/byebyted.8 > /dev/null
+	groff -t -k -man -Tutf8 -ww src/data/man/man1/byebyte.1 src/data/man/man8/byebyted.8 > /dev/null
 
 VERSION := $(shell tr -d '[:space:]' < packaging/VERSION)
+
+# The family's shared recipe layer (sutra.mk, vendored like code under its
+# own .version/.commit anchor -- see docs/BOOTSTRAP.md and the file's own
+# header, ruling 3e44bd95). Supplies check-sutra (integrity+freshness for
+# the three vendored .py modules, plus pill.js via SUTRA_EXT_DIR below),
+# SUTRA_ROOT_ROWS (the canonical tracked-files row count check-repo uses),
+# and check-vendored-path[-all] (the checkout-run resolution guard). PILL
+# must be set before the include; everything else in sutra.mk resolves
+# relative to its own vendored location, never this Makefile's.
+PILL := byebyte
+include src/share/byebyte/lib/sutra.mk
+
+# ByeByte vendors pill.js too (sutra.mk's own check-sutra loops only the
+# three .py modules by default; this opts pill.js into the same
+# integrity+freshness check via sutra.mk's own escape hatch -- verbatim
+# adoption without this would have silently dropped a guard three of five
+# pills carry, the exact defect Till's RAMstein pilot caught).
+# `export` is load-bearing, not decoration: check-sutra's SUTRA_EXT_DIR
+# branch tests the Make variable ($(SUTRA_EXT_DIR), Make-level) but reads
+# the VALUE via shell parameter expansion ($${SUTRA_EXT_DIR%/}) -- without
+# exporting, that shell subprocess never sees it, extdir comes out empty,
+# and pill.js silently reads as "not vendored here, skipping" instead of
+# being checked. Reproduced directly; flagged upstream (real bug in
+# sutra.mk 0.11.0, not a usage error).
+export SUTRA_EXT_DIR := src/extension/byebyte@asuramaya
+
+# sutra.mk's check-vendored-path validates one binary per call; ByeByte
+# carries the bootstrap preamble in all four (byebyted, byebyte,
+# byebyte-healthcheck, byebyte-update), so check-vendored-path-all loops
+# it. byebyte-update binds sutra_update, not sutra -- the ":sutra_update"
+# form checks that one against the right attribute; the other three take
+# sutra.mk's own default (SUTRA_CHECK_MODULE=sutra).
+SUTRA_CHECK_BINS := src/bin/byebyted src/bin/byebyte src/bin/byebyte-healthcheck src/bin/byebyte-update:sutra_update
+
 # DEBROOT is per-invocation-unique (a shared dev box runs concurrent smoke
 # passes — root and unprivileged, different agents — against the SAME
 # checkout; a fixed staging dir raced install/rm-rf across them and
@@ -50,55 +87,6 @@ DEBTMP := $(DEBFILE).$(shell mktemp -u XXXXXX).tmp
 smoke: check-sutra
 	bash tests/smoke.sh
 	bash tests/test_signing.sh
-
-# drift guard for every vendored sutra file: integrity (hash matches what
-# vendor.sh recorded — the copy wasn't hand-edited) is the hard gate,
-# always enforced. Freshness is a LAG-vs-DRIFT read (sutra's 0.7.0 ruling,
-# custodian recipe, thread 2ac0a67f — RAMstein's aec8899 is the reference
-# shape): a plain HEAD-compare reddened on ordinary LAG (an honest vendor
-# from an earlier canonical commit, indistinguishable on sight from actual
-# DRIFT/corruption), so this asks canonical git which of the two a recorded
-# .commit anchor actually is. LAG warns and exits 0; DRIFT (the recorded
-# commit isn't in canonical's history at all) is a hard fail. Only runs
-# when the canonical checkout is present, which it normally isn't in CI.
-check-sutra:
-	@real_home=$$(getent passwd "$${SUDO_USER:-$$(id -un)}" | cut -d: -f6); \
-	canon="$${real_home:-$$HOME}/code/REPOS/sutra"; \
-	for f in src/share/byebyte/lib/sutra.py src/share/byebyte/lib/sutra_update.py \
-	         src/share/byebyte/lib/sutra_xen.py \
-	         src/extension/byebyte@asuramaya/pill.js; do \
-	    vf="$${f%.py}"; vf="$${vf%.js}.version"; \
-	    cf="$${f%.py}"; cf="$${cf%.js}.commit"; \
-	    ver=$$(cut -d' ' -f1 "$$vf" 2>/dev/null); \
-	    sha=$$(awk '{print $$NF}' "$$vf" 2>/dev/null); \
-	    actual=$$(sha256sum "$$f" | cut -d' ' -f1); \
-	    if [ "$$sha" != "$$actual" ]; then \
-	        echo "check-sutra FAIL: $$f doesn't match $$vf" \
-	             "(hand-edited? re-vendor: bash ~/code/REPOS/sutra/vendor.sh src/share/byebyte/lib src/extension/byebyte@asuramaya)"; \
-	        exit 1; \
-	    fi; \
-	    echo "check-sutra: integrity ok ($$f, $$ver, sha256 $$sha)"; \
-	    if [ -d "$$canon/.git" ]; then \
-	        if [ ! -f "$$cf" ]; then \
-	            echo "check-sutra: freshness unknown ($$f has no .commit anchor, an older vendor)"; \
-	        else \
-	            recorded=$$(cat "$$cf"); \
-	            head=$$(git -C "$$canon" rev-parse HEAD); \
-	            if [ "$$recorded" = "$$head" ]; then \
-	                echo "check-sutra: freshness ok ($$f matches canonical HEAD $$head)"; \
-	            elif git -C "$$canon" merge-base --is-ancestor "$$recorded" HEAD 2>/dev/null; then \
-	                echo "check-sutra: LAG ($$f vendored from $$recorded, canonical has since" \
-	                     "moved to $$head) -- warn, not a failure"; \
-	            else \
-	                echo "check-sutra FAIL: DRIFT ($$f's vendored commit $$recorded is not in" \
-	                     "canonical's history at $$canon) -- re-vendor"; \
-	                exit 1; \
-	            fi; \
-	        fi; \
-	    else \
-	        echo "check-sutra: canonical sutra checkout not present, freshness skipped for $$f"; \
-	    fi; \
-	done
 
 # the thorough adversarial pass (full cmd surface + oversized/garbage/nested/
 # stall); smoke.sh keeps its own quick hostile-input block for a fast loop
@@ -220,7 +208,7 @@ check-repo:
 	if [ ! -e src/data/man/man1/byebyte.1 ] && ! grep -q 'man1/byebyte.1' docs/ARCHITECTURE.md 2>/dev/null; then \
 	    echo "check-repo FAIL: no src/data/man/man1/byebyte.1 and no exemption for it"; fail=1; \
 	fi; \
-	rows=$$(git ls-files | cut -d/ -f1 | sort -u | wc -l); \
+	rows=$(SUTRA_ROOT_ROWS); \
 	if [ "$$rows" -gt 12 ]; then \
 	    echo "check-repo FAIL: root has $$rows rows, standard caps it at 12"; fail=1; \
 	else \

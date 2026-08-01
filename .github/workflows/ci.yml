@@ -6,38 +6,46 @@ on:
   pull_request:
 
 jobs:
-  static-checks:
+  # The family's shared CI core (sutra.mk's sibling layer -- see
+  # docs/BOOTSTRAP.md in the sutra repo). Pinned to a commit SHA, not @main
+  # and not a tag, per pill-ci.yml's own header: sutra cuts no tagged
+  # release yet, and a floating @main ref would move every adopting pill's
+  # CI the instant this file changes, with no per-pill review step.
+  shared:
+    uses: asuramaya/sutra/.github/workflows/pill-ci.yml@2a7e5ed5bd68234989664eab5d6460d80bd6120d
+    with:
+      python-files: "src/bin/byebyted src/bin/byebyte src/bin/byebyte-healthcheck src/bin/byebyte-update src/share/byebyte/lib/sutra.py src/share/byebyte/lib/sutra_update.py src/share/byebyte/lib/sutra_xen.py"
+      shell-files: "install.sh uninstall.sh tests/smoke.sh tests/test_signing.sh"
+      shellcheck-files: "install.sh uninstall.sh tests/smoke.sh tests/test_signing.sh"
+      shellcheck-exclude: "SC1090,SC1091"
+      has-extension: true
+      extension-js: "src/extension/byebyte@asuramaya/extension.js"
+      extension-metadata: "src/extension/byebyte@asuramaya/metadata.json"
+      man-pages: "src/data/man/man1/byebyte.1 src/data/man/man8/byebyted.8"
+      run-attack: true
+      # run-check-version and run-signing-verify stay at their defaults
+      # (false): ByeByte has no per-file VERSION constant to check --
+      # packaging/VERSION is the one version constant, read live at
+      # runtime, and check-repo's own rule enforces exactly the opposite
+      # of what check-version.sh tests for (same convention as RAMstein).
+      # test_signing.sh is already covered by run-smoke: make smoke's own
+      # recipe runs it; run-signing-verify would run it a second time.
+
+  # Genuinely byebyte-specific, per pill-ci.yml's own header ("stays as a
+  # sibling job in the calling pill's own ci.yml"): the checkout-run
+  # resolution guard across all four binaries that carry the bootstrap
+  # preamble. sutra.mk's check-vendored-path validates one SUTRA_CHECK_BIN
+  # per invocation; the Makefile's SUTRA_CHECK_BINS + check-vendored-path-all
+  # loops it (no sibling-job step exists in pill-ci.yml itself for this --
+  # confirmed by reading its full step list, not assumed). No step needed
+  # here for pill.js or shellcheck: sutra.mk 0.11.0's SUTRA_EXT_DIR folds
+  # pill.js into check-sutra itself, and pill-ci.yml 0.11.0 runs shellcheck
+  # directly above -- both were RAMstein's pilot-stage gaps against sutra
+  # 0.10.1, already closed upstream by the version ByeByte adopted.
+  byebyte-specific:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
-      # Named steps stay for readability; the command behind each lives in
-      # the Makefile only (REPO-STANDARD.md) -- a hand-duplicated command
-      # list here is exactly how phanspeed's CI went red for five commits
-      # and sutra's went red on every commit since 0.1.0, both silently,
-      # because nobody had to notice the Makefile and this file drifting
-      # apart. If a check needs adding or changing, it changes in the
-      # Makefile and this file is untouched.
-      - name: Python compiles
-        run: make check-py
-
-      - name: Shell scripts parse + shellcheck
-        run: make check-shell
-
-      - name: check-sutra (vendored copy integrity)
-        run: make check-sutra
-
-      - name: Extension JS + metadata.json
-        run: make check-js
-
-      - name: Man pages render without warnings
-        run: make check-man
-
-      - name: Smoke (real daemon, real mounts, hostile socket input)
-        run: make smoke
-
-      - name: Attack (full cmd surface + oversized/garbage/nested/stall)
-        run: make attack
-
-      - name: Repo structure (REPO-STANDARD.md gate)
-        run: make check-repo
+      - name: Vendored-path resolution (all four binaries)
+        run: make check-vendored-path-all

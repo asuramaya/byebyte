@@ -102,6 +102,22 @@ The GNOME pill is always a separate, no-root step (`make pill`, or `.deb`'s own 
 instructions) since it only ever touches the installing user's own `$HOME` and gnome-shell
 session.
 
+ByeByte adopted sutra 0.11.0's recipe layer the same way as the code: `src/share/byebyte/lib/sutra.mk`,
+included from the root `Makefile` (`PILL := byebyte`), supplies `check-sutra` itself, extended to
+also cover `pill.js` via `SUTRA_EXT_DIR` since ByeByte vendors the extension commons too, the
+canonical tracked-files row count (`check-repo` references `SUTRA_ROOT_ROWS` instead of
+re-deriving it), and `check-vendored-path`. That last one loads a binary as a real module and asks
+Python what it actually imported, rather than checking that a file merely exists at the path the
+bootstrap preamble's own arithmetic predicts. The file-exists version is a layout check, not a
+resolution check, and passes cleanly on the exact regression it's meant to catch: a binary missing
+the preamble entirely, sitting beside a stale co-located `sutra.py`, still imports successfully
+through Python's own script-directory `sys.path` rule. `make check-vendored-path-all` is the one
+genuine pill-side supplement sutra.mk doesn't close: its own `check-vendored-path` target validates
+one binary per invocation, and ByeByte carries the bootstrap preamble in all four (`byebyted`,
+`byebyte`, `byebyte-healthcheck`, `byebyte-update`), so the Makefile's `SUTRA_CHECK_BINS` loops it,
+checking `byebyte-update` against `sutra_update` specifically since that's the module it actually
+binds.
+
 ## The update path
 
 `byebyte update` runs `src/bin/byebyte-update`, a thin wrapper over

@@ -22,7 +22,8 @@ Whatever you write there is what the world reads.
 Run the checks:
 
 ```bash
-make check           # static checks, and the vendored spine matches canonical, byte for byte
+make check           # static checks, the vendored spine matches canonical byte for byte,
+                      # and each binary actually resolves it to the real installed copy
 make smoke           # end to end, against a throwaway runtime dir
 make attack          # full command surface, oversized/garbage/nested/stall input
 ```
