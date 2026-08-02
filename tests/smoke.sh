@@ -48,21 +48,44 @@ SHM_FIX=$(mktemp -d --tmpdir=/dev/shm byebyte-smoke-shm.XXXXXX)
 BTRFS_LOOPDEV=""
 RESERVE_LOOPDEV=""
 _cleanup_all() {
-    kill "${DPID:-0}" 2>/dev/null || true
+    # `set +e` for this whole function, not `|| true` sprinkled per line --
+    # found the hard way (alfred, msg 3249): BURN_FIX survived a real run
+    # because this function is REDUNDANTLY called at actual script exit
+    # even when the btrfs/reserve sections already tore themselves down on
+    # their own success path (they reset *_LOOPDEV to "" but never reset
+    # *_IMG/*_MNT) -- so `rmdir "$BTRFS_MNT"` here ran a SECOND time against
+    # an already-removed directory, failed, and -- being the last command
+    # actually executed in its `[ -n ] && rmdir ...` list -- triggered set -e
+    # and killed this function before it ever reached the final rm -rf.
+    # Reproduced directly: an already-removed dir's rmdir failing here does
+    # abort the function early under set -e, confirmed with an isolated
+    # repro before trusting this diagnosis. A cleanup function's whole job
+    # is best-effort teardown of things that may already be half-gone --
+    # every command in it failing is an expected, ordinary outcome, never a
+    # reason to abandon the rest of the cleanup.
+    set +e
+    # `kill "${DPID:-0}"` (the original form here) is a real hazard, not just
+    # an unguarded failure: if DPID is ever unset, that expands to `kill 0`,
+    # and pid 0 means "every process in the caller's own process group" --
+    # signaling this whole script, not a no-op. Never reachable in the
+    # ordinary run (DPID is set right after the daemon starts, long before
+    # anything here could fail), but a trap fires on EVERY exit path,
+    # including ones before that point, so it's real and worth naming.
+    [ -n "${DPID:-}" ] && kill "$DPID" 2>/dev/null
     if [ -n "$BTRFS_LOOPDEV" ]; then
         sudo -n umount "${BTRFS_MNT:-}" 2>/dev/null
         sudo -n losetup -d "$BTRFS_LOOPDEV" 2>/dev/null
     fi
-    [ -n "${BTRFS_IMG:-}" ] && rm -f "$BTRFS_IMG"
+    [ -n "${BTRFS_IMG:-}" ] && rm -f "$BTRFS_IMG" 2>/dev/null
     [ -n "${BTRFS_MNT:-}" ] && rmdir "$BTRFS_MNT" 2>/dev/null
     if [ -n "$RESERVE_LOOPDEV" ]; then
         sudo -n umount "${EXT4_MNT:-}" 2>/dev/null
         sudo -n losetup -d "$RESERVE_LOOPDEV" 2>/dev/null
     fi
-    [ -n "${EXT4_IMG:-}" ] && rm -f "$EXT4_IMG"
+    [ -n "${EXT4_IMG:-}" ] && rm -f "$EXT4_IMG" 2>/dev/null
     [ -n "${EXT4_MNT:-}" ] && rmdir "$EXT4_MNT" 2>/dev/null
-    [ -n "${RESERVE_STATE:-}" ] && rm -rf "$RESERVE_STATE"
-    rm -rf "$RD" "$BURN_FIX" "$SHM_FIX"
+    [ -n "${RESERVE_STATE:-}" ] && rm -rf "$RESERVE_STATE" 2>/dev/null
+    rm -rf "$RD" "$BURN_FIX" "$SHM_FIX" 2>/dev/null
     return 0
 }
 trap '_cleanup_all' EXIT
@@ -976,9 +999,13 @@ elif [ "$btrfs_ready" -eq 1 ] && sudo -n true 2>/dev/null; then
     # own later attempt (its safety net for any path that doesn't reach
     # here, e.g. a failing assertion) finds nothing left to do
     cleanup_btrfs() {
-        [ -n "$BTRFS_LOOPDEV" ] && sudo -n umount "$BTRFS_MNT" 2>/dev/null
-        [ -n "$BTRFS_LOOPDEV" ] && sudo -n losetup -d "$BTRFS_LOOPDEV" 2>/dev/null
-        rm -f "$BTRFS_IMG"
+        # every line guarded with || true: a cleanup function's own commands
+        # failing (already unmounted, already detached) is ordinary, never a
+        # reason for `set -e` to cut the rest of the cleanup short (found via
+        # the identical bug one function up, _cleanup_all -- see its comment)
+        [ -n "$BTRFS_LOOPDEV" ] && { sudo -n umount "$BTRFS_MNT" 2>/dev/null || true; }
+        [ -n "$BTRFS_LOOPDEV" ] && { sudo -n losetup -d "$BTRFS_LOOPDEV" 2>/dev/null || true; }
+        rm -f "$BTRFS_IMG" || true
         rmdir "$BTRFS_MNT" 2>/dev/null || true
         BTRFS_LOOPDEV=""
     }
@@ -1054,11 +1081,12 @@ elif [ "$reserve_ready" -eq 1 ] && sudo -n true 2>/dev/null; then
     # way, since neither cleanup function was ever registered as a trap)
     # finds nothing left to do
     cleanup_reserve() {
-        [ -n "$RESERVE_LOOPDEV" ] && sudo -n umount "$EXT4_MNT" 2>/dev/null
-        [ -n "$RESERVE_LOOPDEV" ] && sudo -n losetup -d "$RESERVE_LOOPDEV" 2>/dev/null
-        rm -f "$EXT4_IMG"
+        # every line guarded with || true -- see cleanup_btrfs's own comment
+        [ -n "$RESERVE_LOOPDEV" ] && { sudo -n umount "$EXT4_MNT" 2>/dev/null || true; }
+        [ -n "$RESERVE_LOOPDEV" ] && { sudo -n losetup -d "$RESERVE_LOOPDEV" 2>/dev/null || true; }
+        rm -f "$EXT4_IMG" || true
         rmdir "$EXT4_MNT" 2>/dev/null || true
-        rm -rf "$RESERVE_STATE"
+        rm -rf "$RESERVE_STATE" || true
         RESERVE_LOOPDEV=""
     }
     reserve_live=0
@@ -1356,10 +1384,10 @@ BYEBYTE_RUNTIME_DIR=$RD python3 src/bin/byebyte burn --seconds 1 --json | python
 # are exercised in one pass. Runs AFTER the M3 purge section on purpose — that
 # section's own hf-hub dry-run check needs the fixture still intact, and this
 # one is what finally deletes it (for real, since it's armed).
-python3 - "$RD" "$FIX" <<'PY'
+python3 - "$RD" "$FIX" "$ROOT_SMOKE" <<'PY'
 import json, os, socket, sys
 
-rd, fix = sys.argv[1], sys.argv[2]
+rd, fix, root_smoke = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
 
 def ask(obj):
     c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -1376,61 +1404,98 @@ def ask(obj):
     return json.loads(buf.decode())
 
 hf_hub_path = os.path.join(fix, "home", ".cache", "huggingface", "hub", "models--test--x")
-assert os.path.isdir(hf_hub_path), "fixture vanished before the sweep test ran"
+if not root_smoke:
+    assert os.path.isdir(hf_hub_path), "fixture vanished before the sweep test ran"
 
-# forced dry (dry=True): NOTHING acts, even the armed category
+# forced dry (dry=True): NOTHING acts, even the armed category -- always
+# safe regardless of root, dry_run never touches disk
 preview = ask({"cmd": "sweep", "dry": True})
 by_cat = {r["category"]: r for r in preview["results"]}
 assert by_cat["hf-hub"]["armed"] is True, by_cat["hf-hub"]
 assert by_cat["hf-hub"]["dry_run"] is True, by_cat["hf-hub"]
-assert by_cat["hf-hub"]["total_bytes"] > 0, by_cat["hf-hub"]
 assert by_cat["pip-cache"]["armed"] is False, by_cat["pip-cache"]
-assert os.path.isdir(hf_hub_path), "forced-dry sweep touched disk"
+if root_smoke:
+    # _resolve_owner_home() correctly refuses BYEBYTE_TEST_HOME under root
+    # (by design) and reads the REAL owner's real home instead -- no reason
+    # to expect it holds our fixture's models--test--x, or any hf-hub
+    # content at all, so only the response's SHAPE is checked (msg 3249:
+    # sweep never had the root_smoke carve-out the M3 purge section above
+    # already does for this exact function -- ported down)
+    assert isinstance(by_cat["hf-hub"].get("candidates"), list), by_cat["hf-hub"]
+else:
+    assert by_cat["hf-hub"]["total_bytes"] > 0, by_cat["hf-hub"]
+    assert os.path.isdir(hf_hub_path), "forced-dry sweep touched disk"
 
-# real run (dry=False): hf-hub (armed) acts for real; everything else previews
-real = ask({"cmd": "sweep", "dry": False})
-by_cat = {r["category"]: r for r in real["results"]}
-hf = by_cat["hf-hub"]
-assert hf["armed"] is True and hf["dry_run"] is False, hf
-assert hf["freed_bytes"] > 0, hf
-assert not os.path.isdir(hf_hub_path), "sweep armed hf-hub but didn't delete it"
-unarmed = by_cat["pip-cache"]
-assert unarmed["dry_run"] is True and unarmed["armed"] is False, unarmed
+if root_smoke:
+    # NOT exercised further under root: sweep_categories arms hf-hub, and a
+    # real dry=False call here would act on whatever _resolve_owner_home()
+    # resolves to under root -- the OPERATOR'S REAL home, not this fixture.
+    # Whether that's safe depends entirely on whether real hf-hub content
+    # happens to be there, which this suite has no way to know in advance;
+    # looking safe against an empty real cache is not the same as being
+    # safe by design, so this half is skipped outright rather than trusted
+    # to keep being lucky. A real, disclosed coverage gap for this one
+    # category under root, not a false skip -- the armed-delete mechanism
+    # itself IS exercised for real elsewhere in this suite regardless of
+    # root (M3's project-artifacts purge above, whose detector walks
+    # scan_roots directly and never touches owner_home).
+    summary = ("sweep ok (root): forced-dry preview correct in shape; armed "
+              "real-delete against hf-hub not exercised under root -- see "
+              "the comment above this block for why")
+else:
+    # real run (dry=False): hf-hub (armed) acts for real; everything else previews
+    real = ask({"cmd": "sweep", "dry": False})
+    by_cat = {r["category"]: r for r in real["results"]}
+    hf = by_cat["hf-hub"]
+    assert hf["armed"] is True and hf["dry_run"] is False, hf
+    assert hf["freed_bytes"] > 0, hf
+    assert not os.path.isdir(hf_hub_path), "sweep armed hf-hub but didn't delete it"
+    unarmed = by_cat["pip-cache"]
+    assert unarmed["dry_run"] is True and unarmed["armed"] is False, unarmed
 
-# kernels: always report-only regardless of anything in sweep_categories —
-# running apt-get to remove one for real is a separate authorization, never
-# bundled into this milestone (see byebyted.py's sweep() docstring)
-kern = by_cat["kernels"]
-assert kern["dry_run"] is True and kern["armed"] is False, kern
+    # kernels: always report-only regardless of anything in sweep_categories —
+    # running apt-get to remove one for real is a separate authorization, never
+    # bundled into this milestone (see byebyted.py's sweep() docstring)
+    kern = by_cat["kernels"]
+    assert kern["dry_run"] is True and kern["armed"] is False, kern
 
-# ledger: the forced-dry preview AND the real act both left a line
-ledger_path = os.path.join(rd, "state", "ledger.jsonl")
-with open(ledger_path) as f:
-    lines = [json.loads(l) for l in f if l.strip()]
-assert any(l["category"] == "sweep:hf-hub" and l["status"] == "dry_run" for l in lines), \
-    f"the forced-dry preview never ledgered hf-hub: {lines}"
-assert any(l["category"] == "sweep:hf-hub" and l["status"] == "ok" for l in lines), \
-    f"the real sweep act never ledgered hf-hub: {lines}"
+    # ledger: the forced-dry preview AND the real act both left a line
+    ledger_path = os.path.join(rd, "state", "ledger.jsonl")
+    with open(ledger_path) as f:
+        lines = [json.loads(l) for l in f if l.strip()]
+    assert any(l["category"] == "sweep:hf-hub" and l["status"] == "dry_run" for l in lines), \
+        f"the forced-dry preview never ledgered hf-hub: {lines}"
+    assert any(l["category"] == "sweep:hf-hub" and l["status"] == "ok" for l in lines), \
+        f"the real sweep act never ledgered hf-hub: {lines}"
 
-# history: replays the ledger lines just written, target field (not the
-# legacy path alias — these are freshly-written, post-ruling lines)
-hist = ask({"cmd": "sweep", "history": True, "limit": 10})
-hist_lines = hist["history"]
-assert any(l["category"] == "sweep:hf-hub" and l["status"] == "ok"
-           and l["target"] == hf_hub_path for l in hist_lines), hist_lines
+    # history: replays the ledger lines just written, target field (not the
+    # legacy path alias — these are freshly-written, post-ruling lines)
+    hist = ask({"cmd": "sweep", "history": True, "limit": 10})
+    hist_lines = hist["history"]
+    assert any(l["category"] == "sweep:hf-hub" and l["status"] == "ok"
+               and l["target"] == hf_hub_path for l in hist_lines), hist_lines
+    summary = (f"sweep ok: dry-run previews unarmed categories, armed hf-hub "
+              f"freed {hf['freed_bytes']}B for real, both paths ledgered, "
+              "history replays")
 
-# hostile input: non-bool dry — refused; daemon alive after
+# hostile input: non-bool dry — refused; daemon alive after -- safe and
+# identical either way, never touches disk
 assert "error" in ask({"cmd": "sweep", "dry": "yes"}), "non-bool dry accepted"
 assert ask({"cmd": "ping"})["ok"] is True, "daemon died during sweep test"
-print(f"sweep ok: dry-run previews unarmed categories, armed hf-hub freed "
-      f"{hf['freed_bytes']}B for real, both paths ledgered, history replays")
+print(summary)
 PY
 
 BYEBYTE_RUNTIME_DIR=$RD python3 src/bin/byebyte sweep --dry --json | python3 -c \
     "import json,sys; json.load(sys.stdin)" \
     || { echo "SMOKE FAIL: CLI sweep json invalid"; exit 1; }
+if [ "$ROOT_SMOKE" -eq 1 ]; then
+    echo "CLI sweep --history hf-hub check skipped under root: the real hf-hub" \
+         "act above is itself skipped under root (see the python block's own" \
+         "comment), so there is no guaranteed sweep:hf-hub ledger line to find"
+else
 BYEBYTE_RUNTIME_DIR=$RD python3 src/bin/byebyte sweep --history | grep -q "sweep:hf-hub" \
     || { echo "SMOKE FAIL: CLI sweep --history missing hf-hub"; exit 1; }
+fi
 
 # --- M4: make deb — builds a real .deb; contents include bins+units+man.
 # Builds and inspects only — never installed. The log path is per-invocation
