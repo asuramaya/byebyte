@@ -1137,16 +1137,20 @@ def _delete_log_file(candidate):
 
 
 def _delete_journald(candidate):
-    subprocess.run(["journalctl", f"--vacuum-size={candidate['vacuum_size']}"],
-                   capture_output=True, timeout=30, check=False)
+    out = subprocess.run(["journalctl", f"--vacuum-size={candidate['vacuum_size']}"],
+                         capture_output=True, text=True, timeout=30, check=False)
+    if out.returncode != 0:
+        raise OSError(f"journalctl --vacuum-size failed: {out.stderr.strip()}")
 
 
 def _delete_snap_revision(candidate):
     if os.getuid() != 0:
         raise PermissionError("snap remove needs root")
-    subprocess.run(["snap", "remove", candidate["name"],
-                     f"--revision={candidate['revision']}"],
-                    capture_output=True, timeout=30, check=False)
+    out = subprocess.run(["snap", "remove", candidate["name"],
+                          f"--revision={candidate['revision']}"],
+                         capture_output=True, text=True, timeout=30, check=False)
+    if out.returncode != 0:
+        raise OSError(f"snap remove failed: {out.stderr.strip()}")
 
 
 # -- revalidate: re-run a candidate's own detector predicate on ONE path,
@@ -1239,20 +1243,64 @@ def _toctou_test_window(cfg):
         time.sleep(delay)
 
 
+# -- verify: confirm a candidate is actually GONE after delete() returns,
+# before ever ledgering "ok". _rm_tree/_rm_files swallow every per-entry
+# OSError by design (one unreadable file must not abort a whole tree walk)
+# -- which means "delete() returned without raising" was never proof that
+# anything was actually deleted. Found live, not reasoned about: byebyted's
+# own systemd unit had ProtectSystem=strict with ReadWritePaths that never
+# covered /tmp or /dev/shm (the 9e71be7 tmpfs-indexing fix taught the
+# indexer to SEE those mounts without anyone widening the unit's sandbox to
+# match) -- every purge/declare against a real /tmp path returned "freed
+# 2.0G", ledgered "ok", and deleted nothing at all. A silent no-op would
+# have been recoverable; a durable ledger asserting bytes were reclaimed
+# when they weren't is the pill lying to its own future self. Same
+# discipline reserve() already has to (statvfs before/after, not tune2fs's
+# exit code) -- delete needs the equivalent: existence, not delete()'s own
+# silence, is the proof.
+def _verify_gone(candidate):
+    return not os.path.lexists(candidate["path"])
+
+
+def _verify_cache_contents_gone(candidate):
+    """keep_top=True deletes leave the top directory itself in place by
+    design, so _verify_gone's own check would always read "still there" --
+    the real question is whether its CONTENTS are gone. An OSError listing
+    it (permission, vanished mid-check) can't be read as success either --
+    report error, never a guessed ok."""
+    try:
+        return os.listdir(candidate["path"]) == []
+    except OSError:
+        return False
+
+
+def _verify_always(candidate):
+    # journald/snap-old raise on a nonzero exit code now (see their delete()
+    # functions) -- that failure already reaches the caller's except clause,
+    # so there is nothing further to confirm here.
+    return True
+
+
 # id -> (detect(cfg, indexer) -> [candidate], delete(candidate) -> None,
-#        revalidate(candidate, cfg, indexer) -> bool). Docker is deliberately
-# ABSENT until API-based accounting lands (FAMILY.md doctrine 4: generic
-# walks lie about overlayfs).
+#        revalidate(candidate, cfg, indexer) -> bool,
+#        verify(candidate) -> bool). Docker is deliberately ABSENT until
+# API-based accounting lands (FAMILY.md doctrine 4: generic walks lie about
+# overlayfs).
 REGISTRY = {
-    "hf-hub": (detect_hf_hub, _delete_tree_entry, revalidate_hf_hub),
-    "pip-cache": (detect_pip_cache, _delete_cache_contents, revalidate_pip_cache),
-    "uv-cache": (detect_uv_cache, _delete_cache_contents, revalidate_uv_cache),
-    "thumbnails": (detect_thumbnails, _delete_cache_contents, revalidate_thumbnails),
+    "hf-hub": (detect_hf_hub, _delete_tree_entry, revalidate_hf_hub, _verify_gone),
+    "pip-cache": (detect_pip_cache, _delete_cache_contents, revalidate_pip_cache,
+                 _verify_cache_contents_gone),
+    "uv-cache": (detect_uv_cache, _delete_cache_contents, revalidate_uv_cache,
+                _verify_cache_contents_gone),
+    "thumbnails": (detect_thumbnails, _delete_cache_contents, revalidate_thumbnails,
+                   _verify_cache_contents_gone),
     "project-artifacts": (detect_project_artifacts, _delete_tree_entry,
-                          revalidate_project_artifacts),
-    "rotated-logs": (detect_rotated_logs, _delete_log_file, revalidate_rotated_logs),
-    "journald": (detect_journald, _delete_journald, _revalidate_always),
-    "snap-old": (detect_snap_old, _delete_snap_revision, _revalidate_always),
+                          revalidate_project_artifacts, _verify_gone),
+    "rotated-logs": (detect_rotated_logs, _delete_log_file, revalidate_rotated_logs,
+                     _verify_gone),
+    "journald": (detect_journald, _delete_journald, _revalidate_always, _verify_always),
+    "snap-old": (detect_snap_old, _delete_snap_revision, _revalidate_always,
+                _verify_always),
 }
 
 
@@ -1261,7 +1309,7 @@ def purge(category, dry_run, cfg, indexer):
         raise ValueError("category must be a string")
     if category not in REGISTRY or category in cfg.get("purge_disabled", []):
         raise ValueError("unknown or disabled category")
-    detect, delete, revalidate = REGISTRY[category]
+    detect, delete, revalidate, verify = REGISTRY[category]
     candidates = detect(cfg, indexer)
     total = sum(c["bytes"] for c in candidates)
     if dry_run:
@@ -1281,11 +1329,13 @@ def purge(category, dry_run, cfg, indexer):
             continue
         try:
             delete(c)
-            ok = True
-            freed += c["bytes"]
-        except (OSError, PermissionError):
+            ok = verify(c)
+        except (OSError, PermissionError, subprocess.SubprocessError):
             ok = False
-        _ledger_append(ts, category, c["path"], c["bytes"], "ok" if ok else "error")
+        if ok:
+            freed += c["bytes"]
+        _ledger_append(ts, category, c["path"], c["bytes"] if ok else 0,
+                       "ok" if ok else "error")
         results.append({"path": c["path"], "bytes": c["bytes"], "ok": ok})
     return {"category": category, "dry_run": False, "freed_bytes": freed,
             "results": results}
@@ -1425,10 +1475,17 @@ def declare(path, dry_run, cfg, indexer):
             _rm_tree(real)
         else:
             _rm_files([real])
-        ok = True
+        # _rm_tree/_rm_files swallow every per-entry OSError by design (one
+        # unreadable file must not abort the whole walk) -- so "no exception
+        # raised" was never proof anything was actually deleted. Found live
+        # (msg 3234): ProtectSystem=strict made /tmp read-only to byebyted,
+        # every unlink/rmdir under it failed silently, and this returned ok
+        # while deleting nothing. os.path.lexists is the actual proof, same
+        # discipline reserve() already applies via statvfs before/after.
+        ok = not os.path.lexists(real)
     except (OSError, PermissionError):
         ok = False
-    _ledger_append(ts, "declare", real, nbytes, "ok" if ok else "error")
+    _ledger_append(ts, "declare", real, nbytes if ok else 0, "ok" if ok else "error")
     return {"path": real, "bytes": nbytes if ok else 0, "dry_run": False, "ok": ok}
 
 
@@ -1853,7 +1910,7 @@ _SWEEP_UNARMED_SKIP = {"project-artifacts"}
 def sweep(force_dry, cfg, indexer):
     armed = set(cfg.get("sweep_categories", [])) & set(REGISTRY.keys())
     results = []
-    for category, (detect, delete, revalidate) in REGISTRY.items():
+    for category, (detect, delete, revalidate, verify) in REGISTRY.items():
         if category in cfg.get("purge_disabled", []):
             continue
         acting = (not force_dry) and category in armed
@@ -1891,11 +1948,12 @@ def sweep(force_dry, cfg, indexer):
                 continue
             try:
                 delete(c)
-                ok = True
-                freed += c["bytes"]
-            except (OSError, PermissionError):
+                ok = verify(c)
+            except (OSError, PermissionError, subprocess.SubprocessError):
                 ok = False
-            _ledger_append(ts, f"sweep:{category}", c["path"], c["bytes"],
+            if ok:
+                freed += c["bytes"]
+            _ledger_append(ts, f"sweep:{category}", c["path"], c["bytes"] if ok else 0,
                            "ok" if ok else "error")
             item_results.append({"path": c["path"], "bytes": c["bytes"], "ok": ok})
         results.append({"category": category, "armed": True, "dry_run": False,
@@ -1928,7 +1986,7 @@ def _index_mtime_for(indexer, path):
 
 def _category_totals(category, cfg, indexer):
     """(total_bytes, newest_mtime) across a category's current candidates."""
-    detect, _, _ = REGISTRY[category]
+    detect, _, _, _ = REGISTRY[category]
     candidates = detect(cfg, indexer)
     total = sum(c["bytes"] for c in candidates)
     newest = 0.0

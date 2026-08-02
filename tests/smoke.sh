@@ -75,6 +75,10 @@ mkdir -p "$SHM_FIX/declare_target/dep"
 dd if=/dev/zero of="$SHM_FIX/declare_target/dep/blob" bs=1024 count=32 2>/dev/null
 mkdir -p "$SHM_FIX/declare_toctou"
 dd if=/dev/zero of="$SHM_FIX/declare_toctou/blob" bs=1024 count=32 2>/dev/null
+# declare's own version of the verify-deleted fixture, see the comment
+# where proj-verify-fail is created for what this proves and why
+mkdir -p "$SHM_FIX/declare_verify_fail/locked"
+dd if=/dev/zero of="$SHM_FIX/declare_verify_fail/locked/blob" bs=1024 count=32 2>/dev/null
 
 # fixture "home" for the M3 registry — NEVER a real path, always $FIX/home,
 # fed to the daemon via BYEBYTE_TEST_HOME (honored only when non-root)
@@ -104,6 +108,17 @@ dd if=/dev/zero of="$HOME_FIX/proj-without-marker/node_modules/dep/file.js" \
 mkdir -p "$HOME_FIX/proj-toctou/node_modules/dep"
 dd if=/dev/zero of="$HOME_FIX/proj-toctou/node_modules/dep/file.js" \
     bs=1024 count=64 2>/dev/null
+
+# a FOURTH copy, for proving purge/declare actually VERIFY a delete rather
+# than trusting _rm_tree's own silence (msg 3234's bug). locked/ gets its
+# write bit stripped at test time -- os.unlink inside it then fails with
+# EACCES, which _walk_delete's own per-entry `except OSError: continue`
+# swallows by design, so this reliably reproduces "delete() returned
+# without raising, but nothing was actually deleted" without needing root
+# or a real systemd sandbox.
+mkdir -p "$HOME_FIX/proj-verify-fail/node_modules/locked"
+dd if=/dev/zero of="$HOME_FIX/proj-verify-fail/node_modules/locked/blob" \
+    bs=1024 count=32 2>/dev/null
 
 # fixture /boot for the kernels verb — NEVER the real /boot. Includes the
 # actually-running kernel (so we can prove it's still refused as a
@@ -636,6 +651,104 @@ print("declare ok: derived home-ancestor/mount-point rules + enumerated "
 PY
 fi
 
+# --- M3.5: verify-deleted — purge/sweep/declare must confirm a candidate is
+# actually GONE before ledgering "ok", not trust that delete() returning
+# without raising means it worked (msg 3234: ProtectSystem=strict made /tmp
+# read-only to byebyted's real unit, _rm_tree's own per-entry `except
+# OSError: continue` swallowed every resulting EROFS, and purge/declare both
+# reported "freed" while deleting nothing at all, live on the operator's
+# machine). Reproduced here without root or a real systemd sandbox: chmod a
+# subdirectory read-only so os.unlink inside it fails with EACCES, the exact
+# shape _walk_delete already tolerates per-entry by design. NON-ROOT ONLY --
+# real root bypasses file permission bits entirely (that's what
+# CAP_DAC_OVERRIDE is for), so this specific simulation can't reproduce
+# anything under root; ROOT_SMOKE has its own coverage of the real
+# capability grant elsewhere.
+if [ "$ROOT_SMOKE" -eq 1 ]; then
+    echo "verify-deleted test skipped under root: chmod-based permission failure doesn't apply to root, which bypasses file mode bits entirely (that's what CAP_DAC_OVERRIDE is for in the real unit)"
+else
+python3 - "$RD" "$HOME_FIX" "$SHM_FIX" <<'PY'
+import json, os, socket, stat, sys
+
+rd, home_fix, shm_fix = sys.argv[1], sys.argv[2], sys.argv[3]
+
+def ask(obj, timeout=10):
+    c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    c.settimeout(timeout)
+    c.connect(os.path.join(rd, "control.sock"))
+    c.sendall(json.dumps(obj).encode() + b"\n")
+    buf = b""
+    while b"\n" not in buf:
+        chunk = c.recv(65536)
+        if not chunk:
+            break
+        buf += chunk
+    c.close()
+    return json.loads(buf.decode())
+
+# --- purge/project-artifacts side ---
+target_dir = os.path.join(home_fix, "proj-verify-fail", "node_modules")
+locked = os.path.join(target_dir, "locked")
+marker = os.path.join(home_fix, "proj-verify-fail", "package.json")
+assert os.path.isdir(locked), "verify-fail fixture missing before the test"
+open(marker, "w").close()
+
+dry = ask({"cmd": "purge", "category": "project-artifacts", "dry_run": True})
+paths = [c["path"] for c in dry["candidates"]]
+assert target_dir in paths, f"verify-fail fixture not detected: {paths}"
+
+os.chmod(locked, stat.S_IRUSR | stat.S_IXUSR)  # r-x------: contents un-removable
+try:
+    real = ask({"cmd": "purge", "category": "project-artifacts", "dry_run": False})
+finally:
+    os.chmod(locked, stat.S_IRWXU)  # restore before any cleanup ever touches it
+
+item = next((r for r in real["results"] if r["path"] == target_dir), None)
+assert item is not None, f"verify-fail candidate missing from results: {real}"
+assert item["ok"] is False, \
+    f"purge reported ok on a delete that silently failed: {item}"
+assert os.path.isdir(target_dir) and os.path.isdir(locked) \
+    and os.path.exists(os.path.join(locked, "blob")), \
+    "the locked subtree was not actually supposed to survive intact"
+
+ledger_path = os.path.join(rd, "state", "ledger.jsonl")
+with open(ledger_path) as f:
+    lines = [json.loads(l) for l in f if l.strip()]
+line = next(l for l in lines if l["target"] == target_dir)
+assert line["status"] == "error", line
+print("verify-deleted (purge) ok: a silently-failed _rm_tree is reported "
+      "ok=False and ledgered error, not a false ok")
+
+# --- declare side ---
+d_target = os.path.join(shm_fix, "declare_verify_fail")
+d_locked = os.path.join(d_target, "locked")
+assert os.path.isdir(d_locked), "declare verify-fail fixture missing before the test"
+
+dry = ask({"cmd": "declare", "path": d_target, "dry_run": True})
+assert "error" not in dry, dry
+
+os.chmod(d_locked, stat.S_IRUSR | stat.S_IXUSR)
+try:
+    real = ask({"cmd": "declare", "path": d_target, "dry_run": False})
+finally:
+    os.chmod(d_locked, stat.S_IRWXU)
+
+assert real.get("ok") is False, \
+    f"declare reported ok on a delete that silently failed: {real}"
+assert os.path.isdir(d_target) and os.path.exists(os.path.join(d_locked, "blob")), \
+    "the locked subtree was not actually supposed to survive intact"
+
+ledger_path = os.path.join(rd, "state", "ledger.jsonl")
+with open(ledger_path) as f:
+    lines = [json.loads(l) for l in f if l.strip()]
+line = next(l for l in lines if l["target"] == d_target)
+assert line["status"] == "error", line
+print("verify-deleted (declare) ok: same proof, same result")
+
+assert ask({"cmd": "ping"})["ok"] is True, "daemon died during verify-deleted tests"
+PY
+fi
+
 # --- M3: ghosts — a child holds an unlinked fd open, ghosts names it, then it's gone
 python3 - "$RD" <<'PY'
 import json, os, socket, subprocess, sys, time
@@ -950,7 +1063,14 @@ real = mod.reserve(mnt, 1, False, cfg)
 assert real.get("ok") is True, real
 assert real["prior_percent"] == original, real
 after_percent = mod._tune2fs_reserved_percent(dev)
-assert after_percent == 1, f"tune2fs reported ok but percent is {after_percent}"
+# tolerance, not exact equality (alfred, msg 3236): tune2fs -m sets
+# reserved blocks by INTEGER block-count truncation, so "1%" reads back as
+# whatever percentage that many whole blocks actually are on THIS
+# filesystem's block count -- 0.99% on a 512M image is correct behavior,
+# not a bug. statvfs moving (below) is the real claim; this is a coarse
+# sanity check that the requested value roughly landed, not the proof.
+assert abs(after_percent - 1) < 0.5, \
+    f"reserve asked for 1% but tune2fs now reports {after_percent}%"
 after = os.statvfs(mnt)
 avail_after = after.f_bavail * after.f_frsize
 assert avail_after > avail_before, \

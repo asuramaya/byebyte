@@ -13,7 +13,20 @@ RuntimeDirectoryMode=0755
 StateDirectory=byebyte
 NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=/run/byebyte /var/lib/byebyte
+ReadWritePaths=/run/byebyte /var/lib/byebyte /tmp /dev/shm
+# /tmp and /dev/shm added to match DEFAULTS["tmpfs_mounts"] in byebyted
+# (9e71be7's tmpfs indexing, ruling ddccc9be). ProtectSystem=strict makes
+# the whole hierarchy read-only outside ReadWritePaths, and the indexer/
+# purge/declare all now legitimately reach these mounts. systemd units
+# can't derive this list from Python config at runtime, so it is a SECOND
+# hand-maintained copy of tmpfs_mounts that has to change with it --
+# found the hard way (msg 3234): the indexer learned to see /tmp before
+# this line existed, so purge/declare reported "freed" on it while
+# ProtectSystem=strict silently blocked every delete underneath, and
+# _rm_tree's own per-entry OSError tolerance swallowed the evidence. This
+# line is necessary, not sufficient -- see the delete-path verification
+# fix in the same commit for the other half (a candidate is never
+# ledgered "ok" without confirming it's actually gone).
 # ProtectHome=read-only (M0/M1) silently broke M3's purge: deleting
 # ~/.cache/pip etc. needs WRITE access somewhere under an arbitrary
 # owner_uid's home, and ProtectHome enforces a real read-only bind mount
