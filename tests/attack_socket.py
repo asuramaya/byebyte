@@ -13,8 +13,10 @@ always answers ping afterward. Fixture-only, never a real path.
 
 Run as your normal user:  python3 tests/attack_socket.py
 """
+import atexit
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -28,8 +30,15 @@ RD = tempfile.mkdtemp(prefix="byebyte-attack-")
 FIX = os.path.join(RD, "tree")
 os.makedirs(os.path.join(FIX, "home"), exist_ok=True)
 with open(os.path.join(RD, "config.json"), "w") as f:
+    # ballast_gb: 0 -- this fixture's config never set it, so every run
+    # that found >8G free (ballast_build's own "comfortable" gate) silently
+    # built a REAL 2G pre-allocated reserve under state/ballast/ nobody was
+    # testing for. Found leaking 16 of these on the operator's real /tmp,
+    # ~2.1G apiece, some untouched for a week (msg 3196/3200). Nothing here
+    # exercises ballast, so it's off, not just cleaned up after.
     json.dump({"poll_interval": 1, "owner_uid": os.getuid(),
-               "scan_roots": [FIX], "index_min_bytes": 4096}, f)
+               "scan_roots": [FIX], "index_min_bytes": 4096,
+               "ballast_gb": 0}, f)
 
 env = dict(os.environ)
 env["BYEBYTE_RUNTIME_DIR"] = RD
@@ -39,6 +48,25 @@ proc = subprocess.Popen(
     [sys.executable, os.path.join(HERE, "src", "bin", "byebyted"),
      "--config", os.path.join(RD, "config.json")],
     env=env)
+
+
+def _cleanup():
+    # Runs at interpreter exit no matter which path got there -- normal
+    # completion, an early `raise SystemExit(1)` (the old code had one
+    # before the socket even appears, at RD's very first use, that skipped
+    # cleanup entirely), or an uncaught exception. The prior version only
+    # tore down `proc` at the bottom of a linear script and never removed
+    # RD at all, on any path: every run left its ephemeral dir behind.
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+    shutil.rmtree(RD, ignore_errors=True)
+
+
+atexit.register(_cleanup)
 
 SOCK = os.path.join(RD, "control.sock")
 for _ in range(80):
@@ -190,13 +218,9 @@ if not alive("after stall"):
 print(f"   stalled client isolated, daemon alive throughout: {alive('stall tail')}")
 
 # ---------------------------------------------------------------------- done
-proc.terminate()
-try:
-    proc.wait(timeout=5)
-except subprocess.TimeoutExpired:
-    proc.kill()
-    proc.wait()
-
+# proc/RD teardown happens in _cleanup(), registered with atexit above --
+# it fires here on the normal path same as before, and also on every early
+# exit this script has (see _cleanup's own comment).
 print()
 if fails:
     print("FAILURES:")
