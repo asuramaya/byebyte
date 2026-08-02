@@ -217,7 +217,15 @@ deb:
 # this for real on its own first CI run -- a positional `read` silently
 # mis-assigned every field even though the service was healthy the whole
 # time). 30s / six 5s samples, matching RAMstein's own window -- one
-# number for both pills, not two independently-chosen ones.
+# number for both pills, not two independently-chosen ones. Till's own
+# negative control is what set it: 4 restarts within 5s, 6 within 15s,
+# against RestartSec=5, so six samples over 30s gives real margin around a
+# loop that announces itself in the first five seconds. This window catches
+# IMMEDIATE-DEATH failures -- bad ExecStart, seccomp SIGSYS, a missing
+# capability, the three classes shipped between the two pills tonight. It
+# does NOT catch a daemon that runs fine for two minutes and dies on its
+# first real poll-loop tick -- different failure, different detector, not
+# covered here.
 check-systemd-live:
 	@test "$$(id -u)" = "0" || { echo "check-systemd-live: needs root (dpkg -i, systemctl)" >&2; exit 1; }
 	dpkg -i $(DEBFILE)
@@ -244,6 +252,42 @@ check-systemd-live:
 	    exit 1; \
 	  fi; \
 	  echo "check-systemd-live: $$u completed (Result=success)"; \
+	done
+	# Completion-checking the .service units above proves each one runs
+	# correctly WHEN TRIGGERED -- it says nothing about whether the paired
+	# .timer will ever trigger it. A malformed OnCalendar/OnBootSec value,
+	# or a Unit= naming a service that doesn't exist (both timers rely on
+	# systemd's default name-matching convention, correct today, silently
+	# breakable the day one side gets renamed) produce a timer that loads
+	# and enables but never fires -- invisible to everything above. Two
+	# checks, because testing this for real showed they catch DIFFERENT
+	# halves of it, not the split originally expected: systemd-analyze
+	# verify exits 0 even on a malformed timer value (confirmed directly --
+	# it only ever prints a warning line, never a nonzero exit), so failure
+	# is judged on its OUTPUT being non-empty, not its exit code; and it
+	# does NOT catch a Unit= pointing at nothing at all (also confirmed
+	# directly -- verify is silent about it). That half is caught by
+	# actually starting the timer: systemctl start fails outright on a
+	# dangling Unit=, and list-timers only ever shows a timer that both
+	# started AND has a real resolved NEXT/LEFT.
+	@for t in byebyte-update.timer byebyte-sweep.timer; do \
+	  out="$$(systemd-analyze verify $$t 2>&1)"; \
+	  if [ -n "$$out" ]; then \
+	    echo "FAIL: systemd-analyze verify found a problem in $$t:" >&2; \
+	    echo "$$out" >&2; \
+	    exit 1; \
+	  fi; \
+	  if ! systemctl start $$t; then \
+	    echo "FAIL: $$t failed to start -- Unit= likely points at a nonexistent service" >&2; \
+	    exit 1; \
+	  fi; \
+	  line="$$(systemctl list-timers --all --no-legend | grep "$$t" || true)"; \
+	  systemctl stop $$t; \
+	  if [ -z "$$line" ]; then \
+	    echo "FAIL: $$t started but never appeared in list-timers -- schedule did not resolve" >&2; \
+	    exit 1; \
+	  fi; \
+	  echo "check-systemd-live: $$t verified ($$line)"; \
 	done
 
 # signing anchor rebuild is centralized in mudra now, not a per-repo target:
