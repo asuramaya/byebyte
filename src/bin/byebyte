@@ -13,6 +13,7 @@ so it still answers even mid-daemon-restart. Every verb accepts --json.
   reserve <mountpoint> [percent] [--yes]   ext2/3/4's own privileged-writer headroom, floor 1%
   journal-cap <size> [--yes]   bound journald's own disk footprint (e.g. 500M, 1G)
   fstrim-schedule [on|off] [--yes]   the stock weekly TRIM timer, on or off
+  tmp-size <size> [--yes] cap /tmp's tmpfs size (PENDING until reboot/remount)
   ghosts                  deleted-but-open files still holding disk blocks
   ballast [release]       show or release the pre-allocated emergency reserve
   kernels                 removable kernel packages, prints the apt line, never runs it
@@ -420,6 +421,36 @@ def cmd_fstrim_schedule(argv):
         print("fstrim-schedule: requested change did not take effect")
 
 
+def cmd_tmp_size(argv):
+    """tmp-size: cap /tmp's own tmpfs size via a tmp.mount drop-in. PENDING,
+    not done: the write is instant but /tmp is never remounted by this verb
+    -- the new cap only takes effect at the next reboot, or a manual
+    `systemctl daemon-reload && systemctl restart tmp.mount`."""
+    positional = [a for a in argv if not a.startswith("-")]
+    if not positional:
+        sys.exit("byebyte tmp-size: needs a size, e.g. 2G or 512M")
+    size = positional[0]
+    yes = "--yes" in argv
+    doc = request_or_die({"cmd": "tmp-size", "size": size, "dry_run": not yes},
+                         as_json="--json" in argv)
+    if "--json" in argv:
+        print(json.dumps(doc, indent=2))
+        return
+    if doc.get("dry_run"):
+        live = f" ({human_bytes(doc['live_total_bytes'])} currently)" \
+            if doc.get("live_total_bytes") else ""
+        print(f"/tmp: {doc['current_cap'] or 'default'} cap{live}")
+        print(f"  -> cap to {doc['proposed_cap']} (dry-run — add --yes to apply, "
+              "PENDING until reboot or a manual remount)")
+    elif doc.get("ok"):
+        print(f"tmp-size: {doc['prior_cap'] or 'default'} -> {doc['new_cap']} "
+              "(PENDING — takes effect at the next reboot or manual remount)")
+        if doc.get("note"):
+            print(f"  note: {doc['note']}")
+    else:
+        print("tmp-size: failed")
+
+
 def cmd_ghosts(argv):
     doc = request_or_die({"cmd": "ghosts"}, as_json="--json" in argv)
     if "--json" in argv:
@@ -645,6 +676,7 @@ def main():
              "why": cmd_why, "blame": cmd_blame, "purge": cmd_purge,
              "declare": cmd_declare, "reserve": cmd_reserve,
              "journal-cap": cmd_journal_cap, "fstrim-schedule": cmd_fstrim_schedule,
+             "tmp-size": cmd_tmp_size,
              "ghosts": cmd_ghosts, "ballast": cmd_ballast, "kernels": cmd_kernels,
              "advise": cmd_advise, "burn": cmd_burn, "sweep": cmd_sweep,
              "update": cmd_update}

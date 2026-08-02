@@ -144,6 +144,31 @@ never deferred: the very next
 .B systemctl is\-enabled
 read proves it.
 .TP
+.BI tmp-size " size " "[\-\-yes]"
+Cap
+.IR /tmp 's
+own tmpfs size via a
+.I tmp.mount
+drop-in
+.RI ( size
+like
+.IR 2G " or " 512M ).
+Preserves every other mount option
+.RI ( mode ", " nosuid ", " usrquota ", " \.\.\. )
+verbatim, changing only
+.IR size= .
+.B PENDING,
+not done: the write is instant, but this verb never remounts
+.I /tmp
+itself \(em the new cap takes effect only at the next reboot, or a manual
+.B systemctl daemon\-reload && systemctl restart tmp.mount .
+A response never claims success; it reports the write and the still\-
+unchanged live total side by side. Refused by name, not attempted blind, on
+a system where
+.I /tmp
+isn't managed via
+.IR tmp.mount .
+.TP
 .B ghosts
 List deleted-but-open files still holding disk blocks, grouped by the
 process holding them and the mount they live on. Report-only \(em never

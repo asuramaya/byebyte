@@ -2071,6 +2071,167 @@ def fstrim_schedule(enabled, dry_run, cfg, unit=_FSTRIM_UNIT):
             "ok": ok, "next_run": _systemctl_next_run(unit)}
 
 
+# --- tmp-size: cap /tmp's own tmpfs size (V3.M4) — PENDING, on purpose -----
+# Reuses tmp.mount exactly as shipped by systemd (mode=1777, strictatime,
+# nosuid, nodev, usrquota via x-systemd.graceful-option -- this daemon's OWN
+# quota reader depends on usrquota surviving). A .mount unit's Options= is a
+# single string value: a drop-in that writes just "Options=size=X" REPLACES
+# the whole directive, not merges it -- confirmed by reading tmp.mount's own
+# live vs static Options on a real box, where the live/resolved view was
+# already missing mode= from what the unit file states. Silently writing a
+# bare size=X would have silently dropped mode=1777 and usrquota along with
+# it. So the drop-in's Options= is always the FULL current option set with
+# only size= substituted -- current meaning byebyte's own prior drop-in if
+# one exists (our last write is authoritative for what we intended), else
+# the vendor unit's original Options=, read from its real FragmentPath, not
+# reconstructed from `systemctl show`'s live/resolved view for the same
+# missing-mode= reason.
+#
+# PENDING, ruling 8263c191 (this daemon's own earlier finding, ratified as a
+# family rule from this exact question): the drop-in write is instant, but
+# /tmp is NEVER remounted by this verb -- the new size takes effect only at
+# the next natural remount (reboot, or an operator running `systemctl
+# daemon-reload && systemctl restart tmp.mount` by hand). The response must
+# never claim "done"; it reports the write plus the still-unchanged live
+# total side by side, honestly, and the ledger status is "pending", not
+# "ok" -- a new, deliberate third value (checked: nothing reads the ledger
+# assuming a fixed status set beyond printing it verbatim).
+#
+# Deliberately narrower than journal-cap/reserve/fstrim-schedule: only the
+# tmp.mount drop-in path is built. A system where /tmp isn't systemd-managed
+# (an /etc/fstab tmpfs line, or no sized tmpfs at all) is refused by name
+# rather than attempting an untested fstab rewrite -- FAMILY.md's own words
+# on this exact class of file ("an fstab edit can brick a boot") and this
+# family's whole day's lesson (an unexercised code path is an untested
+# claim) both argue against shipping that path blind on a box that can't
+# prove it. A real, disclosed gap, not a silent one.
+#
+# BYEBYTE_TEST_TMP_DROPIN_DIR / _TMP_MOUNT_FRAGMENT: non-root-only, same
+# class as journal-cap's own hooks. Unlike fstrim-schedule (an ENABLEMENT
+# STATE with no path to redirect, the actual thing being asked about IS the
+# resource under test), tmp-size's whole real-apply act is a FILE WRITE that
+# never touches live mount state on its own -- so, like journal-cap, the
+# entire logic is testable via throwaway files, and root never needs to
+# honor these because production root never runs with them set.
+_TMP_MOUNT_UNIT = "tmp.mount"
+_TMP_DROPIN_DIR = "/etc/systemd/system/tmp.mount.d"
+_TMP_DROPIN_NAME = "90-byebyte.conf"
+
+
+def _tmp_dropin_dir():
+    if os.getuid() != 0:
+        override = os.environ.get("BYEBYTE_TEST_TMP_DROPIN_DIR")
+        if override:
+            return override
+    return _TMP_DROPIN_DIR
+
+
+def _tmp_dropin_path():
+    return os.path.join(_tmp_dropin_dir(), _TMP_DROPIN_NAME)
+
+
+def _tmp_mount_fragment_path():
+    if os.getuid() != 0:
+        override = os.environ.get("BYEBYTE_TEST_TMP_MOUNT_FRAGMENT")
+        if override:
+            return override if os.path.isfile(override) else None
+    out = subprocess.run(
+        ["systemctl", "show", _TMP_MOUNT_UNIT, "--property=FragmentPath", "--value"],
+        capture_output=True, text=True, timeout=10, check=False)
+    path = out.stdout.strip()
+    return path if path and os.path.isfile(path) else None
+
+
+def _parse_mount_options_line(path):
+    """The [Mount] section's Options= value, verbatim, from a real .mount
+    unit file -- byte for byte what the vendor unit (or byebyte's own prior
+    drop-in) actually says, never a live/resolved reconstruction."""
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("Options="):
+                    return line.split("=", 1)[1]
+    except OSError:
+        pass
+    return None
+
+
+def _tmp_current_options():
+    own = _parse_mount_options_line(_tmp_dropin_path())
+    if own is not None:
+        return own
+    frag = _tmp_mount_fragment_path()
+    return _parse_mount_options_line(frag) if frag else None
+
+
+def _size_from_options(options):
+    for part in options.split(","):
+        if part.startswith("size="):
+            return part.split("=", 1)[1]
+    return None
+
+
+def _options_with_size(options, size):
+    parts = [p for p in options.split(",") if not p.startswith("size=")]
+    parts.append(f"size={size}")
+    return ",".join(parts)
+
+
+def tmp_size(size, dry_run, cfg):
+    if not isinstance(size, str) or not _SIZE_RE.match(size):
+        return {"error": "size must look like 2G, 512M ... (digits plus one "
+                         "optional K/M/G/T suffix)"}
+    if int(re.match(r"^\d+", size).group()) == 0:
+        return {"error": "size must be greater than 0"}
+
+    if _tmp_mount_fragment_path() is None:
+        return {"error": f"{_TMP_MOUNT_UNIT} not found on this system -- /tmp is "
+                         "managed some other way (possibly /etc/fstab), which "
+                         "this verb doesn't support yet"}
+    current_options = _tmp_current_options()
+    if current_options is None:
+        return {"error": f"could not read {_TMP_MOUNT_UNIT}'s current mount options"}
+    current_size = _size_from_options(current_options)
+
+    try:
+        live = os.statvfs("/tmp")
+        live_total = live.f_blocks * live.f_frsize
+    except OSError:
+        live_total = None
+
+    if dry_run:
+        return {"current_cap": current_size, "proposed_cap": size,
+                "live_total_bytes": live_total, "dry_run": True}
+
+    ts = time.time()
+    dropin_path = _tmp_dropin_path()
+    target = f"/tmp ({current_size}->{size})"
+    new_options = _options_with_size(current_options, size)
+    try:
+        os.makedirs(os.path.dirname(dropin_path), exist_ok=True)
+        with open(dropin_path, "w") as f:
+            f.write("# written by byebyte tmp-size -- delete this file and\n"
+                    "# `systemctl daemon-reload` to undo. Takes effect at the\n"
+                    "# next remount either way -- this verb never remounts /tmp\n"
+                    "# itself; see byebyted's own comment on this function for why.\n"
+                    f"[Mount]\nOptions={new_options}\n")
+    except OSError as e:
+        _ledger_append(ts, "tmp-size", target, 0, "error")
+        return {"error": f"could not write {dropin_path}: {e}"}
+
+    if os.getuid() == 0:
+        subprocess.run(["systemctl", "daemon-reload"],
+                       capture_output=True, timeout=15, check=False)
+    _ledger_append(ts, "tmp-size", target, 0, "pending")
+    return {"prior_cap": current_size, "new_cap": size, "dry_run": False,
+            "ok": True, "pending": True, "live_total_bytes": live_total,
+            "note": "written, but /tmp is not remounted automatically -- the new "
+                    "cap takes effect at the next reboot, or run `systemctl "
+                    "daemon-reload && systemctl restart tmp.mount` by hand to "
+                    "apply it now"}
+
+
 # --- sweep: the unattended reclaim policy (V2.M4) ---------------------------
 # Double consent, per docs/V2-SPEC.md M4: the systemd timer (opt-in, disabled
 # by default) is consent #1 — nothing runs unattended without it. Per-category
@@ -2420,6 +2581,12 @@ def _make_dispatch(cfg, indexer, get_status, path_attr=None):
             if not isinstance(dry_run, bool):
                 raise ValueError("dry_run must be a bool")
             return fstrim_schedule(enabled, dry_run, cfg)
+        if cmd == "tmp-size":
+            size = req.get("size")
+            dry_run = req.get("dry_run", True)
+            if not isinstance(dry_run, bool):
+                raise ValueError("dry_run must be a bool")
+            return tmp_size(size, dry_run, cfg)
         if cmd == "ghosts":
             return ghosts()
         if cmd == "ballast":

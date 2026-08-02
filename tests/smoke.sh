@@ -1396,6 +1396,110 @@ else
          "installed -- this is the normal local-dev-box case, not a CI concern)"
 fi
 
+# --- V3.M4: tmp-size — caps /tmp's tmpfs via a tmp.mount drop-in, PENDING
+# until reboot/remount. Unlike fstrim-schedule, this verb's whole real-apply
+# act is a FILE WRITE that never touches live mount state on its own (it
+# deliberately never remounts /tmp itself) -- so, like journal-cap, this
+# needs neither root nor real tooling: BYEBYTE_TEST_TMP_MOUNT_FRAGMENT and
+# BYEBYTE_TEST_TMP_DROPIN_DIR redirect the whole thing to throwaway files,
+# always runs.
+python3 - <<'PY'
+import importlib.util, os, shutil, sys, tempfile
+from importlib.machinery import SourceFileLoader
+
+state_dir = tempfile.mkdtemp(prefix="byebyte-smoke-tmpsize-state-")
+os.environ["BYEBYTE_STATE_DIR"] = state_dir  # module-level constant, must
+                                              # precede exec_module
+
+loader = SourceFileLoader("byebyted_mod_tmpsize", "src/bin/byebyted")
+spec = importlib.util.spec_from_loader("byebyted_mod_tmpsize", loader)
+mod = importlib.util.module_from_spec(spec)
+loader.exec_module(mod)
+
+fake_frag_dir = tempfile.mkdtemp(prefix="byebyte-smoke-tmpsize-frag-")
+dropin_dir = tempfile.mkdtemp(prefix="byebyte-smoke-tmpsize-dropin-")
+try:
+    # a realistic stand-in for the real tmp.mount's own [Mount] section --
+    # mode=1777/nosuid/usrquota etc. must all survive untouched, only
+    # size= may change
+    ORIGINAL_OPTIONS = "mode=1777,strictatime,nosuid,nodev,size=50%,nr_inodes=1m,x-systemd.graceful-option=usrquota"
+    frag_path = os.path.join(fake_frag_dir, "tmp.mount")
+    with open(frag_path, "w") as f:
+        f.write(f"[Unit]\nDescription=fake tmp.mount\n\n[Mount]\nWhat=tmpfs\nWhere=/tmp\n"
+                f"Type=tmpfs\nOptions={ORIGINAL_OPTIONS}\n")
+    os.environ["BYEBYTE_TEST_TMP_MOUNT_FRAGMENT"] = frag_path
+    os.environ["BYEBYTE_TEST_TMP_DROPIN_DIR"] = dropin_dir
+    cfg = {}
+
+    # hostile sizes: refused regardless of dry_run, before any file touched
+    for bad in ("abc", "0M", "-5G", "5X", "5.5G", "M5", ""):
+        r = mod.tmp_size(bad, True, cfg)
+        assert "error" in r, f"'{bad}' should have been refused: {r}"
+    assert not os.listdir(dropin_dir), "a refused size still wrote a drop-in"
+
+    # missing tmp.mount: refused by name, not attempted blind
+    os.environ["BYEBYTE_TEST_TMP_MOUNT_FRAGMENT"] = os.path.join(fake_frag_dir, "nope")
+    missing = mod.tmp_size("2G", True, cfg)
+    assert "error" in missing and "not found" in missing["error"], missing
+    os.environ["BYEBYTE_TEST_TMP_MOUNT_FRAGMENT"] = frag_path
+
+    # dry-run: current_cap parsed from the vendor fragment's own size=,
+    # live_total_bytes is a REAL statvfs("/tmp") read (harmless, read-only),
+    # touches nothing
+    dry = mod.tmp_size("2G", True, cfg)
+    assert dry.get("current_cap") == "50%", dry
+    assert dry.get("proposed_cap") == "2G", dry
+    live_before = dry.get("live_total_bytes")
+    assert live_before, "expected a real /tmp statvfs total"
+    assert not os.listdir(dropin_dir), "dry-run wrote a drop-in"
+
+    # real apply: writes the drop-in with EVERY original option preserved,
+    # only size= replaced -- this is the whole point of the design (a naive
+    # "Options=size=2G" would have silently dropped mode=1777 and usrquota,
+    # since a .mount unit's Options= is a single string a drop-in replaces
+    # wholesale, not merges)
+    real = mod.tmp_size("2G", False, cfg)
+    assert real.get("ok") is True and real.get("pending") is True, real
+    assert real["prior_cap"] == "50%" and real["new_cap"] == "2G", real
+    # PENDING must mean pending: the live total must not have moved between
+    # the dry-run read and the real-apply's own read -- this verb never
+    # remounts /tmp, so there is nothing for a live read to catch
+    assert real.get("live_total_bytes") == live_before, \
+        "live_total_bytes moved -- tmp-size must never actually remount /tmp"
+    dropin_path = os.path.join(dropin_dir, "90-byebyte.conf")
+    with open(dropin_path) as f:
+        written = f.read()
+    for opt in ("mode=1777", "strictatime", "nosuid", "nodev", "nr_inodes=1m",
+                "x-systemd.graceful-option=usrquota", "size=2G"):
+        assert opt in written, f"'{opt}' missing from the written drop-in:\n{written}"
+    assert "size=50%" not in written, f"old size= survived alongside the new one:\n{written}"
+
+    # round trip: a second dry-run now reads current_cap from byebyte's OWN
+    # drop-in, not the vendor fragment -- our last write is authoritative
+    after = mod.tmp_size("4G", True, cfg)
+    assert after.get("current_cap") == "2G", after
+
+    # ledgered as "pending", never "ok" -- the semantically important bit,
+    # a new deliberate status value (checked: nothing else in this codebase
+    # reads ledger status assuming a fixed set beyond printing it verbatim)
+    ledger_path = os.path.join(state_dir, "ledger.jsonl")
+    with open(ledger_path) as f:
+        lines = [__import__("json").loads(l) for l in f if l.strip()]
+    line = next(l for l in lines if l["category"] == "tmp-size")
+    assert line["status"] == "pending", line
+    assert "50%->2G" in line["target"], line
+
+    print("tmp-size ok: hostile sizes refused, missing tmp.mount refused, "
+          "dry-run touched nothing, real apply preserved every original option "
+          "and changed only size=, live total genuinely unmoved (PENDING is "
+          "real, not just a label), round-trip read its own write back, "
+          "ledgered as pending not ok")
+finally:
+    shutil.rmtree(fake_frag_dir, ignore_errors=True)
+    shutil.rmtree(dropin_dir, ignore_errors=True)
+    shutil.rmtree(state_dir, ignore_errors=True)
+PY
+
 # --- M3: ballast — built at startup (test override: bytes, not gigabytes),
 # release frees it. "Zero writes before unlink" on the release path is
 # verified by code review (ballast_release() in byebyted: only os.stat reads

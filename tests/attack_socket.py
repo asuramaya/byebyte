@@ -121,7 +121,8 @@ def alive(where):
 
 # ------------------------------------------------------------- command surface
 print("== command-surface hostile fuzz (scan/why/blame/purge/declare/reserve/"
-      "journal-cap/fstrim-schedule/ghosts/ballast/kernels/advise/burn/sweep) ==")
+      "journal-cap/fstrim-schedule/tmp-size/ghosts/ballast/kernels/advise/"
+      "burn/sweep) ==")
 HOSTILE = [
     {"cmd": "status"}, {"cmd": "scan"}, {"cmd": "scan", "extra": "garbage"},
     {"cmd": "why"}, {"cmd": "why", "path": 123}, {"cmd": "why", "path": []},
@@ -192,6 +193,17 @@ HOSTILE = [
     {"cmd": "fstrim-schedule"}, {"cmd": "fstrim-schedule", "enabled": 123},
     {"cmd": "fstrim-schedule", "enabled": "yes"}, {"cmd": "fstrim-schedule", "enabled": []},
     {"cmd": "fstrim-schedule", "dry_run": "yes"}, {"cmd": "fstrim-schedule", "dry_run": 1},
+    # tmp-size writes under /etc/systemd/system/tmp.mount.d, unreachable to
+    # this unprivileged harness's daemon -- same shape as journal-cap (a
+    # config-file write, not a live act like fstrim-schedule's toggle), so
+    # dry_run: False fails closed at the permission-denied write too
+    {"cmd": "tmp-size"}, {"cmd": "tmp-size", "size": 123},
+    {"cmd": "tmp-size", "size": None}, {"cmd": "tmp-size", "size": ""},
+    {"cmd": "tmp-size", "size": "abc"}, {"cmd": "tmp-size", "size": "0M"},
+    {"cmd": "tmp-size", "size": "-5G"}, {"cmd": "tmp-size", "size": "A" * 3000},
+    {"cmd": "tmp-size", "size": "2G", "dry_run": False},
+    {"cmd": "tmp-size", "size": "2G", "dry_run": "yes"},
+    {"cmd": "tmp-size", "size": "2G", "dry_run": 1},
     {"cmd": "ghosts"}, {"cmd": "ghosts", "extra": [1, 2, 3]},
     {"cmd": "ballast"}, {"cmd": "ballast", "action": "explode"},
     {"cmd": "ballast", "action": 123}, {"cmd": "ballast", "action": None},
