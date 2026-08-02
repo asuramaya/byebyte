@@ -1692,6 +1692,128 @@ def _ledger_read(limit=None):
     return lines
 
 
+# --- reserve: ext2/3/4's own privileged-writer headroom (layer 3, V3.M1) ---
+# tune2fs -m sets the percentage of a filesystem reserved for privileged
+# processes (syslog, sshd, byebyted itself among them) so they can keep
+# functioning after a non-privileged user fills the disk. Stock default is
+# 5% -- on a 1.8T disk that's ~90G nobody told the user is spoken for.
+# Applies to a MOUNTED filesystem immediately, no unmount or remount:
+# verified live (loop-device ext4, mounted throughout, alfred) -- avail
+# moved the exact expected amount on the very next statvfs call, and a
+# round trip (5% -> 1% -> 5%) landed byte-exact.
+#
+# tune2fs -m 0 is accepted SILENTLY by e2fsprogs -- no warning, no
+# refusal, "Setting reserved blocks percentage to 0% (0 blocks)" and it's
+# done. That makes refusing 0% here the ONLY guard that will ever exist
+# between a user and a filesystem where even root can't write once it
+# fills. Compiled-in floor (doctrine #6): config can never widen it.
+#
+# The write is IMMEDIATE (unlike tmp-size), which makes this the reference
+# shape for verifying a layer-3 verb: statvfs itself is the proof. Read
+# avail before, run tune2fs, read avail after -- if it didn't move, this
+# did not work, regardless of tune2fs's own exit code.
+_RESERVE_FSTYPES = {"ext2", "ext3", "ext4"}
+_RESERVE_MIN_PERCENT = 1
+
+
+def _tune2fs_reserved_percent(device):
+    """Current reserved-blocks percentage, read-only (`tune2fs -l`), or
+    None if it can't be determined (tune2fs missing, device unreadable,
+    unexpected output shape)."""
+    try:
+        out = subprocess.run(["tune2fs", "-l", device], capture_output=True,
+                             text=True, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    total = reserved = None
+    for line in out.stdout.splitlines():
+        if line.startswith("Block count:"):
+            total = int(line.split(":", 1)[1].strip())
+        elif line.startswith("Reserved block count:"):
+            reserved = int(line.split(":", 1)[1].strip())
+    if not total:
+        return None
+    return round(100.0 * (reserved or 0) / total, 2)
+
+
+def _device_for_mount(mountpoint, cfg):
+    for m in discover_mounts(cfg):
+        if m["mountpoint"] == mountpoint:
+            return m["device"], m["fstype"]
+    return None, None
+
+
+def reserve(mountpoint, percent, dry_run, cfg):
+    if not isinstance(mountpoint, str) or not mountpoint:
+        raise ValueError("mountpoint must be a non-empty string")
+    device, fstype = _device_for_mount(mountpoint, cfg)
+    if device is None:
+        return {"error": f"{mountpoint} is not a currently mounted, monitored filesystem"}
+    if fstype not in _RESERVE_FSTYPES:
+        return {"error": f"reserve only supports ext2/ext3/ext4, {mountpoint} is {fstype}"}
+    current = _tune2fs_reserved_percent(device)
+    if current is None:
+        return {"error": f"could not read {device}'s current reserved-blocks percentage"}
+
+    if dry_run:
+        try:
+            sv = os.statvfs(mountpoint)
+            total_bytes = sv.f_blocks * sv.f_frsize
+        except OSError:
+            total_bytes = None
+        proposed_delta = None
+        if total_bytes is not None and isinstance(percent, (int, float)):
+            proposed_delta = int(total_bytes * (current - percent) / 100.0)
+        return {"mountpoint": mountpoint, "device": device,
+                "current_percent": current, "proposed_percent": percent,
+                "proposed_avail_delta_bytes": proposed_delta, "dry_run": True}
+
+    if not isinstance(percent, (int, float)) or percent < _RESERVE_MIN_PERCENT:
+        return {"error": f"refusing to set reserved blocks below "
+                         f"{_RESERVE_MIN_PERCENT}% -- e2fsprogs accepts 0% silently, "
+                         "and it is the only guard against a privileged process being "
+                         "unable to write once the disk is full"}
+    if percent > 100:
+        return {"error": "percent must be <= 100"}
+
+    try:
+        before = os.statvfs(mountpoint)
+        avail_before = before.f_bavail * before.f_frsize
+    except OSError as e:
+        return {"error": f"could not read {mountpoint}'s current headroom: {e}"}
+
+    ts = time.time()
+    target = f"{mountpoint} ({current}%->{percent}%)"
+    try:
+        out = subprocess.run(["tune2fs", "-m", str(percent), device],
+                             capture_output=True, text=True, timeout=15, check=False)
+    except (OSError, subprocess.SubprocessError) as e:
+        _ledger_append(ts, "reserve", target, 0, "error")
+        return {"error": f"could not run tune2fs: {e}"}
+    if out.returncode != 0:
+        _ledger_append(ts, "reserve", target, 0, "error")
+        return {"error": f"tune2fs failed: {out.stderr.strip() or out.stdout.strip()}"}
+
+    try:
+        after = os.statvfs(mountpoint)
+        avail_after = after.f_bavail * after.f_frsize
+    except OSError as e:
+        _ledger_append(ts, "reserve", target, 0, "error")
+        return {"error": f"tune2fs ran but could not re-read {mountpoint}: {e}"}
+
+    moved = avail_after - avail_before
+    # the reference measurement: statvfs is the proof, not tune2fs's exit
+    # code -- a no-op request (percent == current) legitimately moves
+    # nothing, anything else that didn't move did not actually work
+    ok = moved != 0 or percent == current
+    _ledger_append(ts, "reserve", target, abs(moved), "ok" if ok else "error")
+    return {"mountpoint": mountpoint, "device": device, "dry_run": False,
+            "ok": ok, "prior_percent": current, "new_percent": percent,
+            "avail_delta_bytes": moved}
+
+
 # --- sweep: the unattended reclaim policy (V2.M4) ---------------------------
 # Double consent, per docs/V2-SPEC.md M4: the systemd timer (opt-in, disabled
 # by default) is consent #1 — nothing runs unattended without it. Per-category
@@ -2019,6 +2141,13 @@ def _make_dispatch(cfg, indexer, get_status, path_attr=None):
             if not isinstance(dry_run, bool):
                 raise ValueError("dry_run must be a bool")
             return declare(path, dry_run, cfg, indexer)
+        if cmd == "reserve":
+            mountpoint = req.get("mountpoint")
+            percent = req.get("percent")
+            dry_run = req.get("dry_run", True)
+            if not isinstance(dry_run, bool):
+                raise ValueError("dry_run must be a bool")
+            return reserve(mountpoint, percent, dry_run, cfg)
         if cmd == "ghosts":
             return ghosts()
         if cmd == "ballast":

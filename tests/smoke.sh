@@ -879,6 +879,114 @@ else
          "-- this is the normal local-dev-box case, not a CI concern)"
 fi
 
+# --- V3.M1: reserve — ext2/3/4 reserved-blocks, layer 3's reference verb.
+# Same capability gate and same CI honesty as the btrfs section above (loop-
+# device mounting is not supported under GitHub Actions' sandboxing,
+# confirmed by direct reproduction there) -- never inferred, always explicit.
+reserve_ready=1
+for tool in tune2fs losetup mkfs.ext4; do
+    command -v "$tool" >/dev/null 2>&1 || reserve_ready=0
+done
+if [ -n "${CI:-}" ]; then
+    echo "reserve section: skipped (CI environment -- loop-device mounting is not" \
+         "supported under GitHub Actions' sandboxing, same as the btrfs section" \
+         "above; a real, disclosed coverage gap, not a false skip)"
+elif [ "$reserve_ready" -eq 1 ] && sudo -n true 2>/dev/null; then
+    EXT4_IMG=$(mktemp --tmpdir=/var/tmp byebyte-smoke-ext4.XXXXXX.img)
+    EXT4_MNT=$(mktemp -d --tmpdir=/var/tmp byebyte-smoke-ext4-mnt.XXXXXX)
+    RESERVE_STATE=$(mktemp -d --tmpdir=/var/tmp byebyte-smoke-reserve-state.XXXXXX)
+    loopdev=""
+    cleanup_reserve() {
+        [ -n "$loopdev" ] && sudo -n umount "$EXT4_MNT" 2>/dev/null
+        [ -n "$loopdev" ] && sudo -n losetup -d "$loopdev" 2>/dev/null
+        rm -f "$EXT4_IMG"
+        rmdir "$EXT4_MNT" 2>/dev/null || true
+        rm -rf "$RESERVE_STATE"
+    }
+    reserve_live=0
+    if truncate -s 64M "$EXT4_IMG" \
+        && loopdev=$(sudo -n losetup --show -f "$EXT4_IMG" 2>/dev/null) \
+        && sudo -n mkfs.ext4 -q "$loopdev" >/dev/null 2>&1 \
+        && sudo -n mount "$loopdev" "$EXT4_MNT" 2>/dev/null; then
+        reserve_live=1
+    fi
+    if [ "$reserve_live" -eq 1 ]; then
+        # read as root, same as the real daemon always does in production
+        sudo -n env BYEBYTE_STATE_DIR="$RESERVE_STATE" \
+            python3 - "$(pwd)/src/bin/byebyted" "$EXT4_MNT" "$loopdev" <<'PY'
+import importlib.util, os, sys
+from importlib.machinery import SourceFileLoader
+
+daemon_path, mnt, dev = sys.argv[1], sys.argv[2], sys.argv[3]
+sys.path.insert(0, os.path.dirname(daemon_path))
+loader = SourceFileLoader("byebyted_mod", daemon_path)
+spec = importlib.util.spec_from_loader("byebyted_mod", loader)
+mod = importlib.util.module_from_spec(spec)
+loader.exec_module(mod)
+
+cfg = {"exclude_mounts": [], "tmpfs_mounts": [], "include_fstypes": ["ext4"]}
+
+original = mod._tune2fs_reserved_percent(dev)
+assert original is not None, "could not read the fixture's own reserved-blocks percent"
+
+# dry-run: reports current without touching anything
+dry = mod.reserve(mnt, 1, True, cfg)
+assert dry.get("current_percent") == original, dry
+assert dry.get("proposed_percent") == 1, dry
+assert mod._tune2fs_reserved_percent(dev) == original, \
+    "dry-run touched the filesystem"
+
+# the compiled-in floor: 0% is refused even with dry_run=False, e2fsprogs'
+# own silent acceptance of it is exactly why this guard has to exist here
+refused = mod.reserve(mnt, 0, False, cfg)
+assert "error" in refused, f"0% was not refused: {refused}"
+assert mod._tune2fs_reserved_percent(dev) == original, \
+    "a refused request still changed the filesystem"
+
+# real apply: the reference measurement is statvfs itself, before and after
+before = os.statvfs(mnt)
+avail_before = before.f_bavail * before.f_frsize
+real = mod.reserve(mnt, 1, False, cfg)
+assert real.get("ok") is True, real
+assert real["prior_percent"] == original, real
+after_percent = mod._tune2fs_reserved_percent(dev)
+assert after_percent == 1, f"tune2fs reported ok but percent is {after_percent}"
+after = os.statvfs(mnt)
+avail_after = after.f_bavail * after.f_frsize
+assert avail_after > avail_before, \
+    "reserve reported ok but statvfs avail did not actually move"
+assert real["avail_delta_bytes"] == avail_after - avail_before, real
+
+# ledgered, with both the prior and new percent visible in the target
+ledger_path = os.path.join(os.environ["BYEBYTE_STATE_DIR"], "ledger.jsonl")
+with open(ledger_path) as f:
+    lines = [__import__("json").loads(l) for l in f if l.strip()]
+line = next(l for l in lines if l["category"] == "reserve" and "->1%" in l["target"])
+assert line["status"] == "ok", line
+
+# round trip back to the original -- byte-exact avail restoration, same
+# proof method
+restore = mod.reserve(mnt, original, False, cfg)
+assert restore.get("ok") is True, restore
+final = os.statvfs(mnt)
+avail_final = final.f_bavail * final.f_frsize
+assert avail_final == avail_before, \
+    f"round trip did not restore byte-exact: {avail_before} -> {avail_final}"
+
+print(f"reserve ok: {original}% -> 1% -> {original}%, statvfs avail moved and "
+      f"restored byte-exact ({avail_after - avail_before}B), 0% refused by the "
+      "compiled-in floor, ledgered with prior+new percent")
+PY
+        cleanup_reserve
+    else
+        cleanup_reserve
+        echo "reserve section: skipped (loop/mkfs.ext4/mount failed under sudo -n)"
+    fi
+else
+    echo "reserve section: skipped (no passwordless sudo, or e2fsprogs not installed" \
+         "-- this is the normal local-dev-box case, not a CI concern)"
+fi
+
 # --- M3: ballast — built at startup (test override: bytes, not gigabytes),
 # release frees it. "Zero writes before unlink" on the release path is
 # verified by code review (ballast_release() in byebyted: only os.stat reads

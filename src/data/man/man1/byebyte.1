@@ -84,6 +84,28 @@ before deletion, not just at dry\-run time \(em a path that changed since
 it was declared is skipped, not deleted, and ledgered
 .IR skipped .
 .TP
+.BI reserve " mountpoint " "[percent] [\-\-yes]"
+ext2/3/4's own privileged\-writer headroom
+.RI ( tune2fs \ \-m ).
+With no
+.IR percent ,
+reports the mount's current reserved\-blocks percentage. Applies
+immediately to a mounted filesystem \(em no unmount, no reboot; the
+change is visible in the very next
+.IR statvfs (2)
+call, which is exactly how it's verified: read available space before,
+apply, read again, and if it didn't move, the act is reported as failed
+regardless of
+.BR tune2fs 's
+own exit code.
+.B Never
+accepts a percentage below 1, even with
+.BR \-\-yes :
+.B tune2fs
+itself accepts 0% silently, and refusing it here is the only guard
+against a full disk locking out even root. Only ext2/ext3/ext4 mounts
+are supported; anything else is refused by name.
+.TP
 .B ghosts
 List deleted-but-open files still holding disk blocks, grouped by the
 process holding them and the mount they live on. Report-only \(em never

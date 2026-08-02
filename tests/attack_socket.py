@@ -120,8 +120,8 @@ def alive(where):
 
 
 # ------------------------------------------------------------- command surface
-print("== command-surface hostile fuzz (scan/why/blame/purge/declare/ghosts/"
-      "ballast/kernels/advise/burn/sweep) ==")
+print("== command-surface hostile fuzz (scan/why/blame/purge/declare/reserve/"
+      "ghosts/ballast/kernels/advise/burn/sweep) ==")
 HOSTILE = [
     {"cmd": "status"}, {"cmd": "scan"}, {"cmd": "scan", "extra": "garbage"},
     {"cmd": "why"}, {"cmd": "why", "path": 123}, {"cmd": "why", "path": []},
@@ -152,6 +152,20 @@ HOSTILE = [
     {"cmd": "declare", "path": "/dev/shm", "dry_run": False},
     {"cmd": "declare", "path": "nonexistent-relative-path"},
     {"cmd": "declare", "dry_run": "yes"}, {"cmd": "declare", "dry_run": 1},
+    # reserve's own real-device reads (tune2fs -l) need root to even READ,
+    # let alone write -- this harness runs unprivileged, so every one of
+    # these fails closed at the permission-denied read, long before any
+    # write is attempted, safe to fuzz including percent 0/negative/huge
+    {"cmd": "reserve"}, {"cmd": "reserve", "mountpoint": 123},
+    {"cmd": "reserve", "mountpoint": None}, {"cmd": "reserve", "mountpoint": ""},
+    {"cmd": "reserve", "mountpoint": "/", "percent": 0, "dry_run": False},
+    {"cmd": "reserve", "mountpoint": "/", "percent": -5, "dry_run": False},
+    {"cmd": "reserve", "mountpoint": "/", "percent": 99999, "dry_run": False},
+    {"cmd": "reserve", "mountpoint": "/", "percent": "five"},
+    {"cmd": "reserve", "mountpoint": "/", "percent": None, "dry_run": False},
+    {"cmd": "reserve", "mountpoint": "/etc", "percent": 1, "dry_run": False},
+    {"cmd": "reserve", "mountpoint": "nonexistent-mount", "percent": 1},
+    {"cmd": "reserve", "dry_run": "yes"}, {"cmd": "reserve", "dry_run": 1},
     {"cmd": "ghosts"}, {"cmd": "ghosts", "extra": [1, 2, 3]},
     {"cmd": "ballast"}, {"cmd": "ballast", "action": "explode"},
     {"cmd": "ballast", "action": 123}, {"cmd": "ballast", "action": None},

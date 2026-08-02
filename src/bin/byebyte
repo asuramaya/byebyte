@@ -10,6 +10,7 @@ so it still answers even mid-daemon-restart. Every verb accepts --json.
   scan [--wait]           kick off an on-demand index refresh
   purge <category> [--yes]   delete what a category detector matches (dry-run by default)
   declare <path> [--yes]  delete exactly this one path (dry-run by default) — declared scope, not a category
+  reserve <mountpoint> [percent] [--yes]   ext2/3/4's own privileged-writer headroom, floor 1%
   ghosts                  deleted-but-open files still holding disk blocks
   ballast [release]       show or release the pre-allocated emergency reserve
   kernels                 removable kernel packages, prints the apt line, never runs it
@@ -286,6 +287,48 @@ def cmd_declare(argv):
         print(f"declare: failed to delete {doc['path']}")
 
 
+def cmd_reserve(argv):
+    """reserved-blocks: ext2/3/4's own privileged-writer headroom (tune2fs
+    -m). The floor never goes below 1% regardless of what's asked for --
+    e2fsprogs accepts 0% silently, and refusing it here is the only guard
+    against a full disk locking out even root. Applies immediately to a
+    mounted filesystem, no reboot needed."""
+    positional = [a for a in argv if not a.startswith("-")]
+    if not positional:
+        sys.exit("byebyte reserve: needs a mountpoint (see `byebyte status`)")
+    mountpoint = positional[0]
+    percent = None
+    if len(positional) > 1:
+        try:
+            percent = float(positional[1])
+            if percent == int(percent):
+                percent = int(percent)
+        except ValueError:
+            sys.exit(f"byebyte reserve: '{positional[1]}' is not a number")
+    yes = "--yes" in argv
+    doc = request_or_die({"cmd": "reserve", "mountpoint": mountpoint,
+                          "percent": percent, "dry_run": not yes})
+    if "--json" in argv:
+        print(json.dumps(doc, indent=2))
+        return
+    if doc.get("dry_run"):
+        print(f"{mountpoint}: {doc['current_percent']}% reserved "
+              f"(device {doc['device']})")
+        if doc.get("proposed_percent") is not None:
+            delta = doc.get("proposed_avail_delta_bytes")
+            sign = "+" if (delta or 0) >= 0 else ""
+            shown = f"{sign}{human_bytes(delta)}" if delta is not None else "?"
+            print(f"  -> {doc['proposed_percent']}% would change free space by "
+                  f"{shown} (dry-run — add --yes to apply)")
+    elif doc.get("ok"):
+        sign = "+" if doc["avail_delta_bytes"] >= 0 else ""
+        print(f"reserve: {mountpoint} {doc['prior_percent']}% -> {doc['new_percent']}% "
+              f"({sign}{human_bytes(doc['avail_delta_bytes'])} free)")
+    else:
+        print(f"reserve: {mountpoint} set to {doc['new_percent']}% but free space "
+              "didn't move — treat as failed")
+
+
 def cmd_ghosts(argv):
     doc = request_or_die({"cmd": "ghosts"})
     if "--json" in argv:
@@ -509,7 +552,7 @@ def main():
     rest = argv[1:] if argv and not argv[0].startswith("-") else argv
     verbs = {"status": cmd_status, "scan": cmd_scan,
              "why": cmd_why, "blame": cmd_blame, "purge": cmd_purge,
-             "declare": cmd_declare,
+             "declare": cmd_declare, "reserve": cmd_reserve,
              "ghosts": cmd_ghosts, "ballast": cmd_ballast, "kernels": cmd_kernels,
              "advise": cmd_advise, "burn": cmd_burn, "sweep": cmd_sweep,
              "update": cmd_update}
