@@ -12,13 +12,16 @@ Type=oneshot
 # sweep itself never touches disk directly, and every act it triggers is
 # ledgered by the daemon regardless of who asked for it.
 ExecStart=/usr/local/bin/byebyte sweep
-# byebyte's own client-side socket timeout for sweep is 120s (a full,
-# unarmed registry preview -- unbounded scan_roots walk plus two 10s-bounded
-# subprocess calls -- found for real to exceed the old 30s default on a
-# fully-populated filesystem). Systemd's own default TimeoutStartSec (90s)
-# would kill the process before that timeout ever gets a chance to fire and
-# report a clean error, so it's raised here to stay comfortably outside it.
-TimeoutStartSec=180
+# byebyte's own client-side socket timeout for sweep is 280s -- DIAGNOSTIC
+# VALUE, not yet the final one. 120s already proved too short on a real
+# GitHub-hosted runner's filesystem (confirmed: it waited the full 120s and
+# still reported daemon-unreachable while byebyted stayed active throughout),
+# so this run is measuring the real ceiling, with per-category timing added
+# in sweep() itself, before picking a permanent number or a different fix
+# entirely. Systemd's own default TimeoutStartSec (90s) would otherwise kill
+# the process before the client's own timeout ever gets a chance to fire and
+# report a clean error, so it's raised here to stay outside it too.
+TimeoutStartSec=300
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only

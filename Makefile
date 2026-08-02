@@ -249,6 +249,8 @@ check-systemd-live:
 	  if [ "$$result" != "success" ]; then \
 	    echo "FAIL: $$u did not complete (Result=$$result)" >&2; \
 	    journalctl -u $$u --no-pager -n 50 >&2; \
+	    echo "-- byebyted.service's own recent journal (the client's failure may be about what the daemon was doing, not the daemon itself) --" >&2; \
+	    journalctl -u byebyted.service --no-pager -n 80 >&2; \
 	    exit 1; \
 	  fi; \
 	  echo "check-systemd-live: $$u completed (Result=success)"; \

@@ -409,7 +409,7 @@ def cmd_sweep(argv):
     # latency-sensitive here -- sweep is a timer-triggered background job,
     # never an interactive hot path -- so wait long enough for a genuine
     # full preview rather than false-negative a live daemon.
-    doc = request_or_die({"cmd": "sweep", "dry": force_dry}, timeout=120)
+    doc = request_or_die({"cmd": "sweep", "dry": force_dry}, timeout=280)
     if "--json" in argv:
         print(json.dumps(doc, indent=2))
         return

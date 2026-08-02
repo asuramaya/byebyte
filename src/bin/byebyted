@@ -1431,7 +1431,10 @@ def sweep(force_dry, cfg, indexer):
         if category in cfg.get("purge_disabled", []):
             continue
         acting = (not force_dry) and category in armed
+        _t0 = time.time()
         candidates = detect(cfg, indexer)
+        print(f"sweep: {category} detect() took {time.time() - _t0:.2f}s",
+              file=sys.stderr)
         total = sum(c["bytes"] for c in candidates)
         if not acting:
             if total > 0:
