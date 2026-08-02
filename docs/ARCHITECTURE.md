@@ -1,7 +1,7 @@
-# How ByeByte is built
+# How byebyte is built
 
 For anyone picking up the code, including a future maintainer who wasn't here when it was
-written. If you want to *use* ByeByte, [USAGE.md](USAGE.md) is the document you want.
+written. If you want to *use* byebyte, [USAGE.md](USAGE.md) is the document you want.
 
 ## The shape of the thing
 
@@ -47,7 +47,7 @@ used to, since the root listing no longer shows them individually.
 | `src/bin/byebyte-update` | thin wrapper over `sutra_update.py`, pill name `byebyte`. `auto_enabled` is hardcoded `False`, so the timer only ever checks and never installs unattended |
 | `src/share/byebyte/lib/sutra.py` | the family's shared daemon skeleton, vendored byte-identical from `sutra`: config load/clamp, `write_status`, the EWMA helper, `ControlServer` |
 | `src/share/byebyte/lib/sutra_update.py` | the shared update spine: the three consent tiers, signature verification |
-| `src/share/byebyte/lib/sutra_xen.py` | vendored unconditionally per the family's vendor script; unused by ByeByte today, same as every other pill |
+| `src/share/byebyte/lib/sutra_xen.py` | vendored unconditionally per the family's vendor script; unused by byebyte today, same as every other pill |
 | `src/share/byebyte/lib/*.version`, `*.commit` | drift anchors for each vendored file: integrity hash and the canonical commit it was vendored from |
 | `src/extension/byebyte@asuramaya/` | the GNOME pill: `extension.js` is the tile, `pill.js` is the family's shared extension commons (status parsing, formatting, the update-surface widget) |
 | `src/data/config/config.json` | the seed config installed to `/etc/byebyte/config.json` on first install, never overwritten after |
@@ -64,7 +64,7 @@ used to, since the root listing no longer shows them individually.
 
 ## The two install layouts
 
-Unlike the family's user-scope pills, ByeByte's checkout install is root-scope too: there's
+Unlike the family's user-scope pills, byebyte's checkout install is root-scope too: there's
 a real root daemon and system-wide state, so both layouts land in the same places.
 
 The **checkout** path (`sudo ./install.sh`) installs binaries to `$PREFIX/bin`
@@ -102,9 +102,9 @@ The GNOME pill is always a separate, no-root step (`make pill`, or `.deb`'s own 
 instructions) since it only ever touches the installing user's own `$HOME` and gnome-shell
 session.
 
-ByeByte adopted sutra 0.11.0's recipe layer the same way as the code: `src/share/byebyte/lib/sutra.mk`,
+byebyte adopted sutra 0.11.0's recipe layer the same way as the code: `src/share/byebyte/lib/sutra.mk`,
 included from the root `Makefile` (`PILL := byebyte`), supplies `check-sutra` itself, extended to
-also cover `pill.js` via `SUTRA_EXT_DIR` since ByeByte vendors the extension commons too, the
+also cover `pill.js` via `SUTRA_EXT_DIR` since byebyte vendors the extension commons too, the
 canonical tracked-files row count (`check-repo` references `SUTRA_ROOT_ROWS` instead of
 re-deriving it), and `check-vendored-path`. That last one loads a binary as a real module and asks
 Python what it actually imported, rather than checking that a file merely exists at the path the
@@ -113,7 +113,7 @@ resolution check, and passes cleanly on the exact regression it's meant to catch
 the preamble entirely, sitting beside a stale co-located `sutra.py`, still imports successfully
 through Python's own script-directory `sys.path` rule. `make check-vendored-path-all` is the one
 genuine pill-side supplement sutra.mk doesn't close: its own `check-vendored-path` target validates
-one binary per invocation, and ByeByte carries the bootstrap preamble in all four (`byebyted`,
+one binary per invocation, and byebyte carries the bootstrap preamble in all four (`byebyted`,
 `byebyte`, `byebyte-healthcheck`, `byebyte-update`), so the Makefile's `SUTRA_CHECK_BINS` loops it,
 checking `byebyte-update` against `sutra_update` specifically since that's the module it actually
 binds.
@@ -129,7 +129,7 @@ isn't in CI): the recorded `.commit` at or behind canonical HEAD is LAG and warn
 canonical's history at all is DRIFT and fails.
 
 Verification is two independent implementations of the same check, deliberately, since
-ByeByte's `install.sh` bootstrap can't depend on the Python it's about to install:
+byebyte's `install.sh` bootstrap can't depend on the Python it's about to install:
 
 - `sutra_update.py`'s `verify_dir()`, used by `byebyte update` / `byebyte-update` once a
   checkout or `.deb` install already exists.
@@ -206,7 +206,7 @@ exactly as before, never an error.
 * The category registry is the only path to deletion. A new cleanup idea is a new detector
   with its own positive match, never a config-driven path.
 * Device names, discovered devices, and anything else that comes from outside the machine
-  don't apply here. ByeByte's only external input is the filesystem itself, so path
+  don't apply here. byebyte's only external input is the filesystem itself, so path
   handling (symlink resolution, device-boundary checks, realpath containment) is the
   equivalent hostile-input surface, and every detector goes through it.
 * Owner-home paths are derived from `owner_uid`'s passwd entry, never `$HOME`. The daemon
@@ -214,8 +214,8 @@ exactly as before, never an error.
 
 ## Standard exemptions
 
-ByeByte's declared departures from the family repo standard. Anything the standard asks for
-that ByeByte doesn't have is listed here. A gap that isn't in this table is a bug, not a
+byebyte's declared departures from the family repo standard. Anything the standard asks for
+that byebyte doesn't have is listed here. A gap that isn't in this table is a bug, not a
 choice.
 
 | Item | Why |

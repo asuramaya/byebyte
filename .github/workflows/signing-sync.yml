@@ -16,7 +16,7 @@ name: signing-sync
 # ONLY: it can confirm the anchor is well-formed and its embedded twin matches
 # it, but it cannot confirm either one still matches the operator's actual
 # canonical keys — that comparison only ever happens locally, via
-# `mudra sync-signers ByeByte` itself.
+# `mudra sync-signers byebyte` itself.
 
 on:
   push:
@@ -68,7 +68,7 @@ jobs:
           if embedded != anchor:
               sys.exit("DRIFT: install.sh's embedded RELEASE_ALLOWED_SIGNERS "
                         "does not match packaging/release-signing/allowed_signers. "
-                        "Re-run 'mudra sync-signers ByeByte' and commit the "
+                        "Re-run 'mudra sync-signers byebyte' and commit the "
                         "result — never hand-edit either.")
           print("embedded copy matches the anchor file OK")
           PYEOF

@@ -15,7 +15,7 @@ means no install.
 
 ## Why this exists
 
-The SHA256 check ByeByte has always done (via its own manifest) proves a
+The SHA256 check byebyte has always done (via its own manifest) proves a
 download wasn't corrupted or truncated in transit. It proves nothing about
 *authenticity*: the checksum comes from the same GitHub release it's
 checking, so a compromised release asset carries its own "valid" checksum.
@@ -32,7 +32,7 @@ private key material never leaves the hardware token, and every signature
 needs a physical touch. A compromised CI runner or build machine cannot
 forge a release; it would need the physical key in hand. This is the same
 trust anchor the fleet's `rotten-apple` master-identity ceremony established
-(2026-07-16) — ByeByte reuses that identity rather than minting its own
+(2026-07-16) — byebyte reuses that identity rather than minting its own
 (per-project keys were the ruled-out footgun — see `~/code/REPOS/RELEASE.md`).
 
 **The signing key must never be provisioned into CI.** That's the whole
@@ -43,7 +43,7 @@ attached.
 ## One enforcement policy, not two
 
 phanspeed/coldspot split their policy because they run an unattended daily
-*install* path (their update timer can auto-install once armed). ByeByte's
+*install* path (their update timer can auto-install once armed). byebyte's
 `byebyte-update.timer` only ever runs `--check` (`auto_enabled` is hardcoded
 `False` in `src/bin/byebyte-update` — family doctrine: updates are
 click-to-install) — it notifies, it never reaches `sutra_update.py`'s
@@ -52,7 +52,7 @@ already a human-triggered action: a bare `byebyte update` (or
 `byebyte-update`), and the `curl -fsSL .../install.sh | sudo bash`
 bootstrap. Same shape as kast's reasoning, same conclusion: **one policy for
 both** — degrade to SHA256-only with a warning while unarmed, fail closed
-once a key is provisioned. (If ByeByte ever adds a real unattended-install
+once a key is provisioned. (If byebyte ever adds a real unattended-install
 tier, `auto_enabled` stops being hardcoded and this doc gets a second policy
 to match — not before.)
 
@@ -68,10 +68,10 @@ format (one line per key, exactly 4 when populated):
 byebyte namespaces="byebyte-release,pills-tag" sk-ssh-ed25519@openssh.com <b64> ra-master-<n>
 ```
 
-## One-time setup — `mudra sync-signers ByeByte`, never hand-edit
+## One-time setup — `mudra sync-signers byebyte`, never hand-edit
 
 ```sh
-~/code/REPOS/mudra/bin/mudra sync-signers ByeByte
+~/code/REPOS/mudra/bin/mudra sync-signers byebyte
 ```
 
 Rebuilds `packaging/release-signing/allowed_signers` **and** `install.sh`'s embedded
@@ -85,7 +85,7 @@ canonical key home never reaches a CI runner — it can't confirm either one
 still matches the operator's actual keys; that comparison only ever happens
 locally, via `mudra` itself.
 
-**Sequencing rule:** `mudra sync-signers ByeByte` populates the anchor. It
+**Sequencing rule:** `mudra sync-signers byebyte` populates the anchor. It
 was run once, after v0.11.0's tag and before any release depended on it —
 arming earlier than a release's own tag is exactly the "arm before tag"
 sequencing the doctrine calls for, and arming any *later* than a release
@@ -144,14 +144,14 @@ Per `~/code/REPOS/RELEASE.md`'s artifact ruling: every release ships **a
 `make deb` builds `build/deb/byebyte_<ver>_all.deb` (never installs it — see
 `tests/smoke.sh`) and its own `build/deb/SHA256SUMS`; `.github/workflows/
 release.yml` appends the tarball's hash to that same manifest. The tarball
-is built with `--prefix=ByeByte/` (extraction hygiene: it extracts into
+is built with `--prefix=byebyte/` (extraction hygiene: it extracts into
 exactly one named directory, never bare into the caller's CWD) and
 `.gitattributes` keeps CI/dev-only paths (`.github/workflows`, `tests`, `Makefile`,
 ...) out of it.
 
 The `.deb` installs the full vendored set in both layouts — `sutra.py`,
 `sutra_update.py`, `sutra_xen.py` (vendored unconditionally, unused by
-ByeByte today, same as every other pill) plus their `.version`/`.commit`
+byebyte today, same as every other pill) plus their `.version`/`.commit`
 anchors, all under `/usr/share/byebyte/lib/`, a private per-pill dir rather
 than the shared `/usr/bin` two pills could otherwise collide in
 (BOOTSTRAP.md). The release-signing anchor
@@ -169,5 +169,5 @@ create --generate-notes` produces a generic commit-list/compare-stub, not
 curated prose. `release.yml` extracts the `CHANGELOG.md` section matching
 the exact version being released into `NOTES.md` and ships that via
 `--notes-file` — refusing the release outright if no matching section
-exists, rather than silently falling back to a generic one. ByeByte is the
+exists, rather than silently falling back to a generic one. byebyte is the
 first pill to apply this from its very first release.

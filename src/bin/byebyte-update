@@ -68,7 +68,7 @@ def installed_version():
 
 if __name__ == "__main__":
     sys.exit(sutra_update.main(
-        pill="byebyte", slug="asuramaya/ByeByte",
+        pill="byebyte", slug="asuramaya/byebyte",
         installed_version=installed_version(),
         anchor_candidates=ANCHOR_CANDIDATES,
         auto_enabled=False))

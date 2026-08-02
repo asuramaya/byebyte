@@ -33,10 +33,13 @@ jobs:
       - name: Build release tarball, fold into the same manifest
         run: |
           # .gitattributes export-ignore keeps CI/dev files out of the tarball.
-          # --prefix=ByeByte/: extraction hygiene doctrine (RELEASE.md) — every
+          # --prefix=byebyte/: extraction hygiene doctrine (RELEASE.md) — every
           # tarball extracts to exactly one named directory, never bare into
-          # the caller's CWD.
-          git archive --format=tar.gz --prefix=ByeByte/ -o byebyte.tar.gz HEAD
+          # the caller's CWD. Prefix changed from ByeByte/ to byebyte/ to match
+          # the operator's 07-31 lowercase rename (2026-08-02) -- no tarball has
+          # shipped since the seal was held, so this is the cheapest possible
+          # moment; every FUTURE release extracts to byebyte/, not ByeByte/.
+          git archive --format=tar.gz --prefix=byebyte/ -o byebyte.tar.gz HEAD
           debfile="build/deb/byebyte_$(tr -d '[:space:]' < packaging/VERSION)_all.deb"
           cp "${debfile}" .
           cp build/deb/SHA256SUMS .
@@ -49,7 +52,7 @@ jobs:
       - name: Extract this version's CHANGELOG section (release-notes recipe)
         # decision 1bc925cb (family, UNIFY presentation axis): gh release
         # create's --generate-notes produces a generic commit-list/compare-
-        # stub, not curated prose. ByeByte's first release ships real notes
+        # stub, not curated prose. byebyte's first release ships real notes
         # from the start, extracted from the CHANGELOG entry that matches
         # this exact version -- never the auto-generated default.
         run: |

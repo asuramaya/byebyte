@@ -7,7 +7,7 @@ systemd         # byebyted.service, the update/sweep timers, `systemctl` calls
 openssh-client  # `ssh-keygen -Y verify`: sutra_update's release-signature
                 # check against release-signing/allowed_signers. Vendored
                 # sutra_update.py fail-closes without it once armed (by
-                # construction) — but ByeByte arms at birth (Wave B), so a
+                # construction) — but byebyte arms at birth (Wave B), so a
                 # fresh install missing this dependency would have a
                 # fail-closed-because-missing-dependency update path from
                 # day one, not a safe one. Hard, not optional.

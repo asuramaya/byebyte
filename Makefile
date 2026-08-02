@@ -49,7 +49,7 @@ VERSION := $(shell tr -d '[:space:]' < packaging/VERSION)
 PILL := byebyte
 include src/share/byebyte/lib/sutra.mk
 
-# ByeByte vendors pill.js too (sutra.mk's own check-sutra loops only the
+# byebyte vendors pill.js too (sutra.mk's own check-sutra loops only the
 # three .py modules by default; this opts pill.js into the same
 # integrity+freshness check via sutra.mk's own escape hatch -- verbatim
 # adoption without this would have silently dropped a guard three of five
@@ -60,7 +60,7 @@ include src/share/byebyte/lib/sutra.mk
 # ($(patsubst %/,%,$(SUTRA_EXT_DIR))) -- no export needed anymore.
 SUTRA_EXT_DIR := src/extension/byebyte@asuramaya
 
-# sutra.mk's check-vendored-path validates one binary per call; ByeByte
+# sutra.mk's check-vendored-path validates one binary per call; byebyte
 # carries the bootstrap preamble in all four (byebyted, byebyte,
 # byebyte-healthcheck, byebyte-update), so check-vendored-path-all loops
 # it. byebyte-update binds sutra_update, not sutra -- the ":sutra_update"
@@ -293,7 +293,7 @@ check-systemd-live:
 	done
 
 # signing anchor rebuild is centralized in mudra now, not a per-repo target:
-#   ~/code/REPOS/mudra/bin/mudra sync-signers ByeByte
+#   ~/code/REPOS/mudra/bin/mudra sync-signers byebyte
 
 # The family's structural gate (REPO-STANDARD.md §5), mechanical only: it
 # cannot judge whether a document is any good, only that the shape it's

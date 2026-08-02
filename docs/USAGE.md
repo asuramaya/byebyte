@@ -1,6 +1,6 @@
-# Using ByeByte
+# Using byebyte
 
-Everything the CLI, the daemon and the tile can do. If you just installed ByeByte, start
+Everything the CLI, the daemon and the tile can do. If you just installed byebyte, start
 with `byebyte status`. For the short version, see the [README](../README.md); for a
 terminal reference, `man byebyte` and `man byebyted`.
 
@@ -161,5 +161,5 @@ correct number; trust it over `df` on a quota-backed mount.
 
 **btrfs snapshots seem to be hiding space**
 `byebyte why` and `byebyte blame` note when snapshots pin space the walk can't see. Install
-the `btrfs-progs` package if it isn't already, so ByeByte can read the real accounting
+the `btrfs-progs` package if it isn't already, so byebyte can read the real accounting
 instead of falling back to a plain walk.

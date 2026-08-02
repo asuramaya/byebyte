@@ -24,7 +24,7 @@ jobs:
       man-pages: "src/data/man/man1/byebyte.1 src/data/man/man8/byebyted.8"
       run-attack: true
       # run-check-version and run-signing-verify stay at their defaults
-      # (false): ByeByte has no per-file VERSION constant to check --
+      # (false): byebyte has no per-file VERSION constant to check --
       # packaging/VERSION is the one version constant, read live at
       # runtime, and check-repo's own rule enforces exactly the opposite
       # of what check-version.sh tests for (same convention as RAMstein).
@@ -41,7 +41,7 @@ jobs:
   # here for pill.js or shellcheck: sutra.mk 0.11.0's SUTRA_EXT_DIR folds
   # pill.js into check-sutra itself, and pill-ci.yml 0.11.0 runs shellcheck
   # directly above -- both were RAMstein's pilot-stage gaps against sutra
-  # 0.10.1, already closed upstream by the version ByeByte adopted.
+  # 0.10.1, already closed upstream by the version byebyte adopted.
   byebyte-specific:
     runs-on: ubuntu-latest
     steps:

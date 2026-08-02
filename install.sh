@@ -18,7 +18,7 @@ BINDIR="$PREFIX/bin"
 SHAREDIR="$PREFIX/share/byebyte"
 UNITDIR="/etc/systemd/system"
 EXT_UUID="byebyte@asuramaya"
-REPO_SLUG="asuramaya/ByeByte"
+REPO_SLUG="asuramaya/byebyte"
 
 # principal = WHO (byebyte's stable identity); namespace = WHAT-FOR (what
 # this signature authorizes). Never conflate the two — see ~/code/REPOS/RELEASE.md.
@@ -32,7 +32,7 @@ SIGN_NAMESPACE="byebyte-release"
 # a file that hasn't been fetched yet (that would mean trusting the very
 # release being verified). Ships EMPTY until a key is provisioned (arm-
 # first-from-birth, docs/RELEASE-SIGNING.md); kept in sync with
-# release-signing/allowed_signers by `mudra sync-signers ByeByte` — never
+# release-signing/allowed_signers by `mudra sync-signers byebyte` — never
 # hand-edit this. Single-quoted deliberately: the value can span multiple
 # lines (one per pinned key) and must never be shell-interpolated. While
 # empty, verification degrades to SHA256-only with a printed warning.

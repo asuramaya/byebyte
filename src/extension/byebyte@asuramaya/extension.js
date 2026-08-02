@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026 asuramaya and ByeByte contributors
+// Copyright (C) 2026 asuramaya and byebyte contributors
 //
-// ByeByte — storage as a deadline, not a percentage, in a GNOME Quick
+// byebyte — storage as a deadline, not a percentage, in a GNOME Quick
 // Settings pill. Reads the daemon's status snapshot; talks to the socket
 // for the purge/ballast/sweep levers.
 

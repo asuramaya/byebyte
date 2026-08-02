@@ -1,4 +1,4 @@
-# Releasing ByeByte
+# Releasing byebyte
 
 How a version becomes a signed release. The trust chain itself is described in
 [RELEASE-SIGNING.md](RELEASE-SIGNING.md); this is the running order.
@@ -28,18 +28,18 @@ make smoke           # end to end, against a throwaway runtime dir
 make attack          # full command surface, oversized/garbage/nested/stall input
 ```
 
-`check-sutra` failing on freshness (LAG, not DRIFT) means the shared spine moved and ByeByte
+`check-sutra` failing on freshness (LAG, not DRIFT) means the shared spine moved and byebyte
 hasn't caught up. Re-vendor before releasing rather than after:
 `bash ~/code/REPOS/sutra/vendor.sh src/share/byebyte/lib src/extension/byebyte@asuramaya`.
 
 ## 2. Tag and publish
 
-ByeByte's trust anchor is armed: `packaging/release-signing/allowed_signers` and `install.sh`'s
+byebyte's trust anchor is armed: `packaging/release-signing/allowed_signers` and `install.sh`'s
 embedded twin both carry the operator's four canonical keys. If a key has rotated since the
 last release, rebuild the anchor first:
 
 ```bash
-~/code/REPOS/mudra/bin/mudra sync-signers ByeByte
+~/code/REPOS/mudra/bin/mudra sync-signers byebyte
 ```
 
 This rebuilds both copies from `~/.ssh/asuramaya-master/*.pub`, byte-identical, and never
