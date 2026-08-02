@@ -153,9 +153,21 @@ deb:
 	install -m 0644 src/data/man/man1/byebyte.1 $(DEBROOT)/usr/share/man/man1/byebyte.1
 	install -m 0644 src/data/man/man8/byebyted.8 $(DEBROOT)/usr/share/man/man8/byebyted.8
 	install -m 0644 src/data/config/config.json $(DEBROOT)/etc/byebyte/config.json
-	install -m 0644 src/data/systemd/system/byebyted.service src/data/systemd/system/byebyte-update.service \
-	    src/data/systemd/system/byebyte-update.timer src/data/systemd/system/byebyte-sweep.service \
-	    src/data/systemd/system/byebyte-sweep.timer $(DEBROOT)/lib/systemd/system/
+	install -m 0644 src/data/systemd/system/byebyte-update.timer src/data/systemd/system/byebyte-sweep.timer \
+	    $(DEBROOT)/lib/systemd/system/
+	# The .service units' canonical ExecStart lines are written for
+	# install.sh's default PREFIX (/usr/local/bin/...) -- correct there,
+	# but the .deb always lands binaries in /usr/bin (line ~135 above),
+	# and postinst never rewrote it, so the shipped unit pointed at a
+	# path the package never populated (systemd: 203/EXEC). Same
+	# reference fix as coldspot's packaging/build-deb.sh: one canonical
+	# unit file, rewritten at deb-build time for the path this package
+	# actually uses, never a second file to keep in sync by hand.
+	for u in byebyted.service byebyte-update.service byebyte-sweep.service; do \
+	  sed 's#/usr/local/bin#/usr/bin#g' src/data/systemd/system/$$u \
+	      > $(DEBROOT)/lib/systemd/system/$$u; \
+	  chmod 0644 $(DEBROOT)/lib/systemd/system/$$u; \
+	done
 	install -m 0755 packaging/deb/postinst $(DEBROOT)/DEBIAN/postinst
 	install -m 0755 packaging/deb/prerm $(DEBROOT)/DEBIAN/prerm
 	install -m 0755 packaging/deb/postrm $(DEBROOT)/DEBIAN/postrm

@@ -39,7 +39,24 @@ CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE CAP_CHOWN
 # quotactl_fd (tmpfs usrquota, syscall 443 on x86_64) isn't in every
 # systemd version's @system-service group — named explicitly so hardening
 # can never silently break M0's core quota reader.
-SystemCallFilter=@system-service quotactl_fd
+#
+# fanotify_init/fanotify_mark (300/301 on x86_64) are named for a DIFFERENT
+# reason, and it is a bug fix, not a feature grant. M3's burn path attribution
+# calls them; @system-service excludes them; and a blocked syscall under
+# SystemCallFilter is SIGSYS — the kernel KILLS the process. The code was
+# written to degrade gracefully when fanotify is "unavailable (non-root,
+# non-x86_64, or the syscall itself refused)", but seccomp does not make it
+# unavailable, it makes it FATAL. So from 0.8.0 (V2.M3) onward byebyted
+# crash-looped under its own unit on every machine: status=31/SYS, syscall=300,
+# restart counter climbing forever. Nothing caught it because CI runs the
+# daemon directly, never under this unit — the filter was never once exercised.
+#
+# CAP_SYS_ADMIN is deliberately NOT added below, so these calls now fail with
+# EPERM and hit the code's existing degradation path: the daemon starts, and
+# burn path attribution stays off. Restoring that feature means granting
+# CAP_SYS_ADMIN to a hardened unit, which is close to granting root and is a
+# deliberate decision for the maintainer to make, not a hotfix.
+SystemCallFilter=@system-service quotactl_fd fanotify_init fanotify_mark
 ProtectKernelTunables=yes
 ProtectClock=yes
 MemoryDenyWriteExecute=yes

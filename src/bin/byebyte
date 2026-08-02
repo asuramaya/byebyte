@@ -2,7 +2,22 @@
 """byebyte — verb CLI over the byebyted control socket.
 
 Talks to the daemon's socket; `status` falls back to reading status.json
-so it still answers even mid-daemon-restart.
+so it still answers even mid-daemon-restart. Every verb accepts --json.
+
+  status                  headroom, burn rate, ETA-to-full, quota per mount
+  why [path] [--limit N]  instant du-tree from the index, age-tagged
+  blame [--since T]       what grew since T (1d/1w/2026-07-01), default 1d
+  scan [--wait]           kick off an on-demand index refresh
+  purge <category> [--yes]   delete what a category detector matches (dry-run by default)
+  ghosts                  deleted-but-open files still holding disk blocks
+  ballast [release]       show or release the pre-allocated emergency reserve
+  kernels                 removable kernel packages, prints the apt line, never runs it
+  advise                  one-line nudges: near-full mounts, fast growers, cold caches
+  burn [--seconds N] [--limit N]   live per-process write rates
+  sweep [--dry] [--history]   the unattended reclaim policy (double-consent)
+  update [--check]        delegates to byebyte-update
+
+With no verb, runs status. See byebyte(1) for full detail.
 """
 
 import json
@@ -447,6 +462,9 @@ def cmd_update(argv):
 
 def main():
     argv = sys.argv[1:]
+    if argv and argv[0] in ("-h", "--help", "help"):
+        print(__doc__.strip())
+        return
     verb = argv[0] if argv and not argv[0].startswith("-") else "status"
     rest = argv[1:] if argv and not argv[0].startswith("-") else argv
     verbs = {"status": cmd_status, "scan": cmd_scan,
