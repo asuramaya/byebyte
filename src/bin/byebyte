@@ -11,6 +11,7 @@ so it still answers even mid-daemon-restart. Every verb accepts --json.
   purge <category> [--yes]   delete what a category detector matches (dry-run by default)
   declare <path> [--yes]  delete exactly this one path (dry-run by default) — declared scope, not a category
   reserve <mountpoint> [percent] [--yes]   ext2/3/4's own privileged-writer headroom, floor 1%
+  journal-cap <size> [--yes]   bound journald's own disk footprint (e.g. 500M, 1G)
   ghosts                  deleted-but-open files still holding disk blocks
   ballast [release]       show or release the pre-allocated emergency reserve
   kernels                 removable kernel packages, prints the apt line, never runs it
@@ -345,6 +346,39 @@ def cmd_reserve(argv):
               "didn't move — treat as failed")
 
 
+def cmd_journal_cap(argv):
+    """journal-cap: bound journald's own persistent disk footprint via a
+    journald.conf.d drop-in (SystemMaxUse=), applied live with `systemctl
+    reload systemd-journald` -- no restart, logging never interrupts.
+    --vacuum-size only shrinks archived journal files immediately; the
+    currently-active segment can still push usage over the new cap until it
+    rotates on its own, same not-quite-atomic shape as journald's own vacuum."""
+    positional = [a for a in argv if not a.startswith("-")]
+    if not positional:
+        sys.exit("byebyte journal-cap: needs a size, e.g. 500M or 1G")
+    size = positional[0]
+    yes = "--yes" in argv
+    doc = request_or_die({"cmd": "journal-cap", "size": size, "dry_run": not yes},
+                         as_json="--json" in argv)
+    if "--json" in argv:
+        print(json.dumps(doc, indent=2))
+        return
+    if doc.get("dry_run"):
+        print(f"journald: {doc['current_cap'] or 'uncapped'} cap, "
+              f"{human_bytes(doc['usage_bytes'])} used")
+        print(f"  -> cap to {doc['proposed_cap']} (dry-run — add --yes to apply)")
+    elif doc.get("ok"):
+        freed = doc.get("freed_bytes")
+        tail = f", freed {human_bytes(freed)}" if freed else ""
+        skip = doc.get("reload_skipped")
+        note = f" ({skip})" if skip else ""
+        print(f"journal-cap: {doc['prior_cap'] or 'uncapped'} -> {doc['new_cap']}{tail}{note}")
+        if doc.get("note"):
+            print(f"  note: {doc['note']}")
+    else:
+        print("journal-cap: failed")
+
+
 def cmd_ghosts(argv):
     doc = request_or_die({"cmd": "ghosts"}, as_json="--json" in argv)
     if "--json" in argv:
@@ -569,6 +603,7 @@ def main():
     verbs = {"status": cmd_status, "scan": cmd_scan,
              "why": cmd_why, "blame": cmd_blame, "purge": cmd_purge,
              "declare": cmd_declare, "reserve": cmd_reserve,
+             "journal-cap": cmd_journal_cap,
              "ghosts": cmd_ghosts, "ballast": cmd_ballast, "kernels": cmd_kernels,
              "advise": cmd_advise, "burn": cmd_burn, "sweep": cmd_sweep,
              "update": cmd_update}

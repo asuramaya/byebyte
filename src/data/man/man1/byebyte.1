@@ -106,6 +106,29 @@ itself accepts 0% silently, and refusing it here is the only guard
 against a full disk locking out even root. Only ext2/ext3/ext4 mounts
 are supported; anything else is refused by name.
 .TP
+.BI journal-cap " size " "[\-\-yes]"
+Bound journald's own persistent disk footprint
+.RI ( size
+like
+.IR 500M " or " 1G ).
+Dry-run by default; pass
+.B \-\-yes
+to apply. Writes a
+.I journald.conf.d
+drop-in
+.RI ( SystemMaxUse= )
+and reloads
+.B systemd\-journald
+live (SIGHUP\-style config reload, never a restart \(em logging is never
+interrupted). Also runs
+.B journalctl \-\-vacuum\-size=
+so a shrunk cap is visibly true right away, with one disclosed caveat:
+.B \-\-vacuum\-size
+only ever touches archived journal files, never the currently\-active one,
+so usage can still exceed the new cap by up to one active segment's worth
+until it rotates on its own. Undo: delete the drop-in and
+.B systemctl reload systemd\-journald.service .
+.TP
 .B ghosts
 List deleted-but-open files still holding disk blocks, grouped by the
 process holding them and the mount they live on. Report-only \(em never

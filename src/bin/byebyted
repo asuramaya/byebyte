@@ -1873,6 +1873,131 @@ def reserve(mountpoint, percent, dry_run, cfg):
             "avail_delta_bytes": moved}
 
 
+# --- journal-cap: bound journald's own persistent disk footprint (V3.M2) ---
+# SystemMaxUse= in a journald.conf.d drop-in, applied live via `systemctl
+# reload systemd-journald` -- SIGHUP-based config reload (Type=notify-reload,
+# confirmed on systemd >= 258), never `restart`, which would have no reason
+# to interrupt live logging just because a size cap changed. Then an
+# explicit `journalctl --vacuum-size=` so a SHRUNK cap is visibly true right
+# away rather than waiting for journald's own next rotation to notice.
+#
+# One real caveat, reported rather than smoothed over: --vacuum-size only
+# ever touches ARCHIVED journal files, never the currently-active one
+# (journalctl(1)) -- so usage can still exceed the new cap by up to one
+# active segment's worth until it rotates on its own. Not deferred the way
+# tmp-size is (the CONFIG takes effect immediately, and archived files
+# shrink immediately), just not a single atomic before/after the way
+# reserve's statvfs proof is.
+#
+# BYEBYTE_TEST_JOURNALD_DIR/_DROPIN redirect where this verb reads/writes,
+# same non-root-only class as BYEBYTE_TEST_HOME/_BOOT -- root (the real
+# daemon) never honors them. Under a redirected test target, the
+# systemctl/journalctl calls are skipped outright rather than pointed at
+# the real system's actual journald: there is no such thing as a "fake"
+# systemd-journald.service to reload, and this verb must never touch the
+# operator's real log history as a side effect of testing its own file
+# logic.
+_JOURNAL_DIR = "/var/log/journal"
+_JOURNALD_DROPIN_DIR = "/etc/systemd/journald.conf.d"
+_JOURNALD_DROPIN_NAME = "90-byebyte.conf"
+_SIZE_RE = re.compile(r"^\d+[KMGT]?$")
+
+
+def _journal_dir():
+    if os.getuid() != 0:
+        override = os.environ.get("BYEBYTE_TEST_JOURNALD_DIR")
+        if override:
+            return override
+    return _JOURNAL_DIR
+
+
+def _journald_dropin_path():
+    if os.getuid() != 0:
+        override = os.environ.get("BYEBYTE_TEST_JOURNALD_DROPIN_DIR")
+        if override:
+            return os.path.join(override, _JOURNALD_DROPIN_NAME)
+    return os.path.join(_JOURNALD_DROPIN_DIR, _JOURNALD_DROPIN_NAME)
+
+
+def _journal_testing():
+    return os.getuid() != 0 and (
+        os.environ.get("BYEBYTE_TEST_JOURNALD_DIR")
+        or os.environ.get("BYEBYTE_TEST_JOURNALD_DROPIN_DIR"))
+
+
+def _journald_current_cap():
+    try:
+        with open(_journald_dropin_path()) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("SystemMaxUse="):
+                    return line.split("=", 1)[1].strip() or None
+    except OSError:
+        pass
+    return None
+
+
+def journal_cap(size, dry_run, cfg):
+    if not isinstance(size, str) or not _SIZE_RE.match(size):
+        return {"error": "size must look like 500M, 1G, 2G ... (digits plus one "
+                         "optional K/M/G/T suffix)"}
+    if int(re.match(r"^\d+", size).group()) == 0:
+        return {"error": "size must be greater than 0"}
+
+    journal_dir = _journal_dir()
+    if not os.path.isdir(journal_dir):
+        return {"error": f"{journal_dir} does not exist -- persistent journald "
+                         "logging is not active here, only the volatile in-memory "
+                         "journal applies, which this verb doesn't cover yet"}
+    current = _journald_current_cap()
+    usage_before = _dir_size(journal_dir)
+
+    if dry_run:
+        return {"current_cap": current, "proposed_cap": size,
+                "usage_bytes": usage_before, "dry_run": True}
+
+    ts = time.time()
+    dropin_path = _journald_dropin_path()
+    target = f"{journal_dir} ({current}->{size})"
+    try:
+        os.makedirs(os.path.dirname(dropin_path), exist_ok=True)
+        with open(dropin_path, "w") as f:
+            f.write("# written by byebyte journal-cap -- delete this file and\n"
+                    "# `systemctl reload systemd-journald` to undo\n"
+                    f"[Journal]\nSystemMaxUse={size}\n")
+    except OSError as e:
+        _ledger_append(ts, "journal-cap", target, 0, "error")
+        return {"error": f"could not write {dropin_path}: {e}"}
+
+    if _journal_testing():
+        # file logic only -- see the module comment above for why the real
+        # systemctl/journalctl calls never run against a redirected target
+        usage_after = _dir_size(journal_dir)
+        _ledger_append(ts, "journal-cap", target, 0, "ok")
+        return {"prior_cap": current, "new_cap": size, "dry_run": False, "ok": True,
+                "usage_before_bytes": usage_before, "usage_after_bytes": usage_after,
+                "reload_skipped": "test target, no real systemd-journald to reload"}
+
+    reload = subprocess.run(["systemctl", "reload", "systemd-journald.service"],
+                            capture_output=True, text=True, timeout=15, check=False)
+    if reload.returncode != 0:
+        _ledger_append(ts, "journal-cap", target, 0, "error")
+        return {"error": f"systemctl reload failed: "
+                         f"{reload.stderr.strip() or reload.stdout.strip()}"}
+
+    subprocess.run(["journalctl", f"--vacuum-size={size}"],
+                   capture_output=True, timeout=30, check=False)
+    usage_after = _dir_size(journal_dir)
+    freed = usage_before - usage_after
+    _ledger_append(ts, "journal-cap", target, max(freed, 0), "ok")
+    return {"prior_cap": current, "new_cap": size, "dry_run": False, "ok": True,
+            "usage_before_bytes": usage_before, "usage_after_bytes": usage_after,
+            "freed_bytes": freed,
+            "note": "--vacuum-size only affects archived journal files, never the "
+                    "currently-active one -- usage can still exceed the new cap "
+                    "until the active segment rotates on its own"}
+
+
 # --- sweep: the unattended reclaim policy (V2.M4) ---------------------------
 # Double consent, per docs/V2-SPEC.md M4: the systemd timer (opt-in, disabled
 # by default) is consent #1 — nothing runs unattended without it. Per-category
@@ -2208,6 +2333,12 @@ def _make_dispatch(cfg, indexer, get_status, path_attr=None):
             if not isinstance(dry_run, bool):
                 raise ValueError("dry_run must be a bool")
             return reserve(mountpoint, percent, dry_run, cfg)
+        if cmd == "journal-cap":
+            size = req.get("size")
+            dry_run = req.get("dry_run", True)
+            if not isinstance(dry_run, bool):
+                raise ValueError("dry_run must be a bool")
+            return journal_cap(size, dry_run, cfg)
         if cmd == "ghosts":
             return ghosts()
         if cmd == "ballast":

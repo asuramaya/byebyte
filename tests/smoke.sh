@@ -1206,6 +1206,92 @@ else
          "-- this is the normal local-dev-box case, not a CI concern)"
 fi
 
+# --- V3.M2: journal-cap — bound journald's own disk footprint. Unlike
+# reserve/btrfs above, this needs neither root nor real tooling: its own
+# non-root-only BYEBYTE_TEST_JOURNALD_DIR/_DROPIN_DIR hooks (same class as
+# BYEBYTE_TEST_HOME/_BOOT) point the whole verb at throwaway directories and
+# skip the real systemctl/journalctl calls outright, so this always runs.
+python3 - <<'PY'
+import importlib.util, os, shutil, sys, tempfile
+from importlib.machinery import SourceFileLoader
+
+state_dir = tempfile.mkdtemp(prefix="byebyte-smoke-jcap-state-")
+os.environ["BYEBYTE_STATE_DIR"] = state_dir  # STATE_DIR is a module-level
+                                              # constant -- must be set BEFORE
+                                              # exec_module, not just before
+                                              # each journal_cap() call
+
+loader = SourceFileLoader("byebyted_mod_jcap", "src/bin/byebyted")
+spec = importlib.util.spec_from_loader("byebyted_mod_jcap", loader)
+mod = importlib.util.module_from_spec(spec)
+loader.exec_module(mod)
+
+journal_dir = tempfile.mkdtemp(prefix="byebyte-smoke-jcap-journal-")
+dropin_dir = tempfile.mkdtemp(prefix="byebyte-smoke-jcap-dropin-")
+try:
+    with open(os.path.join(journal_dir, "fake.journal"), "wb") as f:
+        f.write(b"x" * 65536)
+    os.environ["BYEBYTE_TEST_JOURNALD_DIR"] = journal_dir
+    os.environ["BYEBYTE_TEST_JOURNALD_DROPIN_DIR"] = dropin_dir
+    cfg = {}
+
+    # hostile input: refused regardless of dry_run, before any file touched.
+    # "5" (bare byte count, no suffix) is deliberately NOT on this list --
+    # _SIZE_RE's [KMGT]? suffix is optional, matching journalctl's own
+    # --vacuum-size= accepting a bare byte count, so it's valid input, not
+    # hostile.
+    for bad in ("abc", "0M", "-5G", "5X", "5.5G", "M5", ""):
+        r = mod.journal_cap(bad, True, cfg)
+        assert "error" in r, f"'{bad}' should have been refused: {r}"
+    assert not os.listdir(dropin_dir), "a refused size still wrote a drop-in"
+
+    # missing journal dir: refused by name, not a crash
+    os.environ["BYEBYTE_TEST_JOURNALD_DIR"] = os.path.join(journal_dir, "nope")
+    missing = mod.journal_cap("500M", True, cfg)
+    assert "error" in missing and "does not exist" in missing["error"], missing
+    os.environ["BYEBYTE_TEST_JOURNALD_DIR"] = journal_dir
+
+    # dry-run: reports current (none yet) + usage, touches nothing
+    dry = mod.journal_cap("500M", True, cfg)
+    assert dry.get("current_cap") is None, dry
+    assert dry.get("proposed_cap") == "500M", dry
+    assert dry.get("usage_bytes") == 65536, dry
+    assert not os.listdir(dropin_dir), "dry-run wrote a drop-in"
+
+    # real apply: writes the drop-in, skips the (nonexistent here) real
+    # systemctl/journalctl calls under the test hooks, and says so honestly
+    # rather than silently pretending a reload happened
+    real = mod.journal_cap("500M", False, cfg)
+    assert real.get("ok") is True, real
+    assert real["prior_cap"] is None and real["new_cap"] == "500M", real
+    assert "test target" in (real.get("reload_skipped") or ""), real
+    dropin_path = os.path.join(dropin_dir, "90-byebyte.conf")
+    with open(dropin_path) as f:
+        contents = f.read()
+    assert "SystemMaxUse=500M" in contents, contents
+
+    # round trip: a second dry-run now reads the cap back from the drop-in
+    # it just wrote -- the same read-your-own-write proof reserve's fixture
+    # uses, just via a config file instead of statvfs
+    after = mod.journal_cap("1G", True, cfg)
+    assert after.get("current_cap") == "500M", after
+
+    # ledgered, both directions
+    ledger_path = os.path.join(state_dir, "ledger.jsonl")
+    with open(ledger_path) as f:
+        lines = [__import__("json").loads(l) for l in f if l.strip()]
+    line = next(l for l in lines if l["category"] == "journal-cap")
+    assert line["status"] == "ok" and "->500M" in line["target"], line
+
+    print("journal-cap ok: hostile sizes refused, missing journal dir refused, "
+          "dry-run touched nothing, real apply wrote the drop-in and skipped the "
+          "real reload honestly, round-trip read its own write back, ledgered")
+finally:
+    shutil.rmtree(journal_dir, ignore_errors=True)
+    shutil.rmtree(dropin_dir, ignore_errors=True)
+    shutil.rmtree(state_dir, ignore_errors=True)
+PY
+
 # --- M3: ballast — built at startup (test override: bytes, not gigabytes),
 # release frees it. "Zero writes before unlink" on the release path is
 # verified by code review (ballast_release() in byebyted: only os.stat reads

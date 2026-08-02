@@ -121,7 +121,7 @@ def alive(where):
 
 # ------------------------------------------------------------- command surface
 print("== command-surface hostile fuzz (scan/why/blame/purge/declare/reserve/"
-      "ghosts/ballast/kernels/advise/burn/sweep) ==")
+      "journal-cap/ghosts/ballast/kernels/advise/burn/sweep) ==")
 HOSTILE = [
     {"cmd": "status"}, {"cmd": "scan"}, {"cmd": "scan", "extra": "garbage"},
     {"cmd": "why"}, {"cmd": "why", "path": 123}, {"cmd": "why", "path": []},
@@ -166,6 +166,17 @@ HOSTILE = [
     {"cmd": "reserve", "mountpoint": "/etc", "percent": 1, "dry_run": False},
     {"cmd": "reserve", "mountpoint": "nonexistent-mount", "percent": 1},
     {"cmd": "reserve", "dry_run": "yes"}, {"cmd": "reserve", "dry_run": 1},
+    # journal-cap writes under /etc/systemd/journald.conf.d, unreachable to
+    # this unprivileged harness's daemon -- dry_run=False fails closed at
+    # the permission-denied write, same shape as reserve's real-device
+    # reads above, safe to fuzz freely including malformed sizes
+    {"cmd": "journal-cap"}, {"cmd": "journal-cap", "size": 123},
+    {"cmd": "journal-cap", "size": None}, {"cmd": "journal-cap", "size": ""},
+    {"cmd": "journal-cap", "size": "abc"}, {"cmd": "journal-cap", "size": "0M"},
+    {"cmd": "journal-cap", "size": "-5G"}, {"cmd": "journal-cap", "size": "A" * 3000},
+    {"cmd": "journal-cap", "size": "1G", "dry_run": False},
+    {"cmd": "journal-cap", "size": "1G", "dry_run": "yes"},
+    {"cmd": "journal-cap", "size": "1G", "dry_run": 1},
     {"cmd": "ghosts"}, {"cmd": "ghosts", "extra": [1, 2, 3]},
     {"cmd": "ballast"}, {"cmd": "ballast", "action": "explode"},
     {"cmd": "ballast", "action": 123}, {"cmd": "ballast", "action": None},
