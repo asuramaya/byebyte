@@ -636,10 +636,36 @@ class Indexer:
 
     def _scan_all(self):
         try:
-            for root in self.cfg["scan_roots"]:
-                self._scan_root(os.path.abspath(root))
+            for root in self._index_roots():
+                self._scan_root(root)
         finally:
             self.scanning = False
+
+    def _index_roots(self):
+        """scan_roots plus every configured tmpfs mount, deduped and
+        exclude_mounts-filtered the same way discover_mounts() already is.
+        status has always reported tmpfs headroom, but until this the index
+        never walked into one: DEFAULTS["scan_roots"] is ["/"], a tmpfs
+        mount is a different device by construction (the whole reason it
+        has its own tmpfs_mounts config key), and _walk's own `st.st_dev
+        != dev: continue` treats a device change as "another filesystem,
+        not this root's bytes" and skips it outright. So why/blame had
+        nothing to say about content status was already warning about --
+        confirmed live: `byebyte why /tmp` answered "nothing above the
+        index threshold" the same moment `byebyte status` showed /tmp
+        burning 733.7M/day, full ~10d."""
+        seen = set()
+        roots = []
+        for r in list(self.cfg["scan_roots"]) + list(self.cfg.get("tmpfs_mounts", [])):
+            r = os.path.abspath(r)
+            if r in seen:
+                continue
+            if any(r == ex or r.startswith(ex.rstrip("/") + "/")
+                   for ex in self.cfg.get("exclude_mounts", [])):
+                continue
+            seen.add(r)
+            roots.append(r)
+        return roots
 
     def _scan_root(self, root):
         con = self._connect()
@@ -756,37 +782,60 @@ class Indexer:
             con.close()
 
     def blame(self, since, limit):
+        # One "most recent scan, any root" used to be unambiguous because
+        # _scan_all() only ever had one root. Since _index_roots() unions in
+        # every configured tmpfs mount (ruling ddccc9be), a single scan()
+        # call now walks several roots in sequence, and "most recent scan"
+        # is just whichever one happened to finish last -- an accident of
+        # iteration order, not a meaningful choice (caught by smoke.sh's own
+        # M2 section regressing: blame started diffing tmpfs_fix's one-scan
+        # history instead of fix's, because tmpfs_fix scanned after it).
+        # Diff each root against its own most-recent-before-`since` scan
+        # independently, then merge -- "what grew" should cover every root
+        # the daemon tracks, not silently follow only the last one to scan.
         con = self._connect()
         try:
-            head = con.execute(
-                "SELECT id, ts, root FROM scans WHERE status='done'"
-                " ORDER BY ts DESC LIMIT 1").fetchone()
-            if head is None:
+            roots = [r[0] for r in con.execute(
+                "SELECT DISTINCT root FROM scans WHERE status='done'").fetchall()]
+            if not roots:
                 return {"error": "no scan yet — run: byebyte scan"}
-            base = con.execute(
-                "SELECT id, ts FROM scans WHERE status='done' AND root=?"
-                " AND ts <= ? ORDER BY ts DESC LIMIT 1",
-                (head[2], since)).fetchone()
-            if base is None:
-                # every snapshot is newer than --since: diff from the oldest
-                # one we have — the output reports the real span, so this
-                # stays honest rather than refusing
+            all_rows = []
+            head_ts = base_ts = None
+            for root in roots:
+                head = con.execute(
+                    "SELECT id, ts FROM scans WHERE status='done' AND root=?"
+                    " ORDER BY ts DESC LIMIT 1", (root,)).fetchone()
+                if head is None:
+                    continue
                 base = con.execute(
                     "SELECT id, ts FROM scans WHERE status='done' AND root=?"
-                    " ORDER BY ts ASC LIMIT 1", (head[2],)).fetchone()
-            if base is None or base[0] == head[0]:
+                    " AND ts <= ? ORDER BY ts DESC LIMIT 1",
+                    (root, since)).fetchone()
+                if base is None:
+                    # every snapshot for this root is newer than --since:
+                    # diff from the oldest one we have — stays honest about
+                    # the real span rather than silently excluding the root
+                    base = con.execute(
+                        "SELECT id, ts FROM scans WHERE status='done' AND root=?"
+                        " ORDER BY ts ASC LIMIT 1", (root,)).fetchone()
+                if base is None or base[0] == head[0]:
+                    continue  # this root has only one scan -- nothing to diff yet
+                rows = con.execute(
+                    "SELECT p.path, h.bytes - COALESCE(b.bytes, 0), h.bytes"
+                    " FROM dir_stats h JOIN paths p ON p.id = h.path_id"
+                    " LEFT JOIN dir_stats b"
+                    "   ON b.scan_id=? AND b.path_id = h.path_id"
+                    " WHERE h.scan_id=?", (base[0], head[0])).fetchall()
+                all_rows.extend(rows)
+                head_ts = head[1] if head_ts is None else max(head_ts, head[1])
+                base_ts = base[1] if base_ts is None else min(base_ts, base[1])
+            if not all_rows:
                 return {"error": "no earlier snapshot to diff against"
                                  " — need two scans spanning --since"}
-            rows = con.execute(
-                "SELECT p.path, h.bytes - COALESCE(b.bytes, 0), h.bytes"
-                " FROM dir_stats h JOIN paths p ON p.id = h.path_id"
-                " LEFT JOIN dir_stats b"
-                "   ON b.scan_id=? AND b.path_id = h.path_id"
-                " WHERE h.scan_id=? ORDER BY 2 DESC LIMIT ?",
-                (base[0], head[0], limit)).fetchall()
-            return {"base_ts": base[1], "head_ts": head[1],
+            all_rows.sort(key=lambda r: -r[1])
+            return {"base_ts": base_ts, "head_ts": head_ts,
                     "rows": [{"path": r[0], "delta": r[1], "bytes": r[2]}
-                             for r in rows if r[1] != 0]}
+                             for r in all_rows if r[1] != 0][:limit]}
         finally:
             con.close()
 

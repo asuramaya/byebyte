@@ -29,6 +29,17 @@ mkdir -p "$FIX/big" "$FIX/small"
 dd if=/dev/zero of="$FIX/big/blob" bs=1024 count=2048 2>/dev/null
 dd if=/dev/zero of="$FIX/small/tiny" bs=1024 count=16 2>/dev/null
 
+# a SIBLING of $FIX, deliberately outside scan_roots, fed to the daemon as
+# its own tmpfs_mounts entry below -- proves _index_roots() actually unions
+# tmpfs_mounts into what gets walked (the real bug: DEFAULTS["scan_roots"]
+# is ["/"], a tmpfs mount is a different device, and the indexer used to
+# skip any subtree on a different device outright -- see ruling ddccc9be,
+# live-verified as /tmp being invisible to `why` on the operator's own box
+# despite `status` correctly showing it burning 733.7M/day)
+TMPFS_FIX=$RD/tmpfs_fixture
+mkdir -p "$TMPFS_FIX/ram_blob_dir"
+dd if=/dev/zero of="$TMPFS_FIX/ram_blob_dir/blob" bs=1024 count=512 2>/dev/null
+
 # fixture "home" for the M3 registry — NEVER a real path, always $FIX/home,
 # fed to the daemon via BYEBYTE_TEST_HOME (honored only when non-root)
 HOME_FIX=$FIX/home
@@ -71,7 +82,8 @@ BALLAST_CFG='"ballast_bytes": 1048576'
 
 cat > "$RD/config.json" <<EOF
 {"poll_interval": 1, "owner_uid": $(id -u),
- "scan_roots": ["$FIX"], "index_min_bytes": 4096, $BALLAST_CFG,
+ "scan_roots": ["$FIX"], "tmpfs_mounts": ["$TMPFS_FIX"],
+ "index_min_bytes": 4096, $BALLAST_CFG,
  "sweep_categories": ["hf-hub"]}
 EOF
 
@@ -137,10 +149,10 @@ BYEBYTE_RUNTIME_DIR=$RD python3 src/bin/byebyte status --json | python3 -c \
     || { echo "SMOKE FAIL: CLI json invalid"; exit 1; }
 
 # --- M2: the index — scan the fixture, why ranks the pig, blame sees growth
-python3 - "$RD" "$FIX" <<'PY'
+python3 - "$RD" "$FIX" "$TMPFS_FIX" <<'PY'
 import json, os, socket, sys, time
 
-rd, fix = sys.argv[1], sys.argv[2]
+rd, fix, tmpfs_fix = sys.argv[1], sys.argv[2], sys.argv[3]
 
 def ask(obj):
     c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -185,6 +197,18 @@ blame = ask({"cmd": "blame", "since": since, "limit": 10})
 assert "rows" in blame, blame
 growth = [r for r in blame["rows"] if r["path"].endswith("/growth")]
 assert growth and growth[0]["delta"] >= 3 * 1024 * 1024 * 0.9, blame["rows"]
+
+# tmpfs_mounts union: tmpfs_fix is a SIBLING of fix, outside scan_roots --
+# only reachable at all if _index_roots() actually unions tmpfs_mounts in.
+# scan_and_wait() above already covers it, since _scan_all() walks every
+# root from one call (ruling ddccc9be / c116036c: why /tmp used to answer
+# "nothing above the index threshold" on the operator's real box for
+# exactly this reason -- the index never had this root at all)
+tmpfs_why = ask({"cmd": "why", "path": tmpfs_fix, "limit": 10})
+assert tmpfs_why.get("total") and tmpfs_why["total"] >= 512 * 1024 * 0.9, \
+    f"tmpfs_mounts union failed -- why found nothing under {tmpfs_fix}: {tmpfs_why}"
+assert "rows" in tmpfs_why and tmpfs_why["rows"], f"tmpfs why empty: {tmpfs_why}"
+assert tmpfs_why["rows"][0]["path"].endswith("ram_blob_dir"), tmpfs_why["rows"][0]
 
 # hostile index input: wrong types must answer with an error, not a crash
 assert "error" in ask({"cmd": "why", "path": 123}), "bad why path accepted"
