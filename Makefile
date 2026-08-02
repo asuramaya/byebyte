@@ -197,6 +197,55 @@ deb:
 	    echo "-- lintian not installed, skipping"; \
 	fi
 
+# Requires a real systemd PID 1 and root -- never part of check/smoke/
+# attack's unprivileged suite, always its own explicit target, same as deb
+# itself. Installs the already-built .deb for real (dpkg -i, not a layout
+# inspection) and confirms the three units that carry an ExecStart line
+# actually work as packaged, not just parse cleanly or carry a correct
+# path: byebyted must stay active with zero restarts over a real poll
+# window (Restart=on-failure means a crash can still read "active" an
+# instant after start -- a single is-active check misses exactly the
+# SIGSYS-under-seccomp class of bug this target exists to catch), and the
+# two oneshot units (byebyte-update, byebyte-sweep) must actually run to
+# completion -- a timer unit that starts and immediately fails is exactly
+# as invisible to a daemon-only restart-poll as the ExecStart bug this
+# whole check exists to catch. Joint finding with RAMstein's own version
+# of this check, 2026-08-02.
+#
+# Individual `systemctl show -p <PROP> --value` calls, never a comma-list:
+# `-p A,B,C,D --value` does not preserve the requested order (RAMstein hit
+# this for real on its own first CI run -- a positional `read` silently
+# mis-assigned every field even though the service was healthy the whole
+# time). 30s / six 5s samples, matching RAMstein's own window -- one
+# number for both pills, not two independently-chosen ones.
+check-systemd-live:
+	@test "$$(id -u)" = "0" || { echo "check-systemd-live: needs root (dpkg -i, systemctl)" >&2; exit 1; }
+	dpkg -i $(DEBFILE)
+	@for i in 1 2 3 4 5 6; do \
+	  active="$$(systemctl show byebyted.service -p ActiveState --value)"; \
+	  restarts="$$(systemctl show byebyted.service -p NRestarts --value)"; \
+	  echo "t+$$((i * 5))s: active=$$active restarts=$$restarts"; \
+	  if [ "$$active" != "active" ] || [ "$$restarts" != "0" ]; then \
+	    echo "FAIL: byebyted.service is '$$active' with $$restarts restart(s)" >&2; \
+	    journalctl -u byebyted.service --no-pager -n 50 >&2; \
+	    exit 1; \
+	  fi; \
+	  sleep 5; \
+	done
+	@echo "check-systemd-live: byebyted.service stable, active, 0 restarts, over 30s"
+	byebyte status
+	byebyte-healthcheck
+	@for u in byebyte-update.service byebyte-sweep.service; do \
+	  systemctl start $$u; \
+	  result="$$(systemctl show $$u -p Result --value)"; \
+	  if [ "$$result" != "success" ]; then \
+	    echo "FAIL: $$u did not complete (Result=$$result)" >&2; \
+	    journalctl -u $$u --no-pager -n 50 >&2; \
+	    exit 1; \
+	  fi; \
+	  echo "check-systemd-live: $$u completed (Result=success)"; \
+	done
+
 # signing anchor rebuild is centralized in mudra now, not a per-repo target:
 #   ~/code/REPOS/mudra/bin/mudra sync-signers ByeByte
 

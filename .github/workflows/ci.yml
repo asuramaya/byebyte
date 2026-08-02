@@ -49,3 +49,19 @@ jobs:
 
       - name: Vendored-path resolution (all four binaries)
         run: make check-vendored-path-all
+
+  # Same job name as RAMstein's (one shape for both pills, not two).
+  # GitHub-hosted runners are a full VM with systemd as PID 1, unlike this
+  # repo's own local sandbox testing -- CI has only ever run the raw
+  # binary directly, never the packaged unit, which is exactly how the
+  # ExecStart path bug and the fanotify SIGSYS both shipped undetected.
+  systemd-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build the .deb
+        run: make deb
+
+      - name: Install for real and poll all three units to completion
+        run: sudo make check-systemd-live
