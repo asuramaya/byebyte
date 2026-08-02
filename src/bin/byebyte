@@ -399,17 +399,15 @@ def cmd_sweep(argv):
         return
 
     force_dry = "--dry" in argv
-    # Every call, armed or not, previews all REGISTRY categories -- and
-    # unlike advise (which deliberately excludes it), that preview includes
-    # detect_project_artifacts's live, unbounded walk of scan_roots
-    # (default ["/"]), plus up to two 10s-bounded subprocess calls (snap,
-    # dpkg). Found for real on a GitHub-hosted runner's fully-populated
-    # filesystem: the 30s default gave "daemon unreachable" while byebyted
-    # was still healthy and just not done computing. The daemon isn't
-    # latency-sensitive here -- sweep is a timer-triggered background job,
-    # never an interactive hot path -- so wait long enough for a genuine
-    # full preview rather than false-negative a live daemon.
-    doc = request_or_die({"cmd": "sweep", "dry": force_dry}, timeout=280)
+    # An unarmed sweep is fast now (byebyted skips project-artifacts's live
+    # scan_roots walk unless it's armed -- see _SWEEP_UNARMED_SKIP), but an
+    # ARMED project-artifacts still pays that walk for real, and it's
+    # measured at 169.83s on a GitHub-hosted runner's fully-populated
+    # filesystem -- the 30s default gave "daemon unreachable" while byebyted
+    # was still healthy and just not done computing. sweep is a
+    # timer-triggered background job, never an interactive hot path, so
+    # waiting comfortably past the measured worst case costs nothing real.
+    doc = request_or_die({"cmd": "sweep", "dry": force_dry}, timeout=180)
     if "--json" in argv:
         print(json.dumps(doc, indent=2))
         return

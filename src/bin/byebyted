@@ -1424,6 +1424,22 @@ def _ledger_read(limit=None):
 # categories here at all yet, for the same reason: no policy classifier for
 # "safe to kill" or definition of "expired" has been ruled on.
 
+# project-artifacts is the one REGISTRY category whose detect() is a live,
+# unbounded walk of scan_roots (default ["/"]) rather than a handful of
+# fixed-path stats -- the same reason advise() already excludes it from its
+# own cold-cache rule (_ADVISE_COLD_CACHE_CATEGORIES, above). sweep() never
+# got the same exclusion: every call, armed or not, previewed every
+# category, so an ordinary unarmed sweep (sweep_categories defaults to [],
+# so this is the common case) paid the full walk cost for zero actionable
+# benefit. Measured for real on a GitHub-hosted CI runner: 169.83s for this
+# one category, versus a combined 0.29s for the other seven plus kernels().
+# An unarmed preview never gates a real action, so skipping the walk there
+# costs nothing but honesty about what wasn't computed -- which is why the
+# skipped result says so explicitly rather than silently reporting zero
+# candidates as if a real, empty walk had run.
+_SWEEP_UNARMED_SKIP = {"project-artifacts"}
+
+
 def sweep(force_dry, cfg, indexer):
     armed = set(cfg.get("sweep_categories", [])) & set(REGISTRY.keys())
     results = []
@@ -1431,10 +1447,14 @@ def sweep(force_dry, cfg, indexer):
         if category in cfg.get("purge_disabled", []):
             continue
         acting = (not force_dry) and category in armed
-        _t0 = time.time()
+        if category in _SWEEP_UNARMED_SKIP and category not in armed:
+            results.append({
+                "category": category, "armed": False, "dry_run": True,
+                "candidates": [], "total_bytes": 0,
+                "skipped": "live scan_roots walk, only computed when armed",
+            })
+            continue
         candidates = detect(cfg, indexer)
-        print(f"sweep: {category} detect() took {time.time() - _t0:.2f}s",
-              file=sys.stderr)
         total = sum(c["bytes"] for c in candidates)
         if not acting:
             if total > 0:

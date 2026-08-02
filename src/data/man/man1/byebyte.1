@@ -112,6 +112,13 @@ Kernel removal is always report-only here, regardless of config \(em running
 .BR apt (8)
 unattended is a separate, not-yet-made decision, kept out of this verb on
 purpose.
+.I project\-artifacts
+is the one category whose preview is skipped, not computed, while unarmed:
+its detector is a live walk of the whole
+.I scan_roots
+tree rather than a handful of fixed-path checks, the same cost
+.B advise
+already excludes itself from. Arm it to see real candidates.
 .B \-\-history " [\-\-limit N]"
 replays past sweep acts and previews from the ledger (default 15, most
 recent first).
