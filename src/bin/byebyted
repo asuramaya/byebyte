@@ -1998,6 +1998,79 @@ def journal_cap(size, dry_run, cfg):
                     "until the active segment rotates on its own"}
 
 
+# --- fstrim-schedule: whether the stock weekly TRIM timer runs (V3.M3) -----
+# Reuses fstrim.timer/fstrim.service exactly as shipped by util-linux
+# (`fstrim --listed-in /etc/fstab:/proc/self/mountinfo`, weekly OnCalendar
+# with a randomized delay) -- no custom drop-in, this verb only flips the
+# stock unit's own enablement. `systemctl enable/disable --now` applies
+# immediately: the timer starts or stops right then, not just the
+# boot-time symlink, so unlike tmp-size this is NEVER deferred -- the very
+# next `systemctl is-enabled` / NextElapseUSecRealtime read proves it,
+# ruling 8263c191's own example of the non-deferred case.
+#
+# `unit` stays a real parameter, not a config value or a CLI flag: the CLI
+# always means the one real fstrim.timer, but a direct test can pass a
+# throwaway unit of its own (same shape as reserve() taking any mountpoint,
+# including a loop-mounted test image, rather than a hardcoded root device)
+# -- deliberately NOT another BYEBYTE_TEST_* env-var hook, since those exist
+# for redirecting FILE I/O and root always refuses to honor them; toggling a
+# real system unit needs actual root regardless of any env var, so a fake
+# unit name is the thing under test, not a fake root.
+_FSTRIM_UNIT = "fstrim.timer"
+
+
+def _systemctl_is_enabled(unit):
+    """True/False, or None if `unit` doesn't exist at all (systemctl's own
+    "not-found" state) -- every other state (static/masked/alias/...)
+    counts as simply not-enabled, same as a plain "disabled" would."""
+    out = subprocess.run(["systemctl", "is-enabled", unit],
+                         capture_output=True, text=True, timeout=10, check=False)
+    state = out.stdout.strip()
+    if state == "not-found":
+        return None
+    return state == "enabled"
+
+
+def _systemctl_next_run(unit):
+    out = subprocess.run(
+        ["systemctl", "show", unit, "--property=NextElapseUSecRealtime", "--value"],
+        capture_output=True, text=True, timeout=10, check=False)
+    return out.stdout.strip() or None
+
+
+def fstrim_schedule(enabled, dry_run, cfg, unit=_FSTRIM_UNIT):
+    current = _systemctl_is_enabled(unit)
+    if current is None:
+        return {"error": f"{unit} not found on this system"}
+
+    if dry_run:
+        return {"current_enabled": current, "proposed_enabled": enabled,
+                "next_run": _systemctl_next_run(unit), "dry_run": True}
+
+    if not isinstance(enabled, bool):
+        return {"error": "enabled must be true or false"}
+
+    ts = time.time()
+    target = f"{unit} ({current}->{enabled})"
+    verb = "enable" if enabled else "disable"
+    out = subprocess.run(["systemctl", verb, "--now", unit],
+                         capture_output=True, text=True, timeout=15, check=False)
+    if out.returncode != 0:
+        _ledger_append(ts, "fstrim-schedule", target, 0, "error")
+        return {"error": f"systemctl {verb} failed: "
+                         f"{out.stderr.strip() or out.stdout.strip()}"}
+
+    # the reference measurement is a fresh is-enabled read, not systemctl's
+    # own exit code -- same discipline reserve's statvfs proof and
+    # journal-cap's config-read-back use: a call can exit 0 without the
+    # state actually having landed the way it was asked to
+    after = _systemctl_is_enabled(unit)
+    ok = after == enabled
+    _ledger_append(ts, "fstrim-schedule", target, 0, "ok" if ok else "error")
+    return {"prior_enabled": current, "new_enabled": after, "dry_run": False,
+            "ok": ok, "next_run": _systemctl_next_run(unit)}
+
+
 # --- sweep: the unattended reclaim policy (V2.M4) ---------------------------
 # Double consent, per docs/V2-SPEC.md M4: the systemd timer (opt-in, disabled
 # by default) is consent #1 — nothing runs unattended without it. Per-category
@@ -2339,6 +2412,14 @@ def _make_dispatch(cfg, indexer, get_status, path_attr=None):
             if not isinstance(dry_run, bool):
                 raise ValueError("dry_run must be a bool")
             return journal_cap(size, dry_run, cfg)
+        if cmd == "fstrim-schedule":
+            enabled = req.get("enabled")
+            if enabled is not None and not isinstance(enabled, bool):
+                raise ValueError("enabled must be true, false, or omitted")
+            dry_run = req.get("dry_run", True)
+            if not isinstance(dry_run, bool):
+                raise ValueError("dry_run must be a bool")
+            return fstrim_schedule(enabled, dry_run, cfg)
         if cmd == "ghosts":
             return ghosts()
         if cmd == "ballast":

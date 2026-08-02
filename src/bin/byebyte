@@ -12,6 +12,7 @@ so it still answers even mid-daemon-restart. Every verb accepts --json.
   declare <path> [--yes]  delete exactly this one path (dry-run by default) — declared scope, not a category
   reserve <mountpoint> [percent] [--yes]   ext2/3/4's own privileged-writer headroom, floor 1%
   journal-cap <size> [--yes]   bound journald's own disk footprint (e.g. 500M, 1G)
+  fstrim-schedule [on|off] [--yes]   the stock weekly TRIM timer, on or off
   ghosts                  deleted-but-open files still holding disk blocks
   ballast [release]       show or release the pre-allocated emergency reserve
   kernels                 removable kernel packages, prints the apt line, never runs it
@@ -379,6 +380,46 @@ def cmd_journal_cap(argv):
         print("journal-cap: failed")
 
 
+def cmd_fstrim_schedule(argv):
+    """fstrim-schedule: the stock weekly TRIM timer (fstrim.timer), on or
+    off -- no custom config, just the shipped unit's own enablement.
+    Applies immediately (systemctl enable/disable --now); never deferred,
+    the very next is-enabled/next-run read proves it."""
+    positional = [a for a in argv if not a.startswith("-")]
+    enabled = None
+    if positional:
+        arg = positional[0].lower()
+        if arg in ("on", "enable", "enabled"):
+            enabled = True
+        elif arg in ("off", "disable", "disabled"):
+            enabled = False
+        else:
+            sys.exit(f"byebyte fstrim-schedule: '{positional[0]}' -- want on or off")
+    yes = "--yes" in argv
+    if yes and enabled is None:
+        sys.exit("byebyte fstrim-schedule: needs on/off to apply --yes")
+    doc = request_or_die({"cmd": "fstrim-schedule", "enabled": enabled,
+                          "dry_run": not yes}, as_json="--json" in argv)
+    if "--json" in argv:
+        print(json.dumps(doc, indent=2))
+        return
+    if doc.get("dry_run"):
+        state = "on" if doc["current_enabled"] else "off"
+        tail = f", next run {doc['next_run']}" if doc.get("next_run") else ""
+        print(f"fstrim schedule: {state}{tail}")
+        proposed = doc.get("proposed_enabled")
+        if proposed is not None and proposed != doc["current_enabled"]:
+            want = "on" if proposed else "off"
+            print(f"  -> turn {want} (dry-run — add --yes to apply)")
+    elif doc.get("ok"):
+        prior = "on" if doc["prior_enabled"] else "off"
+        new = "on" if doc["new_enabled"] else "off"
+        tail = f", next run {doc['next_run']}" if doc.get("next_run") else ""
+        print(f"fstrim-schedule: {prior} -> {new}{tail}")
+    else:
+        print("fstrim-schedule: requested change did not take effect")
+
+
 def cmd_ghosts(argv):
     doc = request_or_die({"cmd": "ghosts"}, as_json="--json" in argv)
     if "--json" in argv:
@@ -603,7 +644,7 @@ def main():
     verbs = {"status": cmd_status, "scan": cmd_scan,
              "why": cmd_why, "blame": cmd_blame, "purge": cmd_purge,
              "declare": cmd_declare, "reserve": cmd_reserve,
-             "journal-cap": cmd_journal_cap,
+             "journal-cap": cmd_journal_cap, "fstrim-schedule": cmd_fstrim_schedule,
              "ghosts": cmd_ghosts, "ballast": cmd_ballast, "kernels": cmd_kernels,
              "advise": cmd_advise, "burn": cmd_burn, "sweep": cmd_sweep,
              "update": cmd_update}

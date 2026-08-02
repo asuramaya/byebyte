@@ -47,6 +47,8 @@ SHM_FIX=$(mktemp -d --tmpdir=/dev/shm byebyte-smoke-shm.XXXXXX)
 # lifetime it fires.
 BTRFS_LOOPDEV=""
 RESERVE_LOOPDEV=""
+FSTRIM_TEST_UNIT="byebyte-smoke-faketrim.timer"
+FSTRIM_TEST_INSTALLED=""
 _cleanup_all() {
     # `set +e` for this whole function, not `|| true` sprinkled per line --
     # found the hard way (alfred, msg 3249): BURN_FIX survived a real run
@@ -85,6 +87,12 @@ _cleanup_all() {
     [ -n "${EXT4_IMG:-}" ] && rm -f "$EXT4_IMG" 2>/dev/null
     [ -n "${EXT4_MNT:-}" ] && rmdir "$EXT4_MNT" 2>/dev/null
     [ -n "${RESERVE_STATE:-}" ] && rm -rf "$RESERVE_STATE" 2>/dev/null
+    if [ -n "$FSTRIM_TEST_INSTALLED" ]; then
+        sudo -n systemctl disable --now "$FSTRIM_TEST_UNIT" 2>/dev/null
+        sudo -n rm -f "/etc/systemd/system/$FSTRIM_TEST_UNIT" \
+            "/etc/systemd/system/${FSTRIM_TEST_UNIT%.timer}.service" 2>/dev/null
+        sudo -n systemctl daemon-reload 2>/dev/null
+    fi
     rm -rf "$RD" "$BURN_FIX" "$SHM_FIX" 2>/dev/null
     return 0
 }
@@ -1291,6 +1299,102 @@ finally:
     shutil.rmtree(dropin_dir, ignore_errors=True)
     shutil.rmtree(state_dir, ignore_errors=True)
 PY
+
+# --- V3.M3: fstrim-schedule — toggles the stock fstrim.timer's own
+# enablement. Unlike journal-cap, there is no fake path to redirect this
+# to: `systemctl enable/disable` at system scope is root-only regardless of
+# any env var, and unlike reserve/btrfs there's also no throwaway loop
+# device to substitute for "a real block device" -- a systemd UNIT is the
+# resource, not a file. So the fixture builds a genuinely real but
+# harmless, disposable unit (byebyte-smoke-faketrim.timer, a daily no-op
+# `/bin/true`) rather than ever touching the operator's actual fstrim.timer
+# schedule -- same spirit as reserve's own throwaway ext4 image, just a
+# unit file instead of a block device. Root-gated like reserve/btrfs; no
+# extra CI carve-out needed since CI never runs smoke.sh as root at all.
+if command -v systemctl >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+    FSTRIM_STATE=$(mktemp -d --tmpdir=/var/tmp byebyte-smoke-fstrim-state.XXXXXX)
+    cleanup_fstrim() {
+        sudo -n systemctl disable --now "$FSTRIM_TEST_UNIT" 2>/dev/null || true
+        sudo -n rm -f "/etc/systemd/system/$FSTRIM_TEST_UNIT" \
+            "/etc/systemd/system/${FSTRIM_TEST_UNIT%.timer}.service" 2>/dev/null || true
+        sudo -n systemctl daemon-reload 2>/dev/null || true
+        rm -rf "$FSTRIM_STATE" || true
+        FSTRIM_TEST_INSTALLED=""
+    }
+    fstrim_service="/etc/systemd/system/${FSTRIM_TEST_UNIT%.timer}.service"
+    fstrim_timer="/etc/systemd/system/$FSTRIM_TEST_UNIT"
+    if printf '[Unit]\nDescription=byebyte smoke test fake fstrim (no-op)\n\n[Service]\nType=oneshot\nExecStart=/bin/true\n' \
+            | sudo -n tee "$fstrim_service" >/dev/null 2>&1 \
+        && printf '[Unit]\nDescription=byebyte smoke test fake fstrim timer (no-op)\n\n[Timer]\nOnCalendar=daily\n\n[Install]\nWantedBy=timers.target\n' \
+            | sudo -n tee "$fstrim_timer" >/dev/null 2>&1 \
+        && sudo -n systemctl daemon-reload 2>/dev/null; then
+        FSTRIM_TEST_INSTALLED=1
+        sudo -n env BYEBYTE_STATE_DIR="$FSTRIM_STATE" \
+            python3 - "$(pwd)/src/bin/byebyted" "$FSTRIM_TEST_UNIT" <<'PY'
+import importlib.util, os, sys
+from importlib.machinery import SourceFileLoader
+
+daemon_path, unit = sys.argv[1], sys.argv[2]
+loader = SourceFileLoader("byebyted_mod_fstrim", daemon_path)
+spec = importlib.util.spec_from_loader("byebyted_mod_fstrim", loader)
+mod = importlib.util.module_from_spec(spec)
+loader.exec_module(mod)
+cfg = {}
+
+# a genuinely nonexistent unit is refused by name, not a crash
+missing = mod.fstrim_schedule(True, True, cfg, unit="definitely-not-a-real.timer")
+assert "error" in missing and "not found" in missing["error"], missing
+
+# freshly installed, not yet enabled: dry-run reports that honestly, no
+# next_run (a disabled timer isn't scheduled), touches nothing
+dry = mod.fstrim_schedule(True, True, cfg, unit=unit)
+assert dry.get("current_enabled") is False, dry
+assert dry.get("proposed_enabled") is True, dry
+assert dry.get("next_run") is None, dry
+assert mod._systemctl_is_enabled(unit) is False, "dry-run changed enablement"
+
+# real enable: applies immediately, next_run is populated the instant it's
+# asked for -- never deferred, no remount/reboot to wait on
+on = mod.fstrim_schedule(True, False, cfg, unit=unit)
+assert on.get("ok") is True, on
+assert on["prior_enabled"] is False and on["new_enabled"] is True, on
+assert on.get("next_run"), f"enabled but no next_run reported: {on}"
+assert mod._systemctl_is_enabled(unit) is True
+
+# real disable: round trip back, next_run gone again
+off = mod.fstrim_schedule(False, False, cfg, unit=unit)
+assert off.get("ok") is True, off
+assert off["prior_enabled"] is True and off["new_enabled"] is False, off
+assert off.get("next_run") is None, off
+assert mod._systemctl_is_enabled(unit) is False
+
+# non-bool enabled is refused on the real path (dry-run stays permissive,
+# same shape as reserve's percent=None report-only query)
+bad = mod.fstrim_schedule("yes", False, cfg, unit=unit)
+assert "error" in bad, bad
+
+# ledgered, both directions
+ledger_path = os.path.join(os.environ["BYEBYTE_STATE_DIR"], "ledger.jsonl")
+with open(ledger_path) as f:
+    lines = [__import__("json").loads(l) for l in f if l.strip()]
+fstrim_lines = [l for l in lines if l["category"] == "fstrim-schedule"]
+assert len(fstrim_lines) == 2 and all(l["status"] == "ok" for l in fstrim_lines), fstrim_lines
+assert any("False->True" in l["target"] for l in fstrim_lines), fstrim_lines
+assert any("True->False" in l["target"] for l in fstrim_lines), fstrim_lines
+
+print("fstrim-schedule ok: missing unit refused, dry-run honest and inert, "
+      "enable/disable both applied immediately (next_run proves it, never "
+      "deferred), non-bool refused, ledgered both directions")
+PY
+        cleanup_fstrim
+    else
+        cleanup_fstrim
+        echo "fstrim-schedule section: skipped (could not install the throwaway test unit under sudo -n)"
+    fi
+else
+    echo "fstrim-schedule section: skipped (no passwordless sudo, or systemctl not" \
+         "installed -- this is the normal local-dev-box case, not a CI concern)"
+fi
 
 # --- M3: ballast — built at startup (test override: bytes, not gigabytes),
 # release frees it. "Zero writes before unlink" on the release path is

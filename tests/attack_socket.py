@@ -121,7 +121,7 @@ def alive(where):
 
 # ------------------------------------------------------------- command surface
 print("== command-surface hostile fuzz (scan/why/blame/purge/declare/reserve/"
-      "journal-cap/ghosts/ballast/kernels/advise/burn/sweep) ==")
+      "journal-cap/fstrim-schedule/ghosts/ballast/kernels/advise/burn/sweep) ==")
 HOSTILE = [
     {"cmd": "status"}, {"cmd": "scan"}, {"cmd": "scan", "extra": "garbage"},
     {"cmd": "why"}, {"cmd": "why", "path": 123}, {"cmd": "why", "path": []},
@@ -177,6 +177,21 @@ HOSTILE = [
     {"cmd": "journal-cap", "size": "1G", "dry_run": False},
     {"cmd": "journal-cap", "size": "1G", "dry_run": "yes"},
     {"cmd": "journal-cap", "size": "1G", "dry_run": 1},
+    # fstrim-schedule is DELIBERATELY fuzzed dry_run-only, unlike its layer-3
+    # siblings above: reserve/declare/journal-cap all route their real-apply
+    # path through a fixture-controlled argument (mountpoint/path/a redirect
+    # env var) that keeps an unprivileged real-apply attempt sandboxed away
+    # from anything that matters. fstrim-schedule takes no such argument --
+    # the unit is a hardcoded "fstrim.timer" at the dispatch layer, by
+    # design (see byebyted's own comment on _FSTRIM_UNIT) -- so dry_run:
+    # False here would be a real, unsandboxed `systemctl disable --now
+    # fstrim.timer` attempt against the actual box this harness runs on.
+    # is-enabled/show are read-only and safe to fuzz; the write path is
+    # exercised for real by smoke.sh's own root-gated throwaway-unit
+    # fixture instead, never by this unprivileged fuzzer.
+    {"cmd": "fstrim-schedule"}, {"cmd": "fstrim-schedule", "enabled": 123},
+    {"cmd": "fstrim-schedule", "enabled": "yes"}, {"cmd": "fstrim-schedule", "enabled": []},
+    {"cmd": "fstrim-schedule", "dry_run": "yes"}, {"cmd": "fstrim-schedule", "dry_run": 1},
     {"cmd": "ghosts"}, {"cmd": "ghosts", "extra": [1, 2, 3]},
     {"cmd": "ballast"}, {"cmd": "ballast", "action": "explode"},
     {"cmd": "ballast", "action": 123}, {"cmd": "ballast", "action": None},

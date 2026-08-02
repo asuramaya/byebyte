@@ -129,6 +129,21 @@ so usage can still exceed the new cap by up to one active segment's worth
 until it rotates on its own. Undo: delete the drop-in and
 .B systemctl reload systemd\-journald.service .
 .TP
+.BI fstrim-schedule " [on|off] " "[\-\-yes]"
+Turn the stock weekly TRIM timer
+.RI ( fstrim.timer ,
+shipped by
+.IR util\-linux )
+on or off. No custom configuration \(em only the shipped unit's own
+enablement is touched. With no
+.IR on / off ,
+reports the current state and, if enabled, when it next runs. Applies
+immediately
+.RI ( systemctl \ enable / disable \ \-\-now ),
+never deferred: the very next
+.B systemctl is\-enabled
+read proves it.
+.TP
 .B ghosts
 List deleted-but-open files still holding disk blocks, grouped by the
 process holding them and the mount they live on. Report-only \(em never
