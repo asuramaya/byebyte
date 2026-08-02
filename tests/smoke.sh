@@ -21,7 +21,21 @@ RD=$(mktemp -d)
 # for actual block-layer I/O — tmpfs (what $RD/mktemp default to here) never
 # touches it, so the fixture data file lives under /var/tmp instead.
 BURN_FIX=$(mktemp -d --tmpdir=/var/tmp byebyte-smoke-burn.XXXXXX)
-trap 'kill "${DPID:-0}" 2>/dev/null || true; rm -rf "$RD" "$BURN_FIX"' EXIT
+# a GENUINELY cross-device root for the TOCTOU re-verification below (msg
+# 3205's second finding): 5f81f00's revalidate-before-delete work was
+# reasoned against a walk rooted at "/", and 9e71be7 now lets the indexer
+# (and, via scan_roots below, purge's own detectors) walk a tmpfs root
+# too. "The logic may well still hold" is not the same statement as it
+# holding — /dev/shm is real, world-writable tmpfs on every Linux box,
+# confirmed a different device from both / and /tmp (alfred's own
+# stat -c '%d %n': 64513 /, 48 /tmp, 27 /dev/shm), so this is never an
+# accident of where $RD happened to land.
+SHM_FIX=$(mktemp -d --tmpdir=/dev/shm byebyte-smoke-shm.XXXXXX)
+trap 'kill "${DPID:-0}" 2>/dev/null || true; rm -rf "$RD" "$BURN_FIX" "$SHM_FIX"' EXIT
+if [ "$(stat -c '%d' "$RD")" = "$(stat -c '%d' "$SHM_FIX")" ]; then
+    echo "SMOKE FAIL: SHM_FIX is not actually a different device from RD -- the cross-device TOCTOU test would be meaningless here"
+    exit 1
+fi
 
 # fixture tree for the index: one pig, one runt — `why` must rank them
 FIX=$RD/tree
@@ -39,6 +53,15 @@ dd if=/dev/zero of="$FIX/small/tiny" bs=1024 count=16 2>/dev/null
 TMPFS_FIX=$RD/tmpfs_fixture
 mkdir -p "$TMPFS_FIX/ram_blob_dir"
 dd if=/dev/zero of="$TMPFS_FIX/ram_blob_dir/blob" bs=1024 count=512 2>/dev/null
+
+# project-artifacts fixture ON the real cross-device root ($SHM_FIX), for
+# the TOCTOU re-verification below. UNMARKED for now, same reason as
+# proj-toctou below: a marker from the start would make the earlier real
+# purge call (which acts on every candidate detect() finds) delete it as
+# collateral before the race test ever runs.
+mkdir -p "$SHM_FIX/proj-toctou-shm/node_modules/dep"
+dd if=/dev/zero of="$SHM_FIX/proj-toctou-shm/node_modules/dep/file.js" \
+    bs=1024 count=64 2>/dev/null
 
 # fixture "home" for the M3 registry — NEVER a real path, always $FIX/home,
 # fed to the daemon via BYEBYTE_TEST_HOME (honored only when non-root)
@@ -82,7 +105,7 @@ BALLAST_CFG='"ballast_bytes": 1048576'
 
 cat > "$RD/config.json" <<EOF
 {"poll_interval": 1, "owner_uid": $(id -u),
- "scan_roots": ["$FIX"], "tmpfs_mounts": ["$TMPFS_FIX"],
+ "scan_roots": ["$FIX", "$SHM_FIX"], "tmpfs_mounts": ["$TMPFS_FIX"],
  "index_min_bytes": 4096, $BALLAST_CFG,
  "sweep_categories": ["hf-hub"]}
 EOF
@@ -369,6 +392,83 @@ assert line["status"] == "skipped", line
 assert ask({"cmd": "ping"})["ok"] is True, "daemon died during the TOCTOU race"
 print("toctou ok: marker pulled mid-purge -> revalidate() skipped it, "
       "directory survived, ledgered as skipped")
+PY
+fi
+
+# --- M3.2: TOCTOU on a GENUINELY cross-device root (msg 3205's second
+# finding). 5f81f00's revalidate-before-delete, _rm_tree's never-cross-
+# devices rule, and _verify_inside's containment check were all reasoned
+# against a walk rooted at "/" -- after 9e71be7 the indexer (and, via
+# scan_roots including $SHM_FIX above, purge's own detectors) walk a tmpfs
+# root too. "The logic may well still hold" was alfred's own words for why
+# that's not good enough on its own -- same race as M3.1, same assertions,
+# against a candidate on $SHM_FIX (/dev/shm, confirmed a different device
+# from $RD at the top of this script, not an accident of where mktemp
+# happened to put either one).
+if [ "$ROOT_SMOKE" -eq 1 ]; then
+    echo "cross-device toctou test skipped under root, same reason as M3.1"
+else
+python3 - "$RD" "$SHM_FIX" <<'PY'
+import json, os, socket, sys, threading, time
+
+rd, shm_fix = sys.argv[1], sys.argv[2]
+
+def ask(obj, timeout=10):
+    c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    c.settimeout(timeout)
+    c.connect(os.path.join(rd, "control.sock"))
+    c.sendall(json.dumps(obj).encode() + b"\n")
+    buf = b""
+    while b"\n" not in buf:
+        chunk = c.recv(65536)
+        if not chunk:
+            break
+        buf += chunk
+    c.close()
+    return json.loads(buf.decode())
+
+target = os.path.join(shm_fix, "proj-toctou-shm", "node_modules")
+marker = os.path.join(shm_fix, "proj-toctou-shm", "package.json")
+assert os.path.isdir(target), "cross-device toctou fixture missing before the race"
+assert os.stat(target).st_dev != os.stat(rd).st_dev, \
+    "SHM_FIX is not actually cross-device from RD -- this test proves nothing"
+
+open(marker, "w").close()
+
+dry = ask({"cmd": "purge", "category": "project-artifacts", "dry_run": True})
+paths = [c["path"] for c in dry["candidates"]]
+assert target in paths, f"cross-device toctou fixture not detected: {paths}"
+
+result = {}
+def run_purge():
+    result["doc"] = ask({"cmd": "purge", "category": "project-artifacts",
+                         "dry_run": False}, timeout=15)
+
+t = threading.Thread(target=run_purge)
+t.start()
+time.sleep(0.05)
+os.unlink(marker)
+t.join(timeout=15)
+assert not t.is_alive(), "purge call never returned"
+
+doc = result["doc"]
+item = next((r for r in doc["results"] if r["path"] == target), None)
+assert item is not None, f"cross-device toctou candidate missing from results: {doc}"
+assert item.get("skipped") is True and item["ok"] is False, \
+    f"stale cross-device candidate was not skipped: {item}"
+assert os.path.isdir(target), \
+    "revalidate() let a stale cross-device candidate through -- directory was deleted"
+
+ledger_path = os.path.join(rd, "state", "ledger.jsonl")
+with open(ledger_path) as f:
+    lines = [json.loads(l) for l in f if l.strip()]
+line = next(l for l in lines if l["target"] == target)
+assert line["status"] == "skipped", line
+
+assert ask({"cmd": "ping"})["ok"] is True, "daemon died during the cross-device TOCTOU race"
+print("cross-device toctou ok (/dev/shm, confirmed different device from RD): "
+      "marker pulled mid-purge -> revalidate() skipped it, directory survived, "
+      "ledgered as skipped")
 PY
 fi
 
