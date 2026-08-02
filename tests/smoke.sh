@@ -194,6 +194,17 @@ touch "$BOOT_FIX/vmlinuz-9.9.9-fakenew-generic"
 BALLAST_CFG='"ballast_bytes": 1048576'
 [ "$ROOT_SMOKE" -eq 1 ] && BALLAST_CFG='"ballast_gb": 0'
 
+# WARNING before you add a category here: owner_uid: $(id -u) reads as
+# hermetic and isn't -- under `sudo make smoke` it's 0, so an ARMED
+# category resolving through _resolve_owner_home() (hf-hub, pip-cache,
+# uv-cache, thumbnails -- anything routed through _detect_cache_dir) acts
+# on root's own real home, not a fixture (BYEBYTE_TEST_HOME is correctly
+# refused under root, by design). hf-hub is the only one armed today, and
+# it's only safe from the sweep test's own root_smoke branch skipping the
+# real-delete path outright -- see that comment (search
+# "NOT exercised further under root") for the live incident that found
+# this. Adding a second category here without the identical guard risks
+# deleting a REAL user's real cache under a root smoke run.
 cat > "$RD/config.json" <<EOF
 {"poll_interval": 1, "owner_uid": $(id -u),
  "scan_roots": ["$FIX", "$SHM_FIX"], "tmpfs_mounts": ["$TMPFS_FIX"],
@@ -1428,17 +1439,34 @@ else:
 
 if root_smoke:
     # NOT exercised further under root: sweep_categories arms hf-hub, and a
-    # real dry=False call here would act on whatever _resolve_owner_home()
-    # resolves to under root -- the OPERATOR'S REAL home, not this fixture.
-    # Whether that's safe depends entirely on whether real hf-hub content
-    # happens to be there, which this suite has no way to know in advance;
-    # looking safe against an empty real cache is not the same as being
-    # safe by design, so this half is skipped outright rather than trusted
-    # to keep being lucky. A real, disclosed coverage gap for this one
-    # category under root, not a false skip -- the armed-delete mechanism
-    # itself IS exercised for real elsewhere in this suite regardless of
-    # root (M3's project-artifacts purge above, whose detector walks
-    # scan_roots directly and never touches owner_home).
+    # real dry=False call here acts on whatever _resolve_owner_home()
+    # resolves to under root. This fixture's config.json sets owner_uid to
+    # $(id -u) -- under plain `make smoke` that's the dev's own uid, but
+    # under `sudo make smoke` it's 0, so _resolve_owner_home(0) correctly
+    # calls _owner_home(0) and gets /root, NOT the operator's real home.
+    # /root/.cache/huggingface/hub happening not to exist is what actually
+    # kept this test from being destructive the first time it ran as root
+    # (alfred, msg 3255, measured directly rather than assumed) -- the
+    # OPERATOR'S OWN real 8.2G hf-hub cache lives at
+    # /home/$OPERATOR/.cache/huggingface and was never at risk only because
+    # root's own account happens to have never pulled a model on this
+    # particular machine. On a box where root ever had, this exact test
+    # would have deleted it for real. pip-cache, uv-cache and thumbnails
+    # route through the identical _detect_cache_dir -> _resolve_owner_home
+    # path and are exposed the SAME way the instant any of them is added to
+    # sweep_categories above -- do not add one without also confirming this
+    # root_smoke branch (or an equivalent) still guards it. The general
+    # rule this earns: a smoke fixture that ARMS a destructive category
+    # must never resolve its target through the invoking user's real
+    # identity -- owner_uid: $(id -u) reads as hermetic and isn't, because
+    # under sudo it silently becomes the one account (root) whose home
+    # nobody thinks to check. Skipped outright here rather than trusted to
+    # keep being lucky about what root's own home happens to contain -- a
+    # real, disclosed coverage gap for this one category under root, not a
+    # false skip. The armed-delete mechanism itself IS exercised for real
+    # elsewhere in this suite regardless of root (M3's project-artifacts
+    # purge above, whose detector walks scan_roots directly and never
+    # touches owner_home).
     summary = ("sweep ok (root): forced-dry preview correct in shape; armed "
               "real-delete against hf-hub not exercised under root -- see "
               "the comment above this block for why")
