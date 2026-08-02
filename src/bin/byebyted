@@ -1100,18 +1100,110 @@ def _delete_snap_revision(candidate):
                     capture_output=True, timeout=30, check=False)
 
 
-# id -> (detect(cfg, indexer) -> [candidate], delete(candidate) -> None).
-# Docker is deliberately ABSENT until API-based accounting lands (FAMILY.md
-# doctrine 4: generic walks lie about overlayfs).
+# -- revalidate: re-run a candidate's own detector predicate on ONE path,
+# immediately before its delete() call. detect() can be seconds (or, for
+# project-artifacts, minutes) old by the time an armed act loop reaches a
+# given candidate -- candidate['path'] went straight to _rm_tree/_rm_files
+# with nothing re-checking it still matches. RAMstein's do_calm/do_kill
+# close the same class of gap by re-resolving the pid and refusing on a
+# starttime mismatch; a filesystem path has no starttime, so the equivalent
+# identity check is re-running the same marker/symlink/inside-root predicate
+# the detector used, right before the delete instead of trusting it's still
+# true. A path that no longer matches is skipped and ledgered "skipped", not
+# silently dropped and not counted as a delete error (delete() was never
+# called).
+def _revalidate_cache_dir(candidate, cfg, *segments):
+    home = _resolve_owner_home(cfg)
+    if not home:
+        return False
+    expected = os.path.join(home, *segments)
+    return (candidate["path"] == expected and os.path.isdir(expected)
+            and not os.path.islink(expected) and _verify_inside(expected, home))
+
+
+def revalidate_hf_hub(candidate, cfg, indexer):
+    home = _resolve_owner_home(cfg)
+    if not home:
+        return False
+    hub = os.path.join(home, ".cache", "huggingface", "hub")
+    path = candidate["path"]
+    return (os.path.basename(path).startswith("models--")
+            and os.path.isdir(path) and not os.path.islink(path)
+            and _verify_inside(path, hub))
+
+
+def revalidate_pip_cache(candidate, cfg, indexer):
+    return _revalidate_cache_dir(candidate, cfg, ".cache", "pip")
+
+
+def revalidate_uv_cache(candidate, cfg, indexer):
+    return _revalidate_cache_dir(candidate, cfg, ".cache", "uv")
+
+
+def revalidate_thumbnails(candidate, cfg, indexer):
+    return _revalidate_cache_dir(candidate, cfg, ".cache", "thumbnails")
+
+
+def revalidate_project_artifacts(candidate, cfg, indexer):
+    path = candidate["path"]
+    markers = _PROJECT_MARKERS.get(os.path.basename(path))
+    if markers is None:
+        return False
+    parent = os.path.dirname(path)
+    if not any(os.path.exists(os.path.join(parent, m)) for m in markers):
+        return False
+    if os.path.islink(path) or not os.path.isdir(path):
+        return False
+    return any(_verify_inside(path, os.path.abspath(r))
+               for r in cfg["scan_roots"])
+
+
+def revalidate_rotated_logs(candidate, cfg, indexer):
+    path = candidate["path"]
+    return (bool(_LOG_SUFFIX.search(os.path.basename(path)))
+            and os.path.isfile(path) and not os.path.islink(path)
+            and os.path.dirname(path) == "/var/log")
+
+
+def _revalidate_always(candidate, cfg, indexer):
+    # journald's "path" is the constant string "journald" (delete() shells
+    # out to `journalctl --vacuum-size`) and snap-old's delete() acts by
+    # name+revision through `snap remove`, not a raw filesystem path --
+    # neither hands a stale directory straight to _rm_tree/_rm_files, so
+    # neither has the gap this revalidate layer exists to close.
+    return True
+
+
+def _toctou_test_window(cfg):
+    """Non-root-only test hook (same class as BYEBYTE_TEST_HOME/_BOOT and
+    the ballast_bytes config override above): pauses between detect() and
+    the act loop so a smoke test can land a real filesystem swap inside the
+    window revalidate-before-delete exists to close, instead of racing it
+    for real and being flaky. The real daemon (root) never honors it."""
+    if os.getuid() == 0:
+        return
+    try:
+        delay = float(os.environ.get("BYEBYTE_TEST_TOCTOU_DELAY", "0"))
+    except ValueError:
+        delay = 0.0
+    if delay > 0:
+        time.sleep(delay)
+
+
+# id -> (detect(cfg, indexer) -> [candidate], delete(candidate) -> None,
+#        revalidate(candidate, cfg, indexer) -> bool). Docker is deliberately
+# ABSENT until API-based accounting lands (FAMILY.md doctrine 4: generic
+# walks lie about overlayfs).
 REGISTRY = {
-    "hf-hub": (detect_hf_hub, _delete_tree_entry),
-    "pip-cache": (detect_pip_cache, _delete_cache_contents),
-    "uv-cache": (detect_uv_cache, _delete_cache_contents),
-    "thumbnails": (detect_thumbnails, _delete_cache_contents),
-    "project-artifacts": (detect_project_artifacts, _delete_tree_entry),
-    "rotated-logs": (detect_rotated_logs, _delete_log_file),
-    "journald": (detect_journald, _delete_journald),
-    "snap-old": (detect_snap_old, _delete_snap_revision),
+    "hf-hub": (detect_hf_hub, _delete_tree_entry, revalidate_hf_hub),
+    "pip-cache": (detect_pip_cache, _delete_cache_contents, revalidate_pip_cache),
+    "uv-cache": (detect_uv_cache, _delete_cache_contents, revalidate_uv_cache),
+    "thumbnails": (detect_thumbnails, _delete_cache_contents, revalidate_thumbnails),
+    "project-artifacts": (detect_project_artifacts, _delete_tree_entry,
+                          revalidate_project_artifacts),
+    "rotated-logs": (detect_rotated_logs, _delete_log_file, revalidate_rotated_logs),
+    "journald": (detect_journald, _delete_journald, _revalidate_always),
+    "snap-old": (detect_snap_old, _delete_snap_revision, _revalidate_always),
 }
 
 
@@ -1120,7 +1212,7 @@ def purge(category, dry_run, cfg, indexer):
         raise ValueError("category must be a string")
     if category not in REGISTRY or category in cfg.get("purge_disabled", []):
         raise ValueError("unknown or disabled category")
-    detect, delete = REGISTRY[category]
+    detect, delete, revalidate = REGISTRY[category]
     candidates = detect(cfg, indexer)
     total = sum(c["bytes"] for c in candidates)
     if dry_run:
@@ -1128,10 +1220,16 @@ def purge(category, dry_run, cfg, indexer):
                 "candidates": [{"path": c["path"], "bytes": c["bytes"]}
                                for c in candidates],
                 "total_bytes": total}
+    _toctou_test_window(cfg)
     freed = 0
     results = []
     for c in candidates:
         ts = time.time()
+        if not revalidate(c, cfg, indexer):
+            _ledger_append(ts, category, c["path"], c["bytes"], "skipped")
+            results.append({"path": c["path"], "bytes": c["bytes"], "ok": False,
+                            "skipped": True})
+            continue
         try:
             delete(c)
             ok = True
@@ -1443,7 +1541,7 @@ _SWEEP_UNARMED_SKIP = {"project-artifacts"}
 def sweep(force_dry, cfg, indexer):
     armed = set(cfg.get("sweep_categories", [])) & set(REGISTRY.keys())
     results = []
-    for category, (detect, delete) in REGISTRY.items():
+    for category, (detect, delete, revalidate) in REGISTRY.items():
         if category in cfg.get("purge_disabled", []):
             continue
         acting = (not force_dry) and category in armed
@@ -1468,10 +1566,17 @@ def sweep(force_dry, cfg, indexer):
                 "total_bytes": total,
             })
             continue
+        _toctou_test_window(cfg)
         freed = 0
         item_results = []
         for c in candidates:
             ts = time.time()
+            if not revalidate(c, cfg, indexer):
+                _ledger_append(ts, f"sweep:{category}", c["path"], c["bytes"],
+                               "skipped")
+                item_results.append({"path": c["path"], "bytes": c["bytes"],
+                                     "ok": False, "skipped": True})
+                continue
             try:
                 delete(c)
                 ok = True
@@ -1511,7 +1616,7 @@ def _index_mtime_for(indexer, path):
 
 def _category_totals(category, cfg, indexer):
     """(total_bytes, newest_mtime) across a category's current candidates."""
-    detect, _ = REGISTRY[category]
+    detect, _, _ = REGISTRY[category]
     candidates = detect(cfg, indexer)
     total = sum(c["bytes"] for c in candidates)
     newest = 0.0

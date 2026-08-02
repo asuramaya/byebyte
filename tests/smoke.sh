@@ -5,13 +5,14 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# Three of byebyted's test-only escape hatches (BYEBYTE_TEST_HOME,
-# BYEBYTE_TEST_BOOT, the ballast_bytes config override) are non-root-only BY
-# DESIGN — the real daemon must never let an env var or config value
-# redirect where a privileged process touches disk. That's correct and
-# stays untouched; it just means `sudo make smoke` can't point root at
-# these fixtures, so those specific sections relax to real-data-agnostic
-# assertions (still meaningful, just not fixture-exact) when run as root.
+# Four of byebyted's test-only escape hatches (BYEBYTE_TEST_HOME,
+# BYEBYTE_TEST_BOOT, the ballast_bytes config override, BYEBYTE_TEST_TOCTOU_DELAY)
+# are non-root-only BY DESIGN — the real daemon must never let an env var or
+# config value redirect where a privileged process touches disk, or slow down
+# its own act loop for anyone but a test harness. That's correct and stays
+# untouched; it just means `sudo make smoke` can't point root at these
+# fixtures, so those specific sections relax to real-data-agnostic assertions
+# (still meaningful, just not fixture-exact) when run as root.
 ROOT_SMOKE=0
 [ "$(id -u)" -eq 0 ] && ROOT_SMOKE=1
 
@@ -41,6 +42,15 @@ dd if=/dev/zero of="$HOME_FIX/proj-with-marker/node_modules/dep/file.js" \
 mkdir -p "$HOME_FIX/proj-without-marker/node_modules/dep"
 dd if=/dev/zero of="$HOME_FIX/proj-without-marker/node_modules/dep/file.js" \
     bs=1024 count=64 2>/dev/null
+# a THIRD copy, UNMARKED for now, held back for the TOCTOU test below --
+# the marker is written there only when that test is ready to use it. If it
+# carried a marker from the start, the earlier real purge call above (which
+# acts on every project-artifacts candidate detect() finds, not just the one
+# it asserts about) would delete it as collateral damage before this test
+# ever runs.
+mkdir -p "$HOME_FIX/proj-toctou/node_modules/dep"
+dd if=/dev/zero of="$HOME_FIX/proj-toctou/node_modules/dep/file.js" \
+    bs=1024 count=64 2>/dev/null
 
 # fixture /boot for the kernels verb — NEVER the real /boot. Includes the
 # actually-running kernel (so we can prove it's still refused as a
@@ -67,6 +77,7 @@ EOF
 
 BYEBYTE_RUNTIME_DIR=$RD BYEBYTE_STATE_DIR=$RD/state BYEBYTE_TEST_HOME=$HOME_FIX \
     BYEBYTE_TEST_BOOT=$BOOT_FIX \
+    BYEBYTE_TEST_TOCTOU_DELAY=0.3 \
     python3 src/bin/byebyted --config "$RD/config.json" &
 DPID=$!
 
@@ -261,6 +272,81 @@ PY
 out=$(BYEBYTE_RUNTIME_DIR=$RD python3 src/bin/byebyte purge --all 2>&1) || true
 echo "$out" | grep -q "one category per act" \
     || { echo "SMOKE FAIL: purge --all not refused"; exit 1; }
+
+# --- M3.1: TOCTOU — a candidate whose marker vanishes between detect() and
+# delete() must be SKIPPED, not deleted. The daemon was started above with
+# BYEBYTE_TEST_TOCTOU_DELAY=0.3, pausing between detect() and the act loop so
+# this window is real and reproducible instead of raced blind (thread d4c05b6e:
+# _delete_tree_entry used to hand candidate["path"] straight to _rm_tree with
+# no re-check at all).
+if [ "$ROOT_SMOKE" -eq 1 ]; then
+    echo "toctou test skipped under root: BYEBYTE_TEST_TOCTOU_DELAY is refused for root by design (see the root-hatch note above), so there is no window to land the race in"
+else
+python3 - "$RD" "$HOME_FIX" <<'PY'
+import json, os, socket, sys, threading, time
+
+rd, home_fix = sys.argv[1], sys.argv[2]
+
+def ask(obj, timeout=10):
+    c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    c.settimeout(timeout)
+    c.connect(os.path.join(rd, "control.sock"))
+    c.sendall(json.dumps(obj).encode() + b"\n")
+    buf = b""
+    while b"\n" not in buf:
+        chunk = c.recv(65536)
+        if not chunk:
+            break
+        buf += chunk
+    c.close()
+    return json.loads(buf.decode())
+
+target = os.path.join(home_fix, "proj-toctou", "node_modules")
+marker = os.path.join(home_fix, "proj-toctou", "package.json")
+assert os.path.isdir(target), "toctou fixture missing before the race"
+
+# the marker goes in here, not at fixture-setup time -- see the comment
+# where proj-toctou is created
+open(marker, "w").close()
+
+# sanity: detect() must see it as a real candidate before the rug gets pulled
+dry = ask({"cmd": "purge", "category": "project-artifacts", "dry_run": True})
+paths = [c["path"] for c in dry["candidates"]]
+assert target in paths, f"toctou fixture not detected: {paths}"
+
+result = {}
+def run_purge():
+    result["doc"] = ask({"cmd": "purge", "category": "project-artifacts",
+                         "dry_run": False}, timeout=15)
+
+t = threading.Thread(target=run_purge)
+t.start()
+# land inside byebyted's own 0.3s detect-to-act pause -- generous relative to
+# a socket round-trip plus a five-entry detect() on this fixture
+time.sleep(0.05)
+os.unlink(marker)
+t.join(timeout=15)
+assert not t.is_alive(), "purge call never returned"
+
+doc = result["doc"]
+item = next((r for r in doc["results"] if r["path"] == target), None)
+assert item is not None, f"toctou candidate missing from results: {doc}"
+assert item.get("skipped") is True and item["ok"] is False, \
+    f"stale candidate was not skipped: {item}"
+assert os.path.isdir(target), \
+    "revalidate() let a stale candidate through -- directory was deleted"
+
+ledger_path = os.path.join(rd, "state", "ledger.jsonl")
+with open(ledger_path) as f:
+    lines = [json.loads(l) for l in f if l.strip()]
+line = next(l for l in lines if l["target"] == target)
+assert line["status"] == "skipped", line
+
+assert ask({"cmd": "ping"})["ok"] is True, "daemon died during the TOCTOU race"
+print("toctou ok: marker pulled mid-purge -> revalidate() skipped it, "
+      "directory survived, ledgered as skipped")
+PY
+fi
 
 # --- M3: ghosts — a child holds an unlinked fd open, ghosts names it, then it's gone
 python3 - "$RD" <<'PY'
