@@ -31,7 +31,41 @@ BURN_FIX=$(mktemp -d --tmpdir=/var/tmp byebyte-smoke-burn.XXXXXX)
 # stat -c '%d %n': 64513 /, 48 /tmp, 27 /dev/shm), so this is never an
 # accident of where $RD happened to land.
 SHM_FIX=$(mktemp -d --tmpdir=/dev/shm byebyte-smoke-shm.XXXXXX)
-trap 'kill "${DPID:-0}" 2>/dev/null || true; rm -rf "$RD" "$BURN_FIX" "$SHM_FIX"' EXIT
+
+# ONE trap, registered ONCE, covering every resource this script can ever
+# hold -- including ones the btrfs/reserve sections below don't set up
+# until much later. A trap registered only at each section's own success
+# path (the previous shape here, and the shape attack_socket.py's leak
+# also had) never fires on a failing assertion: `set -e` exits before
+# reaching that cleanup call, and the loop device/mount survives the
+# process (alfred, msg 3245 -- his own `sudo make smoke` run left a
+# mounted loop device and 106M of stale fixtures behind this exact way,
+# worse than a plain leaked directory, on the real machine). BTRFS_LOOPDEV
+# and RESERVE_LOOPDEV are pre-declared empty here so later `set -u`
+# references are always safe, and so this ONE function can tell "never
+# ran" from "ran and is still mounted" regardless of when in the script's
+# lifetime it fires.
+BTRFS_LOOPDEV=""
+RESERVE_LOOPDEV=""
+_cleanup_all() {
+    kill "${DPID:-0}" 2>/dev/null || true
+    if [ -n "$BTRFS_LOOPDEV" ]; then
+        sudo -n umount "${BTRFS_MNT:-}" 2>/dev/null
+        sudo -n losetup -d "$BTRFS_LOOPDEV" 2>/dev/null
+    fi
+    [ -n "${BTRFS_IMG:-}" ] && rm -f "$BTRFS_IMG"
+    [ -n "${BTRFS_MNT:-}" ] && rmdir "$BTRFS_MNT" 2>/dev/null
+    if [ -n "$RESERVE_LOOPDEV" ]; then
+        sudo -n umount "${EXT4_MNT:-}" 2>/dev/null
+        sudo -n losetup -d "$RESERVE_LOOPDEV" 2>/dev/null
+    fi
+    [ -n "${EXT4_IMG:-}" ] && rm -f "$EXT4_IMG"
+    [ -n "${EXT4_MNT:-}" ] && rmdir "$EXT4_MNT" 2>/dev/null
+    [ -n "${RESERVE_STATE:-}" ] && rm -rf "$RESERVE_STATE"
+    rm -rf "$RD" "$BURN_FIX" "$SHM_FIX"
+    return 0
+}
+trap '_cleanup_all' EXIT
 if [ "$(stat -c '%d' "$RD")" = "$(stat -c '%d' "$SHM_FIX")" ]; then
     echo "SMOKE FAIL: SHM_FIX is not actually a different device from RD -- the cross-device TOCTOU test would be meaningless here"
     exit 1
@@ -937,18 +971,22 @@ if [ -n "${CI:-}" ]; then
 elif [ "$btrfs_ready" -eq 1 ] && sudo -n true 2>/dev/null; then
     BTRFS_IMG=$(mktemp --tmpdir=/var/tmp byebyte-smoke-btrfs.XXXXXX.img)
     BTRFS_MNT=$(mktemp -d --tmpdir=/var/tmp byebyte-smoke-btrfs-mnt.XXXXXX)
-    loopdev=""
+    # explicit, immediate cleanup on the paths below, and resets
+    # BTRFS_LOOPDEV to "" afterward so the top-level _cleanup_all trap's
+    # own later attempt (its safety net for any path that doesn't reach
+    # here, e.g. a failing assertion) finds nothing left to do
     cleanup_btrfs() {
-        [ -n "$loopdev" ] && sudo -n umount "$BTRFS_MNT" 2>/dev/null
-        [ -n "$loopdev" ] && sudo -n losetup -d "$loopdev" 2>/dev/null
+        [ -n "$BTRFS_LOOPDEV" ] && sudo -n umount "$BTRFS_MNT" 2>/dev/null
+        [ -n "$BTRFS_LOOPDEV" ] && sudo -n losetup -d "$BTRFS_LOOPDEV" 2>/dev/null
         rm -f "$BTRFS_IMG"
         rmdir "$BTRFS_MNT" 2>/dev/null || true
+        BTRFS_LOOPDEV=""
     }
     btrfs_live=0
     if truncate -s 300M "$BTRFS_IMG" \
-        && loopdev=$(sudo -n losetup --show -f "$BTRFS_IMG" 2>/dev/null) \
-        && sudo -n mkfs.btrfs -q "$loopdev" >/dev/null 2>&1 \
-        && sudo -n mount "$loopdev" "$BTRFS_MNT" 2>/dev/null; then
+        && BTRFS_LOOPDEV=$(sudo -n losetup --show -f "$BTRFS_IMG" 2>/dev/null) \
+        && sudo -n mkfs.btrfs -q "$BTRFS_LOOPDEV" >/dev/null 2>&1 \
+        && sudo -n mount "$BTRFS_LOOPDEV" "$BTRFS_MNT" 2>/dev/null; then
         btrfs_live=1
     fi
     if [ "$btrfs_live" -eq 1 ]; then
@@ -1008,25 +1046,32 @@ elif [ "$reserve_ready" -eq 1 ] && sudo -n true 2>/dev/null; then
     EXT4_IMG=$(mktemp --tmpdir=/var/tmp byebyte-smoke-ext4.XXXXXX.img)
     EXT4_MNT=$(mktemp -d --tmpdir=/var/tmp byebyte-smoke-ext4-mnt.XXXXXX)
     RESERVE_STATE=$(mktemp -d --tmpdir=/var/tmp byebyte-smoke-reserve-state.XXXXXX)
-    loopdev=""
+    # explicit, immediate cleanup on the paths below, and resets
+    # RESERVE_LOOPDEV to "" afterward so the top-level _cleanup_all trap's
+    # own later attempt (its safety net for any path that doesn't reach
+    # here, e.g. a failing assertion -- msg 3245, alfred's own `sudo make
+    # smoke` run left a mounted loop device and 106M behind exactly this
+    # way, since neither cleanup function was ever registered as a trap)
+    # finds nothing left to do
     cleanup_reserve() {
-        [ -n "$loopdev" ] && sudo -n umount "$EXT4_MNT" 2>/dev/null
-        [ -n "$loopdev" ] && sudo -n losetup -d "$loopdev" 2>/dev/null
+        [ -n "$RESERVE_LOOPDEV" ] && sudo -n umount "$EXT4_MNT" 2>/dev/null
+        [ -n "$RESERVE_LOOPDEV" ] && sudo -n losetup -d "$RESERVE_LOOPDEV" 2>/dev/null
         rm -f "$EXT4_IMG"
         rmdir "$EXT4_MNT" 2>/dev/null || true
         rm -rf "$RESERVE_STATE"
+        RESERVE_LOOPDEV=""
     }
     reserve_live=0
     if truncate -s 64M "$EXT4_IMG" \
-        && loopdev=$(sudo -n losetup --show -f "$EXT4_IMG" 2>/dev/null) \
-        && sudo -n mkfs.ext4 -q "$loopdev" >/dev/null 2>&1 \
-        && sudo -n mount "$loopdev" "$EXT4_MNT" 2>/dev/null; then
+        && RESERVE_LOOPDEV=$(sudo -n losetup --show -f "$EXT4_IMG" 2>/dev/null) \
+        && sudo -n mkfs.ext4 -q "$RESERVE_LOOPDEV" >/dev/null 2>&1 \
+        && sudo -n mount "$RESERVE_LOOPDEV" "$EXT4_MNT" 2>/dev/null; then
         reserve_live=1
     fi
     if [ "$reserve_live" -eq 1 ]; then
         # read as root, same as the real daemon always does in production
         sudo -n env BYEBYTE_STATE_DIR="$RESERVE_STATE" \
-            python3 - "$(pwd)/src/bin/byebyted" "$EXT4_MNT" "$loopdev" <<'PY'
+            python3 - "$(pwd)/src/bin/byebyted" "$EXT4_MNT" "$RESERVE_LOOPDEV" <<'PY'
 import importlib.util, os, sys
 from importlib.machinery import SourceFileLoader
 
