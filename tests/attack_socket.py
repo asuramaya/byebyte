@@ -36,8 +36,15 @@ with open(os.path.join(RD, "config.json"), "w") as f:
     # testing for. Found leaking 16 of these on the operator's real /tmp,
     # ~2.1G apiece, some untouched for a week (msg 3196/3200). Nothing here
     # exercises ballast, so it's off, not just cleaned up after.
+    # tmpfs_mounts: [] -- left at the default (["/tmp", "/dev/shm"]) this
+    # fixture's scan/why/blame fuzzing would walk the REAL /tmp and
+    # /dev/shm too (9e71be7: the index now unions scan_roots with
+    # tmpfs_mounts), including the real byebyte-attack-* corpus this same
+    # script is the one leaking. Never intended, and never needed to
+    # exercise anything below -- the hostile fuzz targets are the socket's
+    # own parsing, not tmpfs coverage.
     json.dump({"poll_interval": 1, "owner_uid": os.getuid(),
-               "scan_roots": [FIX], "index_min_bytes": 4096,
+               "scan_roots": [FIX], "tmpfs_mounts": [], "index_min_bytes": 4096,
                "ballast_gb": 0}, f)
 
 env = dict(os.environ)
@@ -113,7 +120,7 @@ def alive(where):
 
 
 # ------------------------------------------------------------- command surface
-print("== command-surface hostile fuzz (scan/why/blame/purge/ghosts/"
+print("== command-surface hostile fuzz (scan/why/blame/purge/declare/ghosts/"
       "ballast/kernels/advise/burn/sweep) ==")
 HOSTILE = [
     {"cmd": "status"}, {"cmd": "scan"}, {"cmd": "scan", "extra": "garbage"},
@@ -130,6 +137,21 @@ HOSTILE = [
     {"cmd": "purge", "category": "hf-hub", "dry_run": "yes"},
     {"cmd": "purge", "category": "hf-hub", "dry_run": 1},
     {"cmd": "purge", "category": None},
+    # this fixture's only scan_root is FIX, and nothing real lives in it
+    # (just an empty "home" subdir) -- every one of these is refused
+    # before touching disk either way, by the compiled-in floor or by the
+    # "outside every configured scan root" envelope, safe to fuzz freely
+    # including dry_run: False (the invariant has to hold past --yes too)
+    {"cmd": "declare"}, {"cmd": "declare", "path": 123},
+    {"cmd": "declare", "path": None}, {"cmd": "declare", "path": []},
+    {"cmd": "declare", "path": ""}, {"cmd": "declare", "path": "A" * 3000},
+    {"cmd": "declare", "path": "/"}, {"cmd": "declare", "path": "/", "dry_run": False},
+    {"cmd": "declare", "path": "/home", "dry_run": False},
+    {"cmd": "declare", "path": "/etc/passwd", "dry_run": False},
+    {"cmd": "declare", "path": "../../../../etc/passwd", "dry_run": False},
+    {"cmd": "declare", "path": "/dev/shm", "dry_run": False},
+    {"cmd": "declare", "path": "nonexistent-relative-path"},
+    {"cmd": "declare", "dry_run": "yes"}, {"cmd": "declare", "dry_run": 1},
     {"cmd": "ghosts"}, {"cmd": "ghosts", "extra": [1, 2, 3]},
     {"cmd": "ballast"}, {"cmd": "ballast", "action": "explode"},
     {"cmd": "ballast", "action": 123}, {"cmd": "ballast", "action": None},

@@ -1291,6 +1291,147 @@ def purge(category, dry_run, cfg, indexer):
             "results": results}
 
 
+# --- declare: destructive scope the USER names, not a category detector ----
+# purge/sweep can only ever touch what a compiled-in REGISTRY detector
+# positively matches. FAMILY.md's declared-scope doctrine (ruling 2543834f):
+# scanning stays broad, but what the daemon may EAT is declared once, per
+# PATH, from what a scan already surfaced — closes the "arms everywhere
+# scan_roots reaches" problem AND the "can't distinguish a deployed app's
+# node_modules from a scratch checkout's" problem at once, better than any
+# heuristic category could.
+#
+# A path-exact verb widens the daemon's reach past what a detector's own
+# positive match already vouches for, so its floor can't be relational
+# checks alone. msg 3205 named the hole directly: with scan_roots=["/"],
+# "/home", the owner's own $HOME, "/etc", "/usr", "/var" all pass "inside a
+# configured root, not equal to a root, not a symlink, not byebyte's own
+# state" — a relational check cannot express "this is catastrophic". So
+# there are two layers here, not one: a COMPILED-IN denylist (the actual
+# invariant, config can never weaken it, same shape as REGISTRY itself —
+# purge_disabled only ever narrows, never widens) as the floor, and the
+# relational checks as the outer envelope on top of that floor, not instead
+# of it. FAMILY.md doctrine #6: a verb's safety may never rest on a
+# confirmation prompt — dry-run-by-default is real protection, but --yes is
+# one keystroke and the invariant has to hold on the other side of it too.
+#
+# A first pass at the floor was a flat enumerated list (msg 3205's own
+# suggestion) and it had a hole, caught live on the operator's real box
+# (msg 3214): /home, /root, /srv, /opt, /mnt, /media are none of them a
+# mount point here (all device 64513, same filesystem as /) and none of
+# them were on the list -- "/home" specifically holding 787G across three
+# home trees, only one of which is the owner's. An enumerated list is only
+# as good as the enumeration, and the enumeration is where this always
+# fails. So two of the three rules below are DERIVED instead of listed:
+# refusing $HOME-or-an-ancestor-of-it kills "/" and "/home" (and a
+# relocated /Users, or a home that IS its own mount, or isn't) in one rule
+# computed from owner_uid at runtime, and refusing any mount point kills
+# /tmp /dev/shm /boot /boot/efi structurally. Only the THIRD rule stays a
+# hand-written list (/etc /usr /var /bin /lib /proc /sys /run /root /srv
+# /opt /mnt /media — the FHS system dirs, none of them derivable from
+# anything byebyte already knows) — but with the first two doing the
+# structural work, a gap in this one is no longer catastrophic on its own.
+_DECLARE_DENYLIST = ("/etc", "/usr", "/var", "/bin", "/lib", "/proc",
+                     "/sys", "/run", "/root", "/srv", "/opt", "/mnt", "/media")
+
+
+def _under_or_equal(real, prefix):
+    prefix = prefix.rstrip("/") or "/"
+    if prefix == "/":
+        return True  # everything, including "/" itself, is under root
+    return real == prefix or real.startswith(prefix + "/")
+
+
+def _declare_denied_reason(real, cfg):
+    """The compiled-in floor. Returns a reason string, or None if `real`
+    (already os.path.realpath'd by the caller) clears every hardcoded
+    guard — the caller's own relational checks (inside a scan root, not a
+    root itself, not a symlink, not RUNTIME_DIR/STATE_DIR) still apply on
+    top of this, this function alone is not the whole gate."""
+    home = _resolve_owner_home(cfg)
+    if home:
+        home_real = os.path.realpath(home)
+        # DERIVED rule 1: refuse $HOME itself, or ANY ancestor of it. Note
+        # the direction -- home_real under real, not the reverse -- that's
+        # what makes "real is an ancestor of $HOME" (rather than merely
+        # "real is inside $HOME") the thing being tested.
+        if _under_or_equal(home_real, real):
+            return "refusing to declare $HOME or an ancestor of it"
+    # DERIVED rule 2.
+    if os.path.ismount(real):
+        return f"refusing to declare {real} — it is itself a mount point"
+    # rule 3: the enumerated remainder, see the comment above the list.
+    for d in _DECLARE_DENYLIST:
+        if _under_or_equal(real, d):
+            return f"refusing to declare {d} or anything under it (compiled-in floor)"
+    return None
+
+
+def declare(path, dry_run, cfg, indexer):
+    # ValueError is reserved for malformed REQUEST SHAPE (sutra's
+    # ControlServer, vendored, strips every exception down to just its
+    # class name over the wire -- {"error": "ValueError"}, message
+    # discarded -- confirmed by running it, not assumed from reading
+    # sutra.py). Every domain-specific refusal below returns an {"error":
+    # "..."} dict directly instead, same pattern indexer.why()/blame()
+    # already use for "no scan yet" -- that's how the actual denylist
+    # reasoning (which rule, which path) reaches the human instead of a
+    # bare exception name that tells them nothing.
+    if not isinstance(path, str) or not path:
+        raise ValueError("path must be a non-empty string")
+    path = os.path.abspath(path)
+    real = os.path.realpath(path)
+
+    denied = _declare_denied_reason(real, cfg)
+    if denied:
+        return {"error": denied}
+
+    roots = [os.path.abspath(r) for r in
+             list(cfg["scan_roots"]) + list(cfg.get("tmpfs_mounts", []))]
+    if real in (os.path.realpath(r) for r in roots):
+        return {"error": "refusing to declare a configured root wholesale"}
+    if not any(_verify_inside(real, r) for r in roots):
+        return {"error": "path is outside every configured scan root"}
+    for state_dir in (RUNTIME_DIR, STATE_DIR):
+        if _under_or_equal(real, os.path.realpath(state_dir)):
+            return {"error": "refusing to declare byebyte's own runtime/state directory"}
+    if os.path.islink(path):
+        return {"error": "refusing to declare a symlink"}
+    if not os.path.exists(real):
+        return {"error": "path does not exist"}
+
+    is_dir = os.path.isdir(real)
+    nbytes = _sized(real, indexer) if is_dir else os.stat(real).st_size
+
+    if dry_run:
+        return {"path": real, "bytes": nbytes, "is_dir": is_dir, "dry_run": True}
+
+    _toctou_test_window(cfg)
+    ts = time.time()
+    # revalidate immediately before delete, same reason as REGISTRY's
+    # revalidate() (thread d4c05b6e): the caller declared this path, not a
+    # fixed instant in time -- re-run the SAME guards fresh rather than
+    # trust the dry-run snapshot
+    still_denied = _declare_denied_reason(real, cfg)
+    still_valid = (not still_denied and not os.path.islink(path)
+                  and os.path.exists(real)
+                  and os.path.isdir(real) == is_dir
+                  and any(_verify_inside(real, r) for r in roots))
+    if not still_valid:
+        _ledger_append(ts, "declare", real, nbytes, "skipped")
+        return {"path": real, "bytes": nbytes, "dry_run": False,
+                "ok": False, "skipped": True}
+    try:
+        if is_dir:
+            _rm_tree(real)
+        else:
+            _rm_files([real])
+        ok = True
+    except (OSError, PermissionError):
+        ok = False
+    _ledger_append(ts, "declare", real, nbytes, "ok" if ok else "error")
+    return {"path": real, "bytes": nbytes if ok else 0, "dry_run": False, "ok": ok}
+
+
 # --- ghosts: deleted-but-open files still holding blocks --------------------
 # Report-only in M3: name the holder, print its pid, never signal it.
 
@@ -1855,9 +1996,12 @@ def _make_dispatch(cfg, indexer, get_status, path_attr=None):
                 raise ValueError("since must be an epoch timestamp")
             resp = indexer.blame(float(since), _limit(req))
             if isinstance(resp, dict) and "error" not in resp:
-                # blame is global over the most-recently-scanned root, which
-                # isn't returned by name — the first configured scan_root is
-                # the common-case proxy for "which mount was that"
+                # blame merges growth across every indexed root now (9e71be7:
+                # scan_roots union tmpfs_mounts), so there's no longer a
+                # single root it "operated on" to check for a btrfs notice --
+                # the first configured scan_root stays the common-case proxy,
+                # same heuristic as before, just no longer exact even in
+                # principle
                 proxy_root = cfg["scan_roots"][0] if cfg["scan_roots"] else "/"
                 notice = _btrfs_notice_for_path(proxy_root)
                 if notice:
@@ -1869,6 +2013,12 @@ def _make_dispatch(cfg, indexer, get_status, path_attr=None):
             if not isinstance(dry_run, bool):
                 raise ValueError("dry_run must be a bool")
             return purge(category, dry_run, cfg, indexer)
+        if cmd == "declare":
+            path = req.get("path")
+            dry_run = req.get("dry_run", True)
+            if not isinstance(dry_run, bool):
+                raise ValueError("dry_run must be a bool")
+            return declare(path, dry_run, cfg, indexer)
         if cmd == "ghosts":
             return ghosts()
         if cmd == "ballast":

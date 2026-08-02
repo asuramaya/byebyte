@@ -63,12 +63,31 @@ mkdir -p "$SHM_FIX/proj-toctou-shm/node_modules/dep"
 dd if=/dev/zero of="$SHM_FIX/proj-toctou-shm/node_modules/dep/file.js" \
     bs=1024 count=64 2>/dev/null
 
+# declare's own fixtures: a legit scratch target (happy path) and a
+# separate one held back for declare's own TOCTOU race, same reasoning as
+# proj-toctou above. Live under SHM_FIX, not FIX -- FIX is $RD/tree, and RD
+# doubles as RUNTIME_DIR for this whole harness (a test-only convenience;
+# no real deployment nests scan_roots inside its own /run/byebyte), so
+# anything under FIX trips declare()'s OWN correct own-runtime/state-dir
+# refusal for a reason that has nothing to do with what these two fixtures
+# are for. SHM_FIX has no such collision.
+mkdir -p "$SHM_FIX/declare_target/dep"
+dd if=/dev/zero of="$SHM_FIX/declare_target/dep/blob" bs=1024 count=32 2>/dev/null
+mkdir -p "$SHM_FIX/declare_toctou"
+dd if=/dev/zero of="$SHM_FIX/declare_toctou/blob" bs=1024 count=32 2>/dev/null
+
 # fixture "home" for the M3 registry — NEVER a real path, always $FIX/home,
 # fed to the daemon via BYEBYTE_TEST_HOME (honored only when non-root)
 HOME_FIX=$FIX/home
 mkdir -p "$HOME_FIX/.cache/huggingface/hub/models--test--x"
 dd if=/dev/zero of="$HOME_FIX/.cache/huggingface/hub/models--test--x/blob" \
     bs=1024 count=1024 2>/dev/null
+# a real descendant of home_fix, for declare's own "must NOT over-refuse
+# anything actually inside $HOME" check — dedicated rather than reusing
+# another test's fixture, so it doesn't depend on test ordering or on
+# something else having left it untouched
+mkdir -p "$HOME_FIX/declare_descendant_ok"
+dd if=/dev/zero of="$HOME_FIX/declare_descendant_ok/blob" bs=1024 count=8 2>/dev/null
 mkdir -p "$HOME_FIX/proj-with-marker/node_modules/dep"
 : > "$HOME_FIX/proj-with-marker/package.json"
 dd if=/dev/zero of="$HOME_FIX/proj-with-marker/node_modules/dep/file.js" \
@@ -469,6 +488,151 @@ assert ask({"cmd": "ping"})["ok"] is True, "daemon died during the cross-device 
 print("cross-device toctou ok (/dev/shm, confirmed different device from RD): "
       "marker pulled mid-purge -> revalidate() skipped it, directory survived, "
       "ledgered as skipped")
+PY
+fi
+
+# --- M4: declare — path-exact, category-free, compiled-in floor (msg 3205,
+# msg 3214). The floor has three rules: (1) DERIVED — refuse $HOME itself or
+# any ancestor of it; (2) DERIVED — refuse any mount point; (3) enumerated —
+# the FHS system dirs neither of the above can derive. Tested against the
+# fixture's own fake $HOME (BYEBYTE_TEST_HOME=$HOME_FIX) so rule 1 is
+# exercised precisely (ancestor / equal / descendant), not against the real
+# system's /home, which this sandbox may not even have permission to probe
+# meaningfully. Gated on BYEBYTE_TEST_TOCTOU_DELAY same as M3.1/M3.2 —
+# declare's own TOCTOU race needs the non-root-only pause to land inside a
+# real window rather than racing it blind.
+if [ "$ROOT_SMOKE" -eq 1 ]; then
+    echo "declare test skipped under root, same reason as M3.1/M3.2"
+else
+python3 - "$RD" "$FIX" "$HOME_FIX" "$SHM_FIX" <<'PY'
+import json, os, socket, sys, threading, time
+
+rd, fix, home_fix, shm_fix = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+
+def ask(obj, timeout=10):
+    c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    c.settimeout(timeout)
+    c.connect(os.path.join(rd, "control.sock"))
+    c.sendall(json.dumps(obj).encode() + b"\n")
+    buf = b""
+    while b"\n" not in buf:
+        chunk = c.recv(65536)
+        if not chunk:
+            break
+        buf += chunk
+    c.close()
+    return json.loads(buf.decode())
+
+# rule 1, ancestor case: fix is a real ancestor of home_fix (home_fix ==
+# fix/home) -- must be refused, and refused BY RULE 1 specifically, not by
+# the "outside scan roots" envelope (fix IS a configured scan root, so the
+# envelope would happily allow it; only the compiled-in floor stops this)
+r = ask({"cmd": "declare", "path": fix, "dry_run": True})
+assert "error" in r and "ancestor" in r["error"], f"ancestor-of-home not refused: {r}"
+
+# rule 1, equal case
+r = ask({"cmd": "declare", "path": home_fix, "dry_run": True})
+assert "error" in r and "HOME" in r["error"], f"$HOME itself not refused: {r}"
+
+# rule 1 must NOT over-refuse a real descendant of home -- only ancestors
+# and home itself are denied, everything inside home is exactly what this
+# verb exists to declare. Checked against _declare_denied_reason() DIRECTLY
+# (import, not the live socket): this test's own RD doubles as BOTH
+# RUNTIME_DIR and the ancestor of the whole fixture tree (FIX=$RD/tree),
+# a test-harness convenience no real deployment would have -- declare()'s
+# SEPARATE own-runtime/state-dir check would legitimately also fire for
+# anything under $HOME_FIX here, for a reason that has nothing to do with
+# rule 1. Importing isolates the one thing this assertion is actually
+# about.
+import importlib.util
+from importlib.machinery import SourceFileLoader
+# src/bin/byebyted has no .py suffix, so spec_from_file_location can't infer
+# a loader from the extension -- hand it one explicitly (same pattern used
+# further down this file for the loop-device fixture import).
+loader = SourceFileLoader("byebyted_mod", "src/bin/byebyted")
+spec = importlib.util.spec_from_loader("byebyted_mod", loader)
+byebyted_mod = importlib.util.module_from_spec(spec)
+loader.exec_module(byebyted_mod)
+os.environ["BYEBYTE_TEST_HOME"] = home_fix
+descendant = os.path.join(home_fix, "declare_descendant_ok")
+reason = byebyted_mod._declare_denied_reason(
+    os.path.realpath(descendant), {"owner_uid": os.getuid()})
+assert reason is None, f"rule 1 wrongly refused a real descendant of $HOME: {reason}"
+
+# rule 2, derived: any mount point, tested against the real /dev/shm (not
+# this fixture's own SHM_FIX subdirectory, which isn't a mount point
+# itself -- /dev/shm always is, on every Linux box, CI included)
+r = ask({"cmd": "declare", "path": "/dev/shm", "dry_run": True})
+assert "error" in r and "mount point" in r["error"], f"a real mount point not refused: {r}"
+
+# rule 3, the enumerated remainder -- /etc is not an ancestor of this
+# fixture's fake $HOME and is not a mount point on most boxes, so only the
+# hand-written list catches it
+r = ask({"cmd": "declare", "path": "/etc", "dry_run": True})
+assert "error" in r and "compiled-in floor" in r["error"], \
+    f"/etc not refused by the enumerated floor: {r}"
+
+# happy path: a real, legitimate scratch target -- dry-run, then --yes
+target = os.path.join(shm_fix, "declare_target")
+dry = ask({"cmd": "declare", "path": target, "dry_run": True})
+assert "error" not in dry, dry
+assert dry["bytes"] > 0 and dry["is_dir"] is True, dry
+real_act = ask({"cmd": "declare", "path": target, "dry_run": False})
+assert real_act.get("ok") is True, real_act
+assert not os.path.exists(target), "declare --yes left the directory behind"
+ledger_path = os.path.join(rd, "state", "ledger.jsonl")
+with open(ledger_path) as f:
+    lines = [json.loads(l) for l in f if l.strip()]
+line = next(l for l in lines if l["target"] == target)
+assert line["category"] == "declare" and line["status"] == "ok", line
+
+# TOCTOU: swap the declared path for a symlink DURING byebyted's own
+# detect-to-act pause (BYEBYTE_TEST_TOCTOU_DELAY=0.3, same window as
+# M3.1/M3.2) -- the swap must land inside declare()'s own re-check, not
+# before the call even starts, or this proves nothing about the race
+# (declare's upfront `not os.path.islink(path)` guard would catch an
+# already-swapped path trivially and this test would never touch the
+# window at all)
+toctou_target = os.path.join(shm_fix, "declare_toctou")
+elsewhere = os.path.join(shm_fix, "declare_toctou_elsewhere")
+assert os.path.isdir(toctou_target), "declare toctou fixture missing before the race"
+
+dry = ask({"cmd": "declare", "path": toctou_target, "dry_run": True})
+assert "error" not in dry, f"toctou fixture not declarable before the race: {dry}"
+
+result = {}
+def run_declare():
+    result["doc"] = ask({"cmd": "declare", "path": toctou_target,
+                         "dry_run": False}, timeout=15)
+
+t = threading.Thread(target=run_declare)
+t.start()
+# land inside byebyted's own 0.3s pause, same margin as M3.1/M3.2
+time.sleep(0.05)
+os.rename(toctou_target, elsewhere)
+os.symlink(elsewhere, toctou_target)
+t.join(timeout=15)
+assert not t.is_alive(), "declare call never returned"
+
+doc = result["doc"]
+assert doc.get("skipped") is True and doc.get("ok") is False, \
+    f"symlink swap mid-flight was not caught by revalidation: {doc}"
+assert os.path.islink(toctou_target), \
+    "declare deleted through a symlink its own revalidate() should have caught"
+
+ledger_path = os.path.join(rd, "state", "ledger.jsonl")
+with open(ledger_path) as f:
+    lines = [json.loads(l) for l in f if l.strip()]
+line = next(l for l in lines if l["target"] == toctou_target)
+assert line["category"] == "declare" and line["status"] == "skipped", line
+
+os.unlink(toctou_target)
+os.rename(elsewhere, toctou_target)  # restore, tidy for anything reading fix's tree later
+
+assert ask({"cmd": "ping"})["ok"] is True, "daemon died during declare's tests"
+print("declare ok: derived home-ancestor/mount-point rules + enumerated "
+      "floor all refuse correctly, a real descendant is never over-refused, "
+      "happy path frees and ledgers, symlink swap refused outright")
 PY
 fi
 

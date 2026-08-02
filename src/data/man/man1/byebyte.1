@@ -61,6 +61,29 @@ uv-cache, thumbnails, project-artifacts, rotated-logs, journald,
 snap-old. Every deletion is appended to
 .IR /var/lib/byebyte/ledger.jsonl .
 .TP
+.BI declare " path " "[\-\-yes]"
+Delete exactly this one path \(em declared scope, not a category. Dry-run
+by default; pass
+.B \-\-yes
+to execute. Scanning stays broad, but what the daemon may eat is named by
+the human, one path at a time, from what
+.BR why / blame / advise
+already surfaced. Refused unconditionally, regardless of config: the
+owner's
+.B $HOME
+or any ancestor of it (this alone covers
+.IR / " and " /home ),
+any mount point, byebyte's own runtime/state directories, symlinks, and a
+compiled-in list of FHS system directories
+.RI ( /etc ", " /usr ", " /var ", " /bin ", " /lib ", " /proc ", " /sys ", "
+.IR /run ", " /root ", " /srv ", " /opt ", " /mnt ", " /media ).
+Also refused: anything outside every configured
+.I scan_roots
+entry, and declaring a configured root wholesale. Re\-verified immediately
+before deletion, not just at dry\-run time \(em a path that changed since
+it was declared is skipped, not deleted, and ledgered
+.IR skipped .
+.TP
 .B ghosts
 List deleted-but-open files still holding disk blocks, grouped by the
 process holding them and the mount they live on. Report-only \(em never
