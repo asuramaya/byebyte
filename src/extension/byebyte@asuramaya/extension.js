@@ -8,6 +8,7 @@
 import GObject from 'gi://GObject';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import St from 'gi://St';
 
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {QuickMenuToggle} from 'resource:///org/gnome/shell/ui/quickSettings.js';
@@ -23,6 +24,55 @@ const ICON = 'drive-harddisk-symbolic';
 
 const STATE_COLOR = {ok: PALETTE.GOOD, warn: PALETTE.WARN, hot: PALETTE.BAD, edquot: PALETTE.BAD};
 const STATE_MARK = {ok: '', warn: '⚠ ', hot: '‼ ', edquot: '✗ '};
+
+// reserved-blocks SEGMENT presets (Part 4) — percent values offered as chips
+const RESERVE_PRESETS = [1, 5, 10, 20];
+
+// ---- byebyte CLI subprocess: query+response (as opposed to Pill.sendCmd's
+// fire-and-forget socket write) — the established family pattern for verbs
+// whose result the pill actually waits on and renders (kast's readKastJson).
+// Packaging can land the CLI in /usr/bin or /usr/local/bin depending on deb
+// vs from-source install, and GNOME Shell's own process doesn't necessarily
+// inherit a shell PATH that includes /usr/local/bin (phanspeed's
+// UpdateSurface.runUpdate hit the same problem) — check both explicitly,
+// bare-string PATH lookup only as the last resort.
+let _byebyteCliPath = null;
+function byebyteCli() {
+    if (_byebyteCliPath)
+        return _byebyteCliPath;
+    for (const p of ['/usr/bin/byebyte', '/usr/local/bin/byebyte']) {
+        if (GLib.file_test(p, GLib.FileTest.IS_EXECUTABLE)) {
+            _byebyteCliPath = p;
+            return _byebyteCliPath;
+        }
+    }
+    _byebyteCliPath = 'byebyte';
+    return _byebyteCliPath;
+}
+
+// Runs `byebyte <args>` and parses stdout as JSON — kast's readKastJson
+// shape: always calls onDone exactly once, with the parsed doc or null on
+// any failure (spawn, communicate, or parse).
+function runByebyteJson(args, cancellable, onDone) {
+    try {
+        const proc = Gio.Subprocess.new(
+            [byebyteCli(), ...args],
+            Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE);
+        proc.communicate_utf8_async(null, cancellable, (p, res) => {
+            let parsed = null;
+            try {
+                const [, stdout] = p.communicate_utf8_finish(res);
+                parsed = JSON.parse(stdout);
+            } catch (e) {
+                logError(e, 'byebyte: JSON parse failed');
+            }
+            onDone(parsed);
+        });
+    } catch (e) {
+        logError(e, 'byebyte: subprocess failed');
+        onDone(null);
+    }
+}
 
 function fmtBurn(bps) {
     const perDay = (bps ?? 0) * 86400;
@@ -75,6 +125,7 @@ class ByeByteToggle extends QuickMenuToggle {
     _init(cancellable) {
         super._init({title: 'ByeByte', iconName: ICON, toggleMode: false});
         this.menu.setHeader(ICON, 'ByeByte', 'bytes at rest');
+        this._cancellable = cancellable;
 
         // alert banner — hidden until a mount is warn/hot/edquot
         this._alertSection = new PopupMenu.PopupMenuSection();
@@ -83,6 +134,17 @@ class ByeByteToggle extends QuickMenuToggle {
         // one row per mount, rebuilt on refresh (mounts come and go)
         this._mountSection = new PopupMenu.PopupMenuSection();
         this.menu.addMenuItem(this._mountSection);
+
+        // Reclaim ▸ pick-lists — ONE persistent PopupSubMenuMenuItem per
+        // mountpoint, never blanket-removeAll()'d on a routine refresh the
+        // way _mountSection above is. refresh() fires every poll_interval
+        // (~30s) via Pill.StatusWatcher regardless of user action; a user
+        // who's ticked boxes here and paused to think must not have them
+        // silently destroyed by the next automatic tick. _apply() diffs
+        // this map against the live mount list instead of rebuilding it.
+        this._reclaimSection = new PopupMenu.PopupMenuSection();
+        this.menu.addMenuItem(this._reclaimSection);
+        this._reclaimItems = new Map();   // mountpoint -> {item, built, rows, footerItem, commitItem}
 
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
         this._update = new Pill.UpdateSurface('byebyte', {cancellable});
@@ -125,12 +187,14 @@ class ByeByteToggle extends QuickMenuToggle {
         const heroBtrfs = hero ? btrfsNote(hero) : null;
         if (hero && heroBtrfs?.dominates) {
             // re-skin: free-space alone is misleading when snapshots pin
-            // most of what's "used" — lead with the pinned number instead
-            this.subtitle = `${STATE_MARK[hero.state] ?? ''}` +
+            // most of what's "used" — lead with the pinned number instead.
+            // Mountpoint prefixed (Part 5): with 2+ mounts a bare figure
+            // doesn't say which one it's about.
+            this.subtitle = `${STATE_MARK[hero.state] ?? ''}${hero.mountpoint} ` +
                 `${Pill.fmtBytes(heroBtrfs.pinned)} snapshot-pinned`;
         } else if (hero) {
             const eta = hero.eta_seconds != null ? ` · ${fmtEta(hero.eta_seconds)}` : '';
-            this.subtitle = `${STATE_MARK[hero.state] ?? ''}` +
+            this.subtitle = `${STATE_MARK[hero.state] ?? ''}${hero.mountpoint} ` +
                 `${Pill.fmtBytes(hero.effective_free)}${eta}`;
         } else {
             this.subtitle = 'no mounts';
@@ -175,11 +239,264 @@ class ByeByteToggle extends QuickMenuToggle {
                 `${Pill.esc(fmtBurn(m.burn_bps))} · full ${fmtEta(m.eta_seconds)}</span>` +
                 quota + snap);
             this._mountSection.addMenuItem(it);
+
+            // reserved-blocks SEGMENT (Part 4) — only for mounts the daemon
+            // could actually read a reserved_percent for (ext2/3/4 + tune2fs
+            // readable); absent/null means "not applicable", not "0%" — no
+            // disabled placeholder, just nothing, same principle as the
+            // quota/btrfs badges above being absent when not relevant.
+            if (m.reserved_percent != null)
+                this._mountSection.addMenuItem(this._buildReserveStrip(m));
+        }
+
+        // Reclaim ▸ pick-lists: diff against the live mount list instead of
+        // rebuilding — see the _init() note by _reclaimSection. A mount
+        // present in both keeps its existing submenu (ticks and all)
+        // completely untouched; only appearing/disappearing mounts change
+        // anything here.
+        const mountpoints = new Set(mounts.map(m => m.mountpoint));
+        for (const [mp, rec] of this._reclaimItems) {
+            if (!mountpoints.has(mp)) {
+                rec.item.destroy();
+                this._reclaimItems.delete(mp);
+            }
+        }
+        for (const m of mounts) {
+            if (!this._reclaimItems.has(m.mountpoint)) {
+                const rec = this._createReclaimItem(m.mountpoint);
+                this._reclaimSection.addMenuItem(rec.item);
+                this._reclaimItems.set(m.mountpoint, rec);
+            }
         }
 
         const heroSub = hero ? this.subtitle : 'bytes at rest';
         this.menu.setHeader(ICON, 'ByeByte', heroSub);
         this._update.setVersion(st.daemon?.version);
+    }
+
+    // ---- Part 4: reserve's SEGMENT strip -----------------------------------
+
+    _buildReserveStrip(m) {
+        const mountpoint = m.mountpoint;
+        // reserved_percent can be a float (5.03) from the block-count-
+        // truncation math the daemon documents — round for the highlight
+        // comparison, don't require exact float equality.
+        const current = Math.round(m.reserved_percent);
+        const box = new PopupMenu.PopupBaseMenuItem({reactive: false, can_focus: false});
+        const layout = new St.BoxLayout({x_expand: true});
+        const lab = new St.Label({text: 'reserved', style: `color:${DIM}; padding-right:8px;`});
+        lab.y_align = 2;   // Clutter.ActorAlign.CENTER
+        layout.add_child(lab);
+        for (const pct of RESERVE_PRESETS) {
+            const btn = new St.Button({
+                label: `${pct}%`, x_expand: true, can_focus: true,
+                style: pct === current ? Pill.CHIP_ON : Pill.CHIP,
+            });
+            btn.connect('clicked', () => this._onReserveClick(mountpoint, pct));
+            layout.add_child(btn);
+        }
+        box.add_child(layout);
+        return box;
+    }
+
+    _onReserveClick(mountpoint, pct) {
+        runByebyteJson(
+            ['reserve', mountpoint, String(pct), '--yes', '--json'], this._cancellable,
+            doc => {
+                if (!doc || doc.error) {
+                    Pill.notify('ByeByte', doc?.error || 'reserve failed — daemon unreachable');
+                    return;
+                }
+                if (doc.ok) {
+                    const delta = doc.avail_delta_bytes;
+                    const sign = (delta ?? 0) >= 0 ? '+' : '-';
+                    const deltaText = delta != null
+                        ? `${sign}${Pill.fmtBytes(Math.abs(delta))}` : '?';
+                    Pill.notify('ByeByte', `${mountpoint}: ${doc.prior_percent}% → ` +
+                        `${doc.new_percent}% reserved (${deltaText} free)`);
+                } else {
+                    // tune2fs ran but statvfs proved nothing moved — the
+                    // daemon's own honest failure case (reserve()'s "ok"
+                    // computation), not something we infer client-side.
+                    Pill.notify('ByeByte',
+                        `${mountpoint}: reserve to ${doc.new_percent}% did not take effect`);
+                }
+                // no forced extra status.json refresh — the chip highlight
+                // catches up on the next routine poll, which is correct:
+                // the toast already reported the daemon's own verified
+                // result, this is just the card's own measurement lagging
+                // a little, honestly.
+            });
+    }
+
+    // ---- Part 3: declare's Reclaim ▸ pick-list ------------------------------
+
+    _createReclaimItem(mountpoint) {
+        const item = new PopupMenu.PopupSubMenuMenuItem(`Reclaim on ${mountpoint} ▸`);
+        const rec = {item, built: false, rows: new Map(), footerItem: null, commitItem: null};
+        // lazy build on first expand only — never refetch on later opens;
+        // "↻ Refresh list" inside is the only other way this repopulates.
+        item.menu.connect('open-state-changed', (_menu, open) => {
+            if (open && !rec.built) {
+                rec.built = true;
+                this._populateReclaimList(mountpoint, rec);
+            }
+        });
+        return rec;
+    }
+
+    _addReclaimRefreshRow(mountpoint, rec, menu) {
+        const refresh = new PopupMenu.PopupMenuItem('↻ Refresh list');
+        refresh.connect('activate', () => this._populateReclaimList(mountpoint, rec));
+        menu.addMenuItem(refresh);
+    }
+
+    _populateReclaimList(mountpoint, rec) {
+        const menu = rec.item.menu;
+        menu.removeAll();
+        rec.rows = new Map();
+        rec.footerItem = null;
+        rec.commitItem = null;
+        menu.addMenuItem(Pill.row(`<span foreground="${DIM}">loading…</span>`));
+        this._addReclaimRefreshRow(mountpoint, rec, menu);
+
+        runByebyteJson(['why', mountpoint, '--json'], this._cancellable, doc => {
+            // The mount may have vanished (unplugged) while this was in
+            // flight — this rec's item may already be destroyed, and a
+            // fresh (or no) entry may sit in _reclaimItems now; touching
+            // the dead actor here would throw, so bail instead.
+            if (this._reclaimItems.get(mountpoint) !== rec)
+                return;
+            this._renderReclaimList(mountpoint, rec, doc);
+        });
+    }
+
+    _renderReclaimList(mountpoint, rec, doc) {
+        const menu = rec.item.menu;
+        menu.removeAll();
+        rec.rows = new Map();
+        rec.footerItem = null;
+        rec.commitItem = null;
+
+        if (!doc || doc.error) {
+            const msg = doc?.error || 'could not reach the daemon';
+            menu.addMenuItem(new PopupMenu.PopupMenuItem(msg, {reactive: false}));
+            this._addReclaimRefreshRow(mountpoint, rec, menu);
+            return;
+        }
+
+        const rows = Array.isArray(doc.rows) ? doc.rows : [];
+        if (rows.length === 0) {
+            menu.addMenuItem(new PopupMenu.PopupMenuItem(
+                '(nothing above the index threshold here)', {reactive: false}));
+        } else {
+            // already sorted biggest-first and limited by the daemon
+            // (default 15) — no client-side re-limiting.
+            for (const r of rows) {
+                if (!r || typeof r.path !== 'string')
+                    continue;
+                const bytes = Pill.num(r.bytes) ?? 0;
+                rec.rows.set(r.path, {bytes, selected: false});
+                const it = Pill.dataRow(r.path, Pill.fmtBytes(bytes), () => {
+                    const s = rec.rows.get(r.path);
+                    s.selected = !s.selected;
+                    it.setOrnament(s.selected ? PopupMenu.Ornament.CHECK : PopupMenu.Ornament.NONE);
+                    this._updateReclaimFooter(rec);
+                });
+                it.setOrnament(PopupMenu.Ornament.NONE);
+                menu.addMenuItem(it);
+            }
+        }
+
+        rec.footerItem = new PopupMenu.PopupMenuItem('', {reactive: false});
+        menu.addMenuItem(rec.footerItem);
+
+        rec.commitItem = new PopupMenu.PopupMenuItem('');
+        rec.commitItem.connect('activate', () => this._commitReclaim(mountpoint, rec));
+        menu.addMenuItem(rec.commitItem);
+
+        this._addReclaimRefreshRow(mountpoint, rec, menu);
+        this._updateReclaimFooter(rec);
+    }
+
+    _updateReclaimFooter(rec) {
+        if (!rec.footerItem)
+            return;
+        let n = 0, bytes = 0;
+        for (const s of rec.rows.values()) {
+            if (s.selected) {
+                n++;
+                bytes += s.bytes;
+            }
+        }
+        rec.footerItem.label.clutter_text.set_markup(
+            `<span foreground="${DIM}">` +
+            (n === 0 ? 'Selected: none' : `Selected: ${n} · ${Pill.esc(Pill.fmtBytes(bytes))}`) +
+            '</span>');
+        if (!rec.commitItem)
+            return;
+        if (n === 0) {
+            rec.commitItem.visible = false;
+        } else {
+            rec.commitItem.visible = true;
+            rec.commitItem.reactive = true;
+            rec.commitItem.label.text =
+                `Reclaim selected — ${Pill.fmtBytes(bytes)} (${n} path${n === 1 ? '' : 's'})`;
+        }
+    }
+
+    // Deletes every ticked path, one declare() at a time (sequential — no
+    // overlapping daemon writes to reason about), then toasts the daemon's
+    // own verified totals and refreshes the list against reality.
+    _commitReclaim(mountpoint, rec) {
+        const paths = [];
+        for (const [path, s] of rec.rows) {
+            if (s.selected)
+                paths.push(path);
+        }
+        if (paths.length === 0)
+            return;
+        if (rec.commitItem) {
+            rec.commitItem.reactive = false;
+            rec.commitItem.label.text = 'declaring…';
+        }
+
+        let freedBytes = 0, skipped = 0, failed = 0;
+        const runNext = i => {
+            if (i >= paths.length) {
+                const total = paths.length;
+                const plural = total === 1 ? '' : 's';
+                let summary;
+                if (skipped === 0 && failed === 0) {
+                    summary = `Reclaimed ${Pill.fmtBytes(freedBytes)} (${total} path${plural})`;
+                } else {
+                    const notes = [];
+                    if (skipped)
+                        notes.push(`${skipped} skipped — changed since selected`);
+                    if (failed)
+                        notes.push(`${failed} failed`);
+                    summary = `Reclaimed ${Pill.fmtBytes(freedBytes)} of ${total} ` +
+                        `path${plural} (${notes.join(', ')})`;
+                }
+                Pill.notify('ByeByte', summary);
+                // refresh against reality: whatever's left now that some
+                // paths are gone (this is a harmless no-op if the mount
+                // itself vanished in the meantime)
+                if (this._reclaimItems.get(mountpoint) === rec)
+                    this._populateReclaimList(mountpoint, rec);
+                return;
+            }
+            runByebyteJson(['declare', paths[i], '--yes', '--json'], this._cancellable, doc => {
+                if (doc && doc.ok)
+                    freedBytes += Pill.num(doc.bytes) ?? 0;
+                else if (doc && doc.skipped)
+                    skipped++;
+                else
+                    failed++;
+                runNext(i + 1);
+            });
+        };
+        runNext(0);
     }
 
     checkForUpdate() {

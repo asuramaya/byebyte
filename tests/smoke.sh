@@ -1177,9 +1177,24 @@ avail_final = final.f_bavail * final.f_frsize
 assert avail_final == avail_before, \
     f"round trip did not restore byte-exact: {avail_before} -> {avail_final}"
 
+# poll_mount() must publish reserved_percent for an ext4 mount -- this is
+# the pill's own SEGMENT strip's data source (status.json, not a per-render
+# subprocess call), so a mount the daemon can't read tune2fs for must not
+# silently look identical to one that just isn't ext2/3/4 -- both the pill
+# and this assertion treat None/absent as "don't show the control", but the
+# fixture here IS readable, so the field must actually be populated.
+poll_cfg = dict(mod.DEFAULTS)
+poll_cfg.update({"exclude_mounts": [], "tmpfs_mounts": [], "include_fstypes": ["ext4"]})
+row = mod.poll_mount({"mountpoint": mnt, "fstype": "ext4", "device": dev},
+                      {}, poll_cfg, poll_cfg["owner_uid"], __import__("time").time())
+assert row is not None, "poll_mount returned nothing for a live ext4 mount"
+assert row.get("reserved_percent") == mod._tune2fs_reserved_percent(dev), \
+    f"poll_mount's reserved_percent disagrees with a fresh tune2fs read: {row}"
+
 print(f"reserve ok: {original}% -> 1% -> {original}%, statvfs avail moved and "
       f"restored byte-exact ({avail_after - avail_before}B), 0% refused by the "
-      "compiled-in floor, ledgered with prior+new percent")
+      "compiled-in floor, ledgered with prior+new percent, poll_mount publishes "
+      f"reserved_percent ({row['reserved_percent']}%)")
 PY
         cleanup_reserve
     else

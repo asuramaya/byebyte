@@ -53,11 +53,26 @@ def request(payload, timeout=30):
     return sutra.request(sock_path, payload, timeout=timeout)
 
 
-def request_or_die(payload, timeout=30):
+def request_or_die(payload, timeout=30, as_json=False):
+    """as_json=True (pass the caller's own "--json" in argv) makes a daemon
+    refusal exit through stdout as parseable {"error": ...} JSON instead of
+    sys.exit's plain-text stderr line -- found while wiring the pill's own
+    subprocess+--json calls to declare/reserve: sys.exit always fired BEFORE
+    a verb's own --json print ever ran, so every refusal (declare's
+    denylist, reserve's fstype guard, anything) silently never reached
+    stdout at all -- a caller parsing --json output saw empty stdout and
+    could only tell "something failed", never why, indistinguishable from
+    the daemon being unreachable."""
     doc = request(payload, timeout=timeout)
     if doc is None:
+        if as_json:
+            print(json.dumps({"error": "daemon unreachable"}))
+            sys.exit(1)
         sys.exit("byebyte: daemon unreachable — is byebyted running?")
     if isinstance(doc, dict) and "error" in doc:
+        if as_json:
+            print(json.dumps(doc, indent=2))
+            sys.exit(1)
         sys.exit(f"byebyte: {doc['error']}")
     return doc
 
@@ -160,7 +175,8 @@ def parse_since(text, now):
 
 
 def cmd_scan(argv):
-    doc = request_or_die({"cmd": "scan"})
+    as_json = "--json" in argv
+    doc = request_or_die({"cmd": "scan"}, as_json=as_json)
     if doc.get("running") and not doc.get("started"):
         print("scan already running")
     else:
@@ -168,7 +184,7 @@ def cmd_scan(argv):
     if "--wait" in argv:
         while True:
             time.sleep(1)
-            st = request_or_die({"cmd": "status"})
+            st = request_or_die({"cmd": "status"}, as_json=as_json)
             idx = st.get("index") or {}
             if not idx.get("scanning"):
                 age = int(time.time() - (idx.get("last_scan") or 0))
@@ -194,7 +210,7 @@ def cmd_why(argv):
     path = next((a for a in argv if not a.startswith("-")
                  and a != _flag_val(argv, "--limit", None)), "/")
     limit = int(_flag_val(argv, "--limit", "15"))
-    doc = request_or_die({"cmd": "why", "path": path, "limit": limit})
+    doc = request_or_die({"cmd": "why", "path": path, "limit": limit}, as_json="--json" in argv)
     if "--json" in argv:
         print(json.dumps(doc, indent=2))
         return
@@ -215,7 +231,7 @@ def cmd_blame(argv):
     now = time.time()
     since = parse_since(_flag_val(argv, "--since", "1d"), now)
     limit = int(_flag_val(argv, "--limit", "15"))
-    doc = request_or_die({"cmd": "blame", "since": since, "limit": limit})
+    doc = request_or_die({"cmd": "blame", "since": since, "limit": limit}, as_json="--json" in argv)
     if "--json" in argv:
         print(json.dumps(doc, indent=2))
         return
@@ -236,7 +252,7 @@ def cmd_purge(argv):
         sys.exit("byebyte purge: --all is refused — one category per act")
     category = positional[0]
     yes = "--yes" in argv
-    doc = request_or_die({"cmd": "purge", "category": category, "dry_run": not yes})
+    doc = request_or_die({"cmd": "purge", "category": category, "dry_run": not yes}, as_json="--json" in argv)
     if "--json" in argv:
         print(json.dumps(doc, indent=2))
         return
@@ -269,7 +285,7 @@ def cmd_declare(argv):
         sys.exit("byebyte declare: needs a path (from `why`/`blame`/`advise`)")
     path = positional[0]
     yes = "--yes" in argv
-    doc = request_or_die({"cmd": "declare", "path": path, "dry_run": not yes})
+    doc = request_or_die({"cmd": "declare", "path": path, "dry_run": not yes}, as_json="--json" in argv)
     if "--json" in argv:
         print(json.dumps(doc, indent=2))
         return
@@ -307,7 +323,7 @@ def cmd_reserve(argv):
             sys.exit(f"byebyte reserve: '{positional[1]}' is not a number")
     yes = "--yes" in argv
     doc = request_or_die({"cmd": "reserve", "mountpoint": mountpoint,
-                          "percent": percent, "dry_run": not yes})
+                          "percent": percent, "dry_run": not yes}, as_json="--json" in argv)
     if "--json" in argv:
         print(json.dumps(doc, indent=2))
         return
@@ -330,7 +346,7 @@ def cmd_reserve(argv):
 
 
 def cmd_ghosts(argv):
-    doc = request_or_die({"cmd": "ghosts"})
+    doc = request_or_die({"cmd": "ghosts"}, as_json="--json" in argv)
     if "--json" in argv:
         print(json.dumps(doc, indent=2))
         return
@@ -348,7 +364,7 @@ def cmd_ghosts(argv):
 
 def cmd_ballast(argv):
     action = "release" if (argv and argv[0] == "release") else "status"
-    doc = request_or_die({"cmd": "ballast", "action": action})
+    doc = request_or_die({"cmd": "ballast", "action": action}, as_json="--json" in argv)
     if "--json" in argv:
         print(json.dumps(doc, indent=2))
         return
@@ -366,7 +382,7 @@ def cmd_ballast(argv):
 
 
 def cmd_kernels(argv):
-    doc = request_or_die({"cmd": "kernels"})
+    doc = request_or_die({"cmd": "kernels"}, as_json="--json" in argv)
     if "--json" in argv:
         print(json.dumps(doc, indent=2))
         return
@@ -383,7 +399,7 @@ def cmd_kernels(argv):
 
 
 def cmd_advise(argv):
-    doc = request_or_die({"cmd": "advise"})
+    doc = request_or_die({"cmd": "advise"}, as_json="--json" in argv)
     if "--json" in argv:
         print(json.dumps(doc, indent=2))
         return
@@ -417,7 +433,7 @@ def cmd_burn(argv):
     seconds = int(_flag_val(argv, "--seconds", "5"))
     limit = int(_flag_val(argv, "--limit", "15"))
     doc = request_or_die({"cmd": "burn", "seconds": seconds, "limit": limit},
-                          timeout=seconds + 10)
+                          timeout=seconds + 10, as_json="--json" in argv)
     if "--json" in argv:
         print(json.dumps(doc, indent=2))
         return
@@ -459,7 +475,7 @@ def notify_owner(uid, summary, body):
 def cmd_sweep(argv):
     if "--history" in argv:
         limit = int(_flag_val(argv, "--limit", "15"))
-        doc = request_or_die({"cmd": "sweep", "history": True, "limit": limit})
+        doc = request_or_die({"cmd": "sweep", "history": True, "limit": limit}, as_json="--json" in argv)
         if "--json" in argv:
             print(json.dumps(doc, indent=2))
             return
@@ -482,7 +498,7 @@ def cmd_sweep(argv):
     # was still healthy and just not done computing. sweep is a
     # timer-triggered background job, never an interactive hot path, so
     # waiting comfortably past the measured worst case costs nothing real.
-    doc = request_or_die({"cmd": "sweep", "dry": force_dry}, timeout=180)
+    doc = request_or_die({"cmd": "sweep", "dry": force_dry}, timeout=180, as_json="--json" in argv)
     if "--json" in argv:
         print(json.dumps(doc, indent=2))
         return
