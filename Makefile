@@ -255,6 +255,8 @@ check-systemd-live:
 	  fi; \
 	  echo "check-systemd-live: $$u completed (Result=success)"; \
 	done
+	@echo "-- DIAGNOSTIC: sweep's per-category detect() timing (byebyted journal) --"
+	@journalctl -u byebyted.service --no-pager | grep 'detect() took' || echo "(no timing lines found)"
 	# Completion-checking the .service units above proves each one runs
 	# correctly WHEN TRIGGERED -- it says nothing about whether the paired
 	# .timer will ever trigger it. A malformed OnCalendar/OnBootSec value,
