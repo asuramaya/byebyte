@@ -1834,6 +1834,51 @@ BYEBYTE_RUNTIME_DIR=$RD python3 src/bin/byebyte sweep --history | grep -q "sweep
     || { echo "SMOKE FAIL: CLI sweep --history missing hf-hub"; exit 1; }
 fi
 
+# --- V3.M5: optional-dependency remedies (operator ruling 2cd900ce) — every
+# degradation path names the fix, not just the fact. This box has btrfs-progs
+# and snapd genuinely installed (confirmed: `command -v` finds both), so
+# "absent" can't be exercised by real absence here -- PATH is redirected to
+# an empty throwaway dir for the duration of these two calls instead, a real
+# controlled absence rather than an assumption, restored immediately after.
+python3 - "src/bin/byebyted" <<'PY'
+import importlib.util, os, sys, tempfile
+from importlib.machinery import SourceFileLoader
+
+daemon_path = sys.argv[1] if len(sys.argv) > 1 else "src/bin/byebyted"
+loader = SourceFileLoader("byebyted_mod_deps", daemon_path)
+spec = importlib.util.spec_from_loader("byebyted_mod_deps", loader)
+mod = importlib.util.module_from_spec(spec)
+loader.exec_module(mod)
+
+real_path = os.environ.get("PATH", "")
+empty_dir = tempfile.mkdtemp(prefix="byebyte-smoke-emptypath-")
+try:
+    os.environ["PATH"] = empty_dir
+
+    btrfs = mod.btrfs_info("/")
+    assert btrfs.get("available") is False, btrfs
+    assert btrfs.get("reason") == "btrfs CLI not found -- apt install btrfs-progs", btrfs
+
+    snap_dry = mod.purge("snap-old", True, {}, None)
+    assert snap_dry.get("candidates") == [], snap_dry
+    assert snap_dry.get("note") == "snap CLI not found -- apt install snapd", snap_dry
+
+    snap_real = mod.purge("snap-old", False, {}, None)
+    assert snap_real.get("results") == [], snap_real
+    assert snap_real.get("note") == "snap CLI not found -- apt install snapd", snap_real
+finally:
+    os.environ["PATH"] = real_path
+
+print("optional-dependency remedies ok: btrfs_info and purge snap-old both name "
+      "the apt package when the CLI genuinely isn't on PATH, real absence "
+      "(PATH redirected), not simulated presence")
+PY
+echo "note: sweep's own notify-send-absent remedy print (byebyte CLI's cmd_sweep)" \
+     "is NOT covered by an automated test here -- the existing sweep smoke" \
+     "coverage only exercises --dry and --history through the CLI, never a" \
+     "real armed run that reaches the notify_owner code path; reviewed by" \
+     "reading, not proven by running -- disclosed, not silently assumed"
+
 # --- M4: make deb — builds a real .deb; contents include bins+units+man.
 # Builds and inspects only — never installed. The log path is per-invocation
 # unique: a shared dev box runs concurrent smoke passes (root and
@@ -1869,6 +1914,26 @@ for want in usr/bin/byebyted usr/bin/byebyte usr/bin/byebyte-healthcheck \
     echo "$CONTENTS" | grep -q "$want" \
         || { echo "SMOKE FAIL: deb missing $want"; exit 1; }
 done
-echo "deb ok: $DEBFILE built, contents verified (never installed)"
+
+# control fields: the family-wide dependency ruling (operator 2cd900ce) --
+# the artifact must actually emit what packages.txt documents, not just
+# describe a tier that was never wired into the control stanza. Depends
+# stays at the floor unchanged; Suggests carries every optional package
+# (never Recommends -- apt installs those by default, and nothing here
+# should arrive unasked).
+DEB_DEPENDS=$(dpkg-deb -f "$DEBFILE" Depends)
+[ "$DEB_DEPENDS" = "python3 (>= 3.8), systemd, openssh-client" ] \
+    || { echo "SMOKE FAIL: deb Depends changed unexpectedly: $DEB_DEPENDS"; exit 1; }
+DEB_SUGGESTS=$(dpkg-deb -f "$DEBFILE" Suggests)
+for want in btrfs-progs snapd libnotify-bin gnome-shell; do
+    echo "$DEB_SUGGESTS" | grep -q "$want" \
+        || { echo "SMOKE FAIL: deb Suggests missing $want (got: $DEB_SUGGESTS)"; exit 1; }
+done
+DEB_RECOMMENDS=$(dpkg-deb -f "$DEBFILE" Recommends)
+[ -z "$DEB_RECOMMENDS" ] \
+    || { echo "SMOKE FAIL: deb carries a Recommends field, ruling says Suggests only: $DEB_RECOMMENDS"; exit 1; }
+echo "deb ok: $DEBFILE built, contents verified (never installed), Depends" \
+     "unchanged at the floor, Suggests carries every optional package, no" \
+     "Recommends field"
 
 echo "SMOKE OK"

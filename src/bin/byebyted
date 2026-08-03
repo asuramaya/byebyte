@@ -463,7 +463,8 @@ def btrfs_info(mountpoint):
     when they're off, subvolume/snapshot counts still work but pinned_bytes
     is None."""
     if _btrfs_cli() is None:
-        return {"available": False, "reason": "btrfs CLI not found"}
+        return {"available": False,
+                "reason": "btrfs CLI not found -- apt install btrfs-progs"}
     all_subvols_text = _btrfs_run(["subvolume", "list", "-a"], mountpoint)
     if all_subvols_text is None:
         return {"available": False, "reason": "btrfs subvolume list failed"}
@@ -1314,11 +1315,22 @@ def purge(category, dry_run, cfg, indexer):
     detect, delete, revalidate, verify = REGISTRY[category]
     candidates = detect(cfg, indexer)
     total = sum(c["bytes"] for c in candidates)
+    # snap-old is the one REGISTRY category backed by an external CLI (the
+    # other seven are pure filesystem walks) -- zero candidates is honest
+    # either way, but "genuinely nothing disabled to purge" and "snapd
+    # isn't even installed" are different situations, and only one of them
+    # has a remedy worth naming.
+    note = None
+    if category == "snap-old" and not candidates and shutil.which("snap") is None:
+        note = "snap CLI not found -- apt install snapd"
     if dry_run:
-        return {"category": category, "dry_run": True,
+        resp = {"category": category, "dry_run": True,
                 "candidates": [{"path": c["path"], "bytes": c["bytes"]}
                                for c in candidates],
                 "total_bytes": total}
+        if note:
+            resp["note"] = note
+        return resp
     _toctou_test_window(cfg)
     freed = 0
     results = []
@@ -1339,8 +1351,11 @@ def purge(category, dry_run, cfg, indexer):
         _ledger_append(ts, category, c["path"], c["bytes"] if ok else 0,
                        "ok" if ok else "error")
         results.append({"path": c["path"], "bytes": c["bytes"], "ok": ok})
-    return {"category": category, "dry_run": False, "freed_bytes": freed,
+    resp = {"category": category, "dry_run": False, "freed_bytes": freed,
             "results": results}
+    if note:
+        resp["note"] = note
+    return resp
 
 
 # --- declare: destructive scope the USER names, not a category detector ----

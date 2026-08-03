@@ -12,16 +12,29 @@ openssh-client  # `ssh-keygen -Y verify`: sutra_update's release-signature
                 # fail-closed-because-missing-dependency update path from
                 # day one, not a safe one. Hard, not optional.
 
-# --- optional (soft; every one degrades to a stdlib-only fallback or a
-# one-line notice, never an error) ---------------------------------------
+# --- optional (packaging's deb Suggests: btrfs-progs, snapd, libnotify-bin,
+# gnome-shell — never Recommends, apt installs those by default and nothing
+# should arrive unasked. Every one degrades to a stdlib-only fallback or a
+# one-line notice, never an error, and every refusal names the fix rather
+# than just stating the fact) -----------------------------------------------
 btrfs-progs   # `btrfs` CLI: subvolume/snapshot/qgroup accounting on btrfs
               # mounts (V2.M2, read-only — no `quota enable`, no snapshot
               # verbs). Absent: why/blame fall back to the plain walk with
-              # a "btrfs accounting unavailable" note instead of an error.
+              # a "btrfs accounting unavailable (apt install btrfs-progs)"
+              # note instead of an error.
 snapd         # `snap` CLI: backs the snap-old purge category (M3). Absent:
-              # that category's detector just returns no candidates.
+              # that category's detector returns no candidates, and `purge
+              # snap-old`'s own response names the fix ("snap CLI not found
+              # -- apt install snapd") rather than looking indistinguishable
+              # from genuinely nothing to purge.
 libnotify-bin # `notify-send` CLI: the `sweep` verb's toast when an armed
               # category actually reclaims something (V2.M4, UNIFY.md's
               # notification spec). Absent, or no active login session for
               # the owner: sweep still runs and ledgers, it just can't show
-              # a desktop toast — never an error.
+              # a desktop toast — never an error, but a genuinely-missing
+              # tool (as opposed to no active session, which has no fix to
+              # offer) prints "apt install libnotify-bin" in the sweep's own
+              # output, where a human or journald actually sees it.
+gnome-shell   # the Quick Settings pill (extension/byebyte@asuramaya).
+              # Absent: byebyted and the `byebyte` CLI work exactly the
+              # same headless; only the GNOME UI is unavailable.

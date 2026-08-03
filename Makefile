@@ -179,6 +179,7 @@ deb:
 	  echo "Priority: optional"; \
 	  echo "Architecture: all"; \
 	  echo "Depends: python3 (>= 3.8), systemd, openssh-client"; \
+	  echo "Suggests: btrfs-progs, snapd, libnotify-bin, gnome-shell"; \
 	  echo "Maintainer: asuramaya <asuramaya@users.noreply.github.com>"; \
 	  echo "Homepage: https://github.com/asuramaya/byebyte"; \
 	  echo "Description: storage as a deadline, not a percentage"; \

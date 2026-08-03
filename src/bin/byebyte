@@ -28,6 +28,7 @@ With no verb, runs status. See byebyte(1) for full detail.
 import json
 import os
 import pwd
+import shutil
 import subprocess
 import sys
 import time
@@ -263,6 +264,8 @@ def cmd_purge(argv):
         cands = doc.get("candidates", [])
         if not cands:
             print(f"{category}: nothing to purge")
+            if doc.get("note"):
+                print(f"  note: {doc['note']}")
             return
         for c in cands:
             print(f"  {human_bytes(c['bytes']):>8}  {c['path']}")
@@ -273,6 +276,8 @@ def cmd_purge(argv):
         errors = [r for r in doc.get("results", []) if not r["ok"]]
         tail = f" ({len(errors)} failed)" if errors else ""
         print(f"{category}: freed {human_bytes(freed)}{tail}")
+        if doc.get("note"):
+            print(f"  note: {doc['note']}")
 
 
 def cmd_declare(argv):
@@ -646,6 +651,17 @@ def cmd_sweep(argv):
         cats = ", ".join(r["category"] for r in acted)
         notify_owner(uid, f"swept {human_bytes(total_freed)}",
                      f"reclaimed from: {cats} — see: byebyte sweep --json")
+        # notify_owner is deliberately best-effort and silent (a sweep's
+        # success never depends on whether a toast could be shown), so
+        # "no active login session" -- the common, nothing-to-remedy case
+        # on a headless box -- and "the tool itself is missing" both fail
+        # the same silent way from in there. Distinguish the one case with
+        # an actual fix here instead, where it lands in this run's own
+        # output -- stdout on an interactive run, journald when the sweep
+        # timer unit invokes this exact command.
+        if shutil.which("notify-send") is None:
+            print("  note: desktop notifications unavailable "
+                  "(apt install libnotify-bin)")
 
 
 def cmd_update(argv):
