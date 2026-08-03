@@ -2193,6 +2193,14 @@ def _options_with_size(options, size):
     return ",".join(parts)
 
 
+def _tmp_live_total_bytes():
+    try:
+        live = os.statvfs("/tmp")
+        return live.f_blocks * live.f_frsize
+    except OSError:
+        return None
+
+
 def tmp_size(size, dry_run, cfg):
     if not isinstance(size, str) or not _SIZE_RE.match(size):
         return {"error": "size must look like 2G, 512M ... (digits plus one "
@@ -2209,11 +2217,7 @@ def tmp_size(size, dry_run, cfg):
         return {"error": f"could not read {_TMP_MOUNT_UNIT}'s current mount options"}
     current_size = _size_from_options(current_options)
 
-    try:
-        live = os.statvfs("/tmp")
-        live_total = live.f_blocks * live.f_frsize
-    except OSError:
-        live_total = None
+    live_total = _tmp_live_total_bytes()
 
     if dry_run:
         return {"current_cap": current_size, "proposed_cap": size,
@@ -2245,6 +2249,43 @@ def tmp_size(size, dry_run, cfg):
                     "cap takes effect at the next reboot, or run `systemctl "
                     "daemon-reload && systemctl restart tmp.mount` by hand to "
                     "apply it now"}
+
+
+# --- pill digest: layer-3 status for display (msg 3502 via Alfred) ---------
+# The pill needs to know each of these three verbs' CURRENT state to render
+# correctly -- which SEGMENT chip to highlight, which way a TOGGLE should
+# start, whether tmp-size's configured cap has diverged from /tmp's live
+# size -- but that state lives behind journal_cap()/fstrim_schedule()/
+# tmp_size()'s own dry-run responses, never in status.json, so without this
+# the pill would need to grow its own request/response socket client just
+# for DISPLAY. Riding status.json instead, same shape ramsteind's own
+# build_pill_summary uses (Till's 25cd1ec the reference this ports): the
+# pill stays a pure status.json watcher (GFileMonitor, no socket client in
+# GJS). ACTIONS still go over the control socket via the CLI
+# (runByebyteJson), unchanged -- this only closes the display-side gap.
+#
+# Computed every poll tick rather than gated behind a slower sampler like
+# ramsteind's own advise/coexistence checks: none of these three reads costs
+# more than a file read or a single systemctl query, and byebyted's own
+# poll_interval (default 30s) is already the slow cadence a separate
+# sampler would exist to approximate.
+def build_pill_summary():
+    journal_dir = _journal_dir()
+    tmp_options = _tmp_current_options()
+    return {
+        "journal_cap": {
+            "current_cap": _journald_current_cap(),
+            "usage_bytes": _dir_size(journal_dir) if os.path.isdir(journal_dir) else None,
+        },
+        "fstrim_schedule": {
+            "enabled": _systemctl_is_enabled(_FSTRIM_UNIT),
+            "next_run": _systemctl_next_run(_FSTRIM_UNIT),
+        },
+        "tmp_size": {
+            "configured_cap": _size_from_options(tmp_options) if tmp_options else None,
+            "live_total_bytes": _tmp_live_total_bytes(),
+        },
+    }
 
 
 # --- sweep: the unattended reclaim policy (V2.M4) ---------------------------
@@ -2684,6 +2725,14 @@ def main():
             "burn": {"available": path_attr.available,
                      "top_paths": path_attr.top_n(10)},
         }
+        try:
+            doc["pill"] = build_pill_summary()
+        except Exception:
+            # display-only digest, computed every poll tick alongside mount
+            # scanning -- an unexpected failure here (e.g. systemctl
+            # entirely absent) must degrade the pill's layer-3 controls,
+            # never take the whole daemon down with it
+            doc["pill"] = None
         latest["doc"] = doc
         write_status(doc, cfg)
         # nightly scan: fires once inside the configured hour (20h guard

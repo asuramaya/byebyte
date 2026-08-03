@@ -1880,6 +1880,82 @@ echo "note: sweep's own notify-send-absent remedy print (byebyte CLI's cmd_sweep
      "real armed run that reaches the notify_owner code path; reviewed by" \
      "reading, not proven by running -- disclosed, not silently assumed"
 
+# --- V3.M6: pill digest — build_pill_summary() (msg 3502 via Alfred), the
+# status.json field the pill reads instead of growing its own socket client.
+# journal_cap/tmp_size are exercised for real via the same non-root-only
+# fixture hooks M2/M4 use above; fstrim_schedule can't be (no fake path,
+# same reasoning as M3) so only its shape (keys present, plausible types)
+# is checked against whatever this box's real fstrim.timer/systemctl state
+# happens to be -- read-only, harmless regardless of that real state.
+python3 - <<'PY'
+import importlib.util, os, shutil, sys, tempfile
+from importlib.machinery import SourceFileLoader
+
+state_dir = tempfile.mkdtemp(prefix="byebyte-smoke-digest-state-")
+os.environ["BYEBYTE_STATE_DIR"] = state_dir  # module-level constant, must
+                                              # precede exec_module
+
+loader = SourceFileLoader("byebyted_mod_digest", "src/bin/byebyted")
+spec = importlib.util.spec_from_loader("byebyted_mod_digest", loader)
+mod = importlib.util.module_from_spec(spec)
+loader.exec_module(mod)
+
+journal_dir = tempfile.mkdtemp(prefix="byebyte-smoke-digest-journal-")
+journald_dropin_dir = tempfile.mkdtemp(prefix="byebyte-smoke-digest-jdropin-")
+fake_frag_dir = tempfile.mkdtemp(prefix="byebyte-smoke-digest-frag-")
+tmp_dropin_dir = tempfile.mkdtemp(prefix="byebyte-smoke-digest-tdropin-")
+try:
+    with open(os.path.join(journal_dir, "fake.journal"), "wb") as f:
+        f.write(b"x" * 32768)
+    os.environ["BYEBYTE_TEST_JOURNALD_DIR"] = journal_dir
+    os.environ["BYEBYTE_TEST_JOURNALD_DROPIN_DIR"] = journald_dropin_dir
+
+    frag_path = os.path.join(fake_frag_dir, "tmp.mount")
+    with open(frag_path, "w") as f:
+        f.write("[Unit]\nDescription=fake tmp.mount\n\n[Mount]\nWhat=tmpfs\nWhere=/tmp\n"
+                "Type=tmpfs\nOptions=mode=1777,strictatime,size=50%\n")
+    os.environ["BYEBYTE_TEST_TMP_MOUNT_FRAGMENT"] = frag_path
+    os.environ["BYEBYTE_TEST_TMP_DROPIN_DIR"] = tmp_dropin_dir
+
+    # untouched: no byebyte drop-in exists for either verb yet. journal-cap
+    # has no vendor floor to fall back to (None, "uncapped" is real);
+    # tmp-size's own current_options falls back to the vendor fragment when
+    # no byebyte drop-in exists yet (same fallback tmp_size() itself uses),
+    # so this reads the FIXTURE's own size=50%, not None
+    empty = mod.build_pill_summary()
+    assert empty["journal_cap"]["current_cap"] is None, empty
+    assert empty["journal_cap"]["usage_bytes"] == 32768, empty
+    assert empty["tmp_size"]["configured_cap"] == "50%", empty
+    live_now = empty["tmp_size"]["live_total_bytes"]
+    assert live_now, "expected a real /tmp statvfs total"
+    fstrim = empty["fstrim_schedule"]
+    assert "enabled" in fstrim and "next_run" in fstrim, fstrim
+    assert fstrim["enabled"] is None or isinstance(fstrim["enabled"], bool), fstrim
+    assert fstrim["next_run"] is None or isinstance(fstrim["next_run"], str), fstrim
+
+    # after real applies: the digest reads back byebyte's own drop-ins,
+    # exactly as journal-cap's/tmp-size's own round-trip dry-runs do above
+    mod.journal_cap("500M", False, {})
+    mod.tmp_size("2G", False, {})
+    after = mod.build_pill_summary()
+    assert after["journal_cap"]["current_cap"] == "500M", after
+    assert after["tmp_size"]["configured_cap"] == "2G", after
+    # tmp-size never remounts /tmp -- live_total_bytes must be genuinely
+    # unmoved, same proof V3.M4's own real-apply check makes
+    assert after["tmp_size"]["live_total_bytes"] == live_now, \
+        "live_total_bytes moved -- the digest must never claim /tmp changed"
+
+    print("pill digest ok: journal-cap and tmp-size read back their own "
+          "real drop-ins, tmp-size's live total genuinely unmoved, "
+          "fstrim-schedule's shape present regardless of this box's real state")
+finally:
+    shutil.rmtree(journal_dir, ignore_errors=True)
+    shutil.rmtree(journald_dropin_dir, ignore_errors=True)
+    shutil.rmtree(fake_frag_dir, ignore_errors=True)
+    shutil.rmtree(tmp_dropin_dir, ignore_errors=True)
+    shutil.rmtree(state_dir, ignore_errors=True)
+PY
+
 # --- M4: make deb — builds a real .deb; contents include bins+units+man.
 # Builds and inspects only — never installed. The log path is per-invocation
 # unique: a shared dev box runs concurrent smoke passes (root and
