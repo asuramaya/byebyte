@@ -27,7 +27,7 @@ jobs:
       # (false): byebyte has no per-file VERSION constant to check --
       # packaging/VERSION is the one version constant, read live at
       # runtime, and check-repo's own rule enforces exactly the opposite
-      # of what check-version.sh tests for (same convention as RAMstein).
+      # of what check-version.sh tests for (same convention as ramstein).
       # test_signing.sh is already covered by run-smoke: make smoke's own
       # recipe runs it; run-signing-verify would run it a second time.
 
@@ -40,7 +40,7 @@ jobs:
   # confirmed by reading its full step list, not assumed). No step needed
   # here for pill.js or shellcheck: sutra.mk 0.11.0's SUTRA_EXT_DIR folds
   # pill.js into check-sutra itself, and pill-ci.yml 0.11.0 runs shellcheck
-  # directly above -- both were RAMstein's pilot-stage gaps against sutra
+  # directly above -- both were ramstein's pilot-stage gaps against sutra
   # 0.10.1, already closed upstream by the version byebyte adopted.
   byebyte-specific:
     runs-on: ubuntu-latest
@@ -50,7 +50,7 @@ jobs:
       - name: Vendored-path resolution (all four binaries)
         run: make check-vendored-path-all
 
-  # Same job name as RAMstein's (one shape for both pills, not two).
+  # Same job name as ramstein's (one shape for both pills, not two).
   # GitHub-hosted runners are a full VM with systemd as PID 1, unlike this
   # repo's own local sandbox testing -- CI has only ever run the raw
   # binary directly, never the packaged unit, which is exactly how the

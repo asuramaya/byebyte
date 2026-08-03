@@ -53,7 +53,7 @@ include src/share/byebyte/lib/sutra.mk
 # three .py modules by default; this opts pill.js into the same
 # integrity+freshness check via sutra.mk's own escape hatch -- verbatim
 # adoption without this would have silently dropped a guard three of five
-# pills carry, the exact defect Till's RAMstein pilot caught). 0.11.0
+# pills carry, the exact defect Till's ramstein pilot caught). 0.11.0
 # tested this Make variable at Make level but read its value via shell
 # parameter expansion, so a plain `:=` here silently checked nothing
 # without an `export` alongside it. Fixed Make-level in 0.11.1
@@ -210,14 +210,14 @@ deb:
 # two oneshot units (byebyte-update, byebyte-sweep) must actually run to
 # completion -- a timer unit that starts and immediately fails is exactly
 # as invisible to a daemon-only restart-poll as the ExecStart bug this
-# whole check exists to catch. Joint finding with RAMstein's own version
+# whole check exists to catch. Joint finding with ramstein's own version
 # of this check, 2026-08-02.
 #
 # Individual `systemctl show -p <PROP> --value` calls, never a comma-list:
-# `-p A,B,C,D --value` does not preserve the requested order (RAMstein hit
+# `-p A,B,C,D --value` does not preserve the requested order (ramstein hit
 # this for real on its own first CI run -- a positional `read` silently
 # mis-assigned every field even though the service was healthy the whole
-# time). 30s / six 5s samples, matching RAMstein's own window -- one
+# time). 30s / six 5s samples, matching ramstein's own window -- one
 # number for both pills, not two independently-chosen ones. Till's own
 # negative control is what set it: 4 restarts within 5s, 6 within 15s,
 # against RestartSec=5, so six samples over 30s gives real margin around a

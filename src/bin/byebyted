@@ -1160,7 +1160,7 @@ def _delete_snap_revision(candidate):
 # immediately before its delete() call. detect() can be seconds (or, for
 # project-artifacts, minutes) old by the time an armed act loop reaches a
 # given candidate -- candidate['path'] went straight to _rm_tree/_rm_files
-# with nothing re-checking it still matches. RAMstein's do_calm/do_kill
+# with nothing re-checking it still matches. ramstein's do_calm/do_kill
 # close the same class of gap by re-resolving the pid and refusing on a
 # starttime mismatch; a filesystem path has no starttime, so the equivalent
 # identity check is re-running the same marker/symlink/inside-root predicate
