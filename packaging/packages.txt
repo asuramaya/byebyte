@@ -2,7 +2,10 @@
 # packages.txt is the reference shape for this split — UNIFY.md Wave B).
 
 # --- hard (packaging's deb Depends: python3 (>= 3.8), systemd, openssh-client) ---
-python3         # the interpreter itself
+python3 (>= 3.8)  # the interpreter itself. Version constraint written directly
+                  # into the entry text (Tantra's sutra.mk spec, msg 3370) so
+                  # the generator reproduces the control stanza's actual
+                  # "python3 (>= 3.8)" verbatim, not a bare "python3"
 systemd         # byebyted.service, the update/sweep timers, `systemctl` calls
 openssh-client  # `ssh-keygen -Y verify`: sutra_update's release-signature
                 # check against release-signing/allowed_signers. Vendored
@@ -12,11 +15,11 @@ openssh-client  # `ssh-keygen -Y verify`: sutra_update's release-signature
                 # fail-closed-because-missing-dependency update path from
                 # day one, not a safe one. Hard, not optional.
 
-# --- optional (packaging's deb Suggests: btrfs-progs, snapd, libnotify-bin,
-# gnome-shell — never Recommends, apt installs those by default and nothing
-# should arrive unasked. Every one degrades to a stdlib-only fallback or a
-# one-line notice, never an error, and every refusal names the fix rather
-# than just stating the fact) -----------------------------------------------
+# --- optional (packaging's deb Suggests: btrfs-progs, snapd, libnotify-bin, gnome-shell) ---
+# Never Recommends -- apt installs those by default and nothing here should
+# arrive unasked. Every one degrades to a stdlib-only fallback or a one-line
+# notice, never an error, and every refusal names the fix rather than just
+# stating the fact.
 btrfs-progs   # `btrfs` CLI: subvolume/snapshot/qgroup accounting on btrfs
               # mounts (V2.M2, read-only — no `quota enable`, no snapshot
               # verbs). Absent: why/blame fall back to the plain walk with
