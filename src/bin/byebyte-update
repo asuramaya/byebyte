@@ -25,7 +25,7 @@ actually made.
 import os
 import sys
 
-# --- sutra bootstrap (sutra 0.11.1; see docs/BOOTSTRAP.md -- do not hand-edit) ----
+# --- sutra bootstrap (sutra 0.12.9; see docs/BOOTSTRAP.md -- do not hand-edit) ----
 import os as _os
 import sys as _sys
 _PILL = "byebyte"

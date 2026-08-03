@@ -11,7 +11,7 @@
 #      surface. Pure guest-local reads, zero contract dependency: the gap
 #      between the hypervisor's granted target_kb and the guest kernel's
 #      own MemTotal is real machinery (memory the balloon driver hasn't
-#      onlined yet), not measurement noise — RAMstein's balloon-aware
+#      onlined yet), not measurement noise — ramstein's balloon-aware
 #      totals need target_kb as the ceiling, never MemTotal.
 #   3. refresh_host_telemetry() — the guest-side cache half of the dom0
 #      seam: whatever an injected `fetch` callable returns gets cached to a
@@ -31,7 +31,7 @@
 # stdlib only. Vendored beside sutra.py, always together — imports it
 # directly for write_status rather than reimplementing the atomic write.
 
-SUTRA_XEN_VERSION = "0.1.1"
+SUTRA_XEN_VERSION = "0.1.2"
 
 import os
 import subprocess

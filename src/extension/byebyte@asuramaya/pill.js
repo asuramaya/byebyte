@@ -13,7 +13,7 @@
 // Quick Settings indicator boilerplate.
 //
 // What deliberately does NOT live here: domain judgement. ETA horizons
-// (ByeByte thinks in weeks, RAMstein in seconds), hero/severity ranking,
+// (byebyte thinks in weeks, ramstein in seconds), hero/severity ranking,
 // mission and stance chips, notification policy — each of those is a pill
 // being itself. A commons that absorbs domain stops being a commons and
 // starts being a framework; this file must stay the former.
@@ -28,7 +28,7 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {SystemIndicator} from 'resource:///org/gnome/shell/ui/quickSettings.js';
 
-export const PILL_JS_VERSION = '0.1.0';
+export const PILL_JS_VERSION = '0.1.2';
 
 // ---- palette (FAMILY.md doctrine #12) --------------------------------------
 // The five concept colors every pill shares, plus the chip/dot button styles
