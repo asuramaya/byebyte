@@ -1841,7 +1841,7 @@ fi
 # an empty throwaway dir for the duration of these two calls instead, a real
 # controlled absence rather than an assumption, restored immediately after.
 python3 - "src/bin/byebyted" <<'PY'
-import importlib.util, os, sys, tempfile
+import atexit, importlib.util, os, shutil, sys, tempfile
 from importlib.machinery import SourceFileLoader
 
 daemon_path = sys.argv[1] if len(sys.argv) > 1 else "src/bin/byebyted"
@@ -1852,6 +1852,7 @@ loader.exec_module(mod)
 
 real_path = os.environ.get("PATH", "")
 empty_dir = tempfile.mkdtemp(prefix="byebyte-smoke-emptypath-")
+atexit.register(shutil.rmtree, empty_dir, ignore_errors=True)
 try:
     os.environ["PATH"] = empty_dir
 
