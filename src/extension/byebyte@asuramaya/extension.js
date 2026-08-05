@@ -144,8 +144,8 @@ const UPDATE_CHECK_SECONDS = 6 * 3600;
 const ByeByteToggle = GObject.registerClass(
 class ByeByteToggle extends QuickMenuToggle {
     _init(cancellable) {
-        super._init({title: 'ByeByte', iconName: ICON, toggleMode: false});
-        this.menu.setHeader(ICON, 'ByeByte', 'bytes at rest');
+        super._init({title: 'byebyte', iconName: ICON, toggleMode: false});
+        this.menu.setHeader(ICON, 'byebyte', 'bytes at rest');
         this._cancellable = cancellable;
 
         // alert banner — hidden until a mount is warn/hot/edquot
@@ -303,7 +303,7 @@ class ByeByteToggle extends QuickMenuToggle {
         this._renderSystemControls(st.pill ?? null);
 
         const heroSub = hero ? this.subtitle : 'bytes at rest';
-        this.menu.setHeader(ICON, 'ByeByte', heroSub);
+        this.menu.setHeader(ICON, 'byebyte', heroSub);
         this._update.setVersion(st.daemon?.version);
     }
 
@@ -337,7 +337,7 @@ class ByeByteToggle extends QuickMenuToggle {
             ['reserve', mountpoint, String(pct), '--yes', '--json'], this._cancellable,
             doc => {
                 if (!doc || doc.error) {
-                    Pill.notify('ByeByte', doc?.error || 'reserve failed — daemon unreachable');
+                    Pill.notify('byebyte', doc?.error || 'reserve failed — daemon unreachable');
                     return;
                 }
                 if (doc.ok) {
@@ -345,13 +345,13 @@ class ByeByteToggle extends QuickMenuToggle {
                     const sign = (delta ?? 0) >= 0 ? '+' : '-';
                     const deltaText = delta != null
                         ? `${sign}${Pill.fmtBytes(Math.abs(delta))}` : '?';
-                    Pill.notify('ByeByte', `${mountpoint}: ${doc.prior_percent}% → ` +
+                    Pill.notify('byebyte', `${mountpoint}: ${doc.prior_percent}% → ` +
                         `${doc.new_percent}% reserved (${deltaText} free)`);
                 } else {
                     // tune2fs ran but statvfs proved nothing moved — the
                     // daemon's own honest failure case (reserve()'s "ok"
                     // computation), not something we infer client-side.
-                    Pill.notify('ByeByte',
+                    Pill.notify('byebyte',
                         `${mountpoint}: reserve to ${doc.new_percent}% did not take effect`);
                 }
                 // no forced extra status.json refresh — the chip highlight
@@ -402,12 +402,12 @@ class ByeByteToggle extends QuickMenuToggle {
     _onJournalCapClick(size) {
         runByebyteJson(['journal-cap', size, '--yes', '--json'], this._cancellable, doc => {
             if (!doc || doc.error) {
-                Pill.notify('ByeByte', doc?.error || 'journal-cap failed — daemon unreachable');
+                Pill.notify('byebyte', doc?.error || 'journal-cap failed — daemon unreachable');
                 return;
             }
             const freed = Pill.num(doc.freed_bytes);
             const tail = freed ? `, freed ${Pill.fmtBytes(Math.max(freed, 0))}` : '';
-            Pill.notify('ByeByte',
+            Pill.notify('byebyte',
                 `journal cap: ${doc.prior_cap ?? 'uncapped'} → ${doc.new_cap}${tail}`);
             // no forced refresh — same reasoning as reserve, the digest
             // catches up on the next routine poll
@@ -438,11 +438,11 @@ class ByeByteToggle extends QuickMenuToggle {
         runByebyteJson(['fstrim-schedule', state ? 'on' : 'off', '--yes', '--json'],
             this._cancellable, doc => {
                 if (!doc || doc.error) {
-                    Pill.notify('ByeByte', doc?.error || 'fstrim-schedule failed — daemon unreachable');
+                    Pill.notify('byebyte', doc?.error || 'fstrim-schedule failed — daemon unreachable');
                     this.refresh();   // switch reverts to the real state
                     return;
                 }
-                Pill.notify('ByeByte',
+                Pill.notify('byebyte',
                     `fstrim schedule ${doc.new_enabled ? 'enabled' : 'disabled'} (confirmed live)`);
             });
     }
@@ -502,7 +502,7 @@ class ByeByteToggle extends QuickMenuToggle {
     _onTmpSizeClick(size) {
         runByebyteJson(['tmp-size', size, '--yes', '--json'], this._cancellable, doc => {
             if (!doc || doc.error) {
-                Pill.notify('ByeByte', doc?.error || 'tmp-size failed — daemon unreachable');
+                Pill.notify('byebyte', doc?.error || 'tmp-size failed — daemon unreachable');
                 return;
             }
             // PENDING: the write succeeded, but /tmp is never remounted by
@@ -510,7 +510,7 @@ class ByeByteToggle extends QuickMenuToggle {
             // changed, only that the new cap was set (ruling 3b31bc10)
             const live = Pill.num(doc.live_total_bytes);
             const liveText = live != null ? `, still ${Pill.fmtBytes(live)} now` : '';
-            Pill.notify('ByeByte',
+            Pill.notify('byebyte',
                 `/tmp cap: ${doc.prior_cap ?? 'default'} → ${doc.new_cap} ` +
                 `(after reboot${liveText})`);
             // no forced refresh — same reasoning as reserve/journal-cap
@@ -666,7 +666,7 @@ class ByeByteToggle extends QuickMenuToggle {
                     summary = `Reclaimed ${Pill.fmtBytes(freedBytes)} of ${total} ` +
                         `path${plural} (${notes.join(', ')})`;
                 }
-                Pill.notify('ByeByte', summary);
+                Pill.notify('byebyte', summary);
                 // refresh against reality: whatever's left now that some
                 // paths are gone (this is a harmless no-op if the mount
                 // itself vanished in the meantime)

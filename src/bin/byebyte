@@ -577,7 +577,7 @@ def notify_owner(uid, summary, body):
         subprocess.run(
             ["runuser", "-u", name, "--",
              "env", f"DBUS_SESSION_BUS_ADDRESS=unix:path={bus}",
-             "notify-send", "-a", "ByeByte", "-u", "normal", summary, body],
+             "notify-send", "-a", "byebyte", "-u", "normal", summary, body],
             capture_output=True, timeout=5, check=False)
     except (OSError, subprocess.SubprocessError):
         pass
