@@ -210,6 +210,18 @@ class ByeByteToggle extends QuickMenuToggle {
         this.menu.addMenuItem(this._reclaimSection);
         this._reclaimItems = new Map();   // mountpoint -> {item, built, rows, footerItem, commitItem}
 
+        // Read-only observation rows for the two knobs that moved to
+        // Settings but have no OTHER row reporting their effective state
+        // (Alfred's test, msg 4447: "a control may leave the popup only if
+        // the popup retains an independent observation of that
+        // subsystem's effective state"). reserved%/tmp-size pass without
+        // this — their numbers already live on a mount's own row. journal
+        // cap and fstrim schedule have no mount to piggyback on and no
+        // other trace anywhere in the card, so each gets one compact line
+        // here instead. Not a fold, not interactive — just the fact.
+        this._systemSection = new PopupMenu.PopupMenuSection();
+        this.menu.addMenuItem(this._systemSection);
+
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
         // "byebyte Settings…" — every "set once, forget" knob (reserved%
         // per mount, journal cap, fstrim schedule, tmp size) lives in
@@ -239,6 +251,7 @@ class ByeByteToggle extends QuickMenuToggle {
             this._mountSection.removeAll();
             this._moreMountsItem.visible = false;
             this._moreMountsItem.menu.removeAll();
+            this._systemSection.removeAll();
             const it = new PopupMenu.PopupMenuItem(
                 stale ? 'byebyted stopped updating' : 'byebyted not running',
                 {reactive: false});
@@ -337,6 +350,8 @@ class ByeByteToggle extends QuickMenuToggle {
             }
         }
 
+        this._renderSystemObservations(pill);
+
         const heroSub = hero ? this.subtitle : 'bytes at rest';
         this.menu.setHeader(ICON, 'byebyte', heroSub);
         this._update.setVersion(st.daemon?.version);
@@ -371,6 +386,45 @@ class ByeByteToggle extends QuickMenuToggle {
             `<span foreground="${DIM}"> of ${Pill.fmtBytes(m.total)} · ` +
             `${Pill.esc(fmtBurn(m.burn_bps))} · full ${fmtEta(m.eta_seconds)}</span>` +
             quota + snap + reserved + pendingCap);
+        return it;
+    }
+
+    // ---- system observations: journal cap / fstrim schedule -----------------
+    // The two knobs that failed Alfred's test (msg 4447) on first honest
+    // check — neither reserved% nor tmp-size needed this (their numbers
+    // already ride a mount's own row), but journal cap and fstrim schedule
+    // have no mount to piggyback on and left zero trace in the popup once
+    // their SEGMENT/TOGGLE moved to Settings. One compact read-only line
+    // each, not a fold — the fact stays, only the control to change it
+    // moved.
+    _renderSystemObservations(pill) {
+        this._systemSection.removeAll();
+        this._systemSection.addMenuItem(this._buildJournalCapObservation(pill?.journal_cap));
+        this._systemSection.addMenuItem(this._buildFstrimObservation(pill?.fstrim_schedule));
+    }
+
+    _buildJournalCapObservation(journalCap) {
+        const it = new PopupMenu.PopupMenuItem('', {reactive: false});
+        const usage = Pill.num(journalCap?.usage_bytes);
+        const cap = journalCap?.current_cap ?? null;
+        const usageText = usage != null ? Pill.fmtBytes(usage) : '?';
+        const capText = cap ? `of ${Pill.esc(cap)} cap` : 'uncapped';
+        it.label.clutter_text.set_markup(
+            `<span foreground="${DIM}">journal: ${usageText} ${capText}</span>`);
+        return it;
+    }
+
+    _buildFstrimObservation(fstrimSchedule) {
+        const it = new PopupMenu.PopupMenuItem('', {reactive: false});
+        const enabled = fstrimSchedule?.enabled ?? null;
+        let text;
+        if (enabled === null)
+            text = 'fstrim: fstrim.timer not found on this system';
+        else if (enabled)
+            text = `fstrim: weekly TRIM on${fstrimSchedule?.next_run ? `, next ${Pill.esc(fstrimSchedule.next_run)}` : ''}`;
+        else
+            text = 'fstrim: weekly TRIM off';
+        it.label.clutter_text.set_markup(`<span foreground="${DIM}">${text}</span>`);
         return it;
     }
 
