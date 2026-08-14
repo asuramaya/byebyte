@@ -115,6 +115,19 @@ function fmtEta(s) {
 // severity order for picking the tile's hero mount
 const RANK = {ok: 0, warn: 1, hot: 2, edquot: 3};
 
+// A mount earns a standing row in the default view when it's the root
+// filesystem (the one everyone thinks of first) or already in trouble.
+// Everything else — /boot, /boot/efi, a waydroid image mount, an idle
+// /dev/shm — folds under "N more mounts ▸": still fully reachable, just
+// not making the pill read like a `mount` dump every time it opens
+// (operator design review, 2026-08-14: "shrink it by 70%, more like
+// phanspeed/kast"). A folded mount promotes into the default list, with
+// its own Reclaim ▸, the moment it stops being healthy — the fold is a
+// "nothing to see right now" claim, not a wall.
+function isSignificantMount(m) {
+    return m.mountpoint === '/' || (RANK[m.state] ?? 0) >= 1;
+}
+
 // V2.M2: when snapshots pin a big enough slice of a btrfs mount, the free-
 // space number alone is misleading — the walk can't see that data, but it's
 // real and only a snapshot deletion (M4 policy territory) frees it. 20% of
@@ -152,29 +165,44 @@ class ByeByteToggle extends QuickMenuToggle {
         this._alertSection = new PopupMenu.PopupMenuSection();
         this.menu.addMenuItem(this._alertSection);
 
-        // one row per mount, rebuilt on refresh (mounts come and go)
+        // one row per SIGNIFICANT mount (root, or already in trouble),
+        // rebuilt on refresh (mounts come and go). Everything else lives
+        // in _moreMountsItem, folded by default.
         this._mountSection = new PopupMenu.PopupMenuSection();
         this.menu.addMenuItem(this._mountSection);
 
+        // "N more mounts ▸" — the fold for mounts nobody needs to see by
+        // default (see isSignificantMount). Same row shape as the default
+        // list, minus Reclaim (a folded mount essentially never has
+        // anything worth declaring — it's system-owned, not user files;
+        // `byebyte why <mount>` stays the CLI escape hatch for the rare
+        // case it does). Single persistent item, hidden when nothing folds.
+        this._moreMountsItem = new PopupMenu.PopupSubMenuMenuItem('more mounts ▸');
+        this._moreMountsItem.visible = false;
+        this.menu.addMenuItem(this._moreMountsItem);
+
         // Reclaim ▸ pick-lists — ONE persistent PopupSubMenuMenuItem per
-        // mountpoint, never blanket-removeAll()'d on a routine refresh the
-        // way _mountSection above is. refresh() fires every poll_interval
-        // (~30s) via Pill.StatusWatcher regardless of user action; a user
-        // who's ticked boxes here and paused to think must not have them
-        // silently destroyed by the next automatic tick. _apply() diffs
-        // this map against the live mount list instead of rebuilding it.
+        // SIGNIFICANT mountpoint, never blanket-removeAll()'d on a routine
+        // refresh the way _mountSection above is. refresh() fires every
+        // poll_interval (~30s) via Pill.StatusWatcher regardless of user
+        // action; a user who's ticked boxes here and paused to think must
+        // not have them silently destroyed by the next automatic tick.
+        // _apply() diffs this map against the significant-mount list
+        // instead of rebuilding it.
         this._reclaimSection = new PopupMenu.PopupMenuSection();
         this.menu.addMenuItem(this._reclaimSection);
         this._reclaimItems = new Map();   // mountpoint -> {item, built, rows, footerItem, commitItem}
 
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
-        // layer-3 system controls (msg 3502 via Alfred): journal-cap and
-        // tmp-size's SEGMENT strips, fstrim-schedule's TOGGLE. System-wide,
-        // not per-mount — one section, rebuilt every refresh like reserve's
-        // strip (single-tap-immediate, nothing here holds in-progress user
-        // state the way Reclaim's ticked selections do).
-        this._systemSection = new PopupMenu.PopupMenuSection();
-        this.menu.addMenuItem(this._systemSection);
+        // Advanced ▸ — every "set once, forget" knob in one place: reserved
+        // blocks per mount (Part 4's SEGMENT, no longer inline under each
+        // mount row) plus the three layer-3 system controls (msg 3502 via
+        // Alfred). None of these change on their own and none earn a
+        // standing row every time the pill opens — phanspeed's own
+        // "Advanced ›" is the reference shape (operator design review,
+        // 2026-08-14). Rebuilt every refresh; only the place moved.
+        this._advancedItem = new PopupMenu.PopupSubMenuMenuItem('Advanced ▸');
+        this.menu.addMenuItem(this._advancedItem);
 
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
         this._update = new Pill.UpdateSurface('byebyte', {cancellable});
@@ -193,7 +221,9 @@ class ByeByteToggle extends QuickMenuToggle {
             this.checked = false;
             this._alertSection.removeAll();
             this._mountSection.removeAll();
-            this._systemSection.removeAll();
+            this._moreMountsItem.visible = false;
+            this._moreMountsItem.menu.removeAll();
+            this._advancedItem.menu.removeAll();
             const it = new PopupMenu.PopupMenuItem(
                 stale ? 'byebyted stopped updating' : 'byebyted not running',
                 {reactive: false});
@@ -250,49 +280,40 @@ class ByeByteToggle extends QuickMenuToggle {
             this._alertSection.addMenuItem(it);
         }
 
-        // per-mount rows: mountpoint, effective free, burn, deadline
-        this._mountSection.removeAll();
-        for (const m of mounts) {
-            const it = new PopupMenu.PopupMenuItem('', {reactive: false});
-            const color = STATE_COLOR[m.state] ?? DIM;
-            const quota = m.quota
-                ? `  <span foreground="${DIM}">[q ${Pill.fmtBytes(m.quota.remaining)}]</span>`
-                : '';
-            const btrfs = btrfsNote(m);
-            const snap = btrfs
-                ? `  <span foreground="${DIM}">[snap pin ${Pill.fmtBytes(btrfs.pinned)}]</span>`
-                : '';
-            it.label.clutter_text.set_markup(
-                `<span foreground="${color}" font_weight="bold">●</span> ` +
-                `${Pill.esc(m.mountpoint)}  ` +
-                `<span foreground="${ACCENT}">${Pill.fmtBytes(m.effective_free)}</span>` +
-                `<span foreground="${DIM}"> of ${Pill.fmtBytes(m.total)} · ` +
-                `${Pill.esc(fmtBurn(m.burn_bps))} · full ${fmtEta(m.eta_seconds)}</span>` +
-                quota + snap);
-            this._mountSection.addMenuItem(it);
+        // per-mount rows: root and anything in trouble show by default;
+        // everything else folds under "N more mounts ▸" (isSignificantMount)
+        const significant = mounts.filter(isSignificantMount);
+        const folded = mounts.filter(m => !isSignificantMount(m));
 
-            // reserved-blocks SEGMENT (Part 4) — only for mounts the daemon
-            // could actually read a reserved_percent for (ext2/3/4 + tune2fs
-            // readable); absent/null means "not applicable", not "0%" — no
-            // disabled placeholder, just nothing, same principle as the
-            // quota/btrfs badges above being absent when not relevant.
-            if (m.reserved_percent != null)
-                this._mountSection.addMenuItem(this._buildReserveStrip(m));
+        this._mountSection.removeAll();
+        for (const m of significant)
+            this._mountSection.addMenuItem(this._buildMountRow(m));
+
+        this._moreMountsItem.menu.removeAll();
+        if (folded.length === 0) {
+            this._moreMountsItem.visible = false;
+        } else {
+            this._moreMountsItem.visible = true;
+            this._moreMountsItem.label.text =
+                `${folded.length} more mount${folded.length === 1 ? '' : 's'} ▸`;
+            for (const m of folded)
+                this._moreMountsItem.menu.addMenuItem(this._buildMountRow(m));
         }
 
-        // Reclaim ▸ pick-lists: diff against the live mount list instead of
-        // rebuilding — see the _init() note by _reclaimSection. A mount
-        // present in both keeps its existing submenu (ticks and all)
-        // completely untouched; only appearing/disappearing mounts change
-        // anything here.
-        const mountpoints = new Set(mounts.map(m => m.mountpoint));
+        // Reclaim ▸ pick-lists: only for SIGNIFICANT mounts — a folded mount
+        // promotes here the moment it stops being healthy. Diffed against
+        // the live significant-mount list instead of rebuilding — see the
+        // _init() note by _reclaimSection. A mount present in both keeps
+        // its existing submenu (ticks and all) completely untouched; only
+        // appearing/disappearing mounts change anything here.
+        const reclaimMountpoints = new Set(significant.map(m => m.mountpoint));
         for (const [mp, rec] of this._reclaimItems) {
-            if (!mountpoints.has(mp)) {
+            if (!reclaimMountpoints.has(mp)) {
                 rec.item.destroy();
                 this._reclaimItems.delete(mp);
             }
         }
-        for (const m of mounts) {
+        for (const m of significant) {
             if (!this._reclaimItems.has(m.mountpoint)) {
                 const rec = this._createReclaimItem(m.mountpoint);
                 this._reclaimSection.addMenuItem(rec.item);
@@ -300,11 +321,67 @@ class ByeByteToggle extends QuickMenuToggle {
             }
         }
 
-        this._renderSystemControls(st.pill ?? null);
+        this._renderAdvanced(mounts, st.pill ?? null);
 
         const heroSub = hero ? this.subtitle : 'bytes at rest';
         this.menu.setHeader(ICON, 'byebyte', heroSub);
         this._update.setVersion(st.daemon?.version);
+    }
+
+    // Shared row shape for both the default list and the "N more mounts ▸"
+    // fold — mountpoint, effective free, burn, deadline. No reserve strip
+    // inline any more (Part 4's original shape) — reserved% moved into
+    // Advanced ▸ with the rest of the "set once" knobs.
+    _buildMountRow(m) {
+        const it = new PopupMenu.PopupMenuItem('', {reactive: false});
+        const color = STATE_COLOR[m.state] ?? DIM;
+        const quota = m.quota
+            ? `  <span foreground="${DIM}">[q ${Pill.fmtBytes(m.quota.remaining)}]</span>`
+            : '';
+        const btrfs = btrfsNote(m);
+        const snap = btrfs
+            ? `  <span foreground="${DIM}">[snap pin ${Pill.fmtBytes(btrfs.pinned)}]</span>`
+            : '';
+        it.label.clutter_text.set_markup(
+            `<span foreground="${color}" font_weight="bold">●</span> ` +
+            `${Pill.esc(m.mountpoint)}  ` +
+            `<span foreground="${ACCENT}">${Pill.fmtBytes(m.effective_free)}</span>` +
+            `<span foreground="${DIM}"> of ${Pill.fmtBytes(m.total)} · ` +
+            `${Pill.esc(fmtBurn(m.burn_bps))} · full ${fmtEta(m.eta_seconds)}</span>` +
+            quota + snap);
+        return it;
+    }
+
+    // ---- Advanced ▸: every "set once, forget" knob in one place ------------
+    // reserved% per mount (Part 4's SEGMENT, grouped here instead of inline
+    // under each mount row) plus the three layer-3 system controls (msg
+    // 3502 via Alfred). Rebuilt every refresh — none of this holds
+    // in-progress user state the way Reclaim's ticked selections do, same
+    // reasoning the old flat _systemSection used.
+    _renderAdvanced(mounts, pill) {
+        const menu = this._advancedItem.menu;
+        menu.removeAll();
+
+        // reserved-blocks SEGMENT — only for mounts the daemon could
+        // actually read a reserved_percent for (ext2/3/4 + tune2fs
+        // readable); absent/null means "not applicable", not "0%", same
+        // principle the old inline placement used. Every such mount, not
+        // just the significant ones — Advanced is the complete view.
+        const reserveMounts = mounts.filter(m => m.reserved_percent != null);
+        for (const m of reserveMounts)
+            menu.addMenuItem(this._buildReserveStrip(m));
+        if (reserveMounts.length > 0)
+            menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+
+        if (!pill) {
+            menu.addMenuItem(new PopupMenu.PopupMenuItem(
+                'daemon status unavailable', {reactive: false}));
+            return;
+        }
+        menu.addMenuItem(this._buildJournalCapRow(pill.journal_cap));
+        menu.addMenuItem(this._buildFstrimScheduleRow(pill.fstrim_schedule));
+        for (const row of this._buildTmpSizeRows(pill.tmp_size))
+            menu.addMenuItem(row);
     }
 
     // ---- Part 4: reserve's SEGMENT strip -----------------------------------
@@ -317,7 +394,11 @@ class ByeByteToggle extends QuickMenuToggle {
         const current = Math.round(m.reserved_percent);
         const box = new PopupMenu.PopupBaseMenuItem({reactive: false, can_focus: false});
         const layout = new St.BoxLayout({x_expand: true});
-        const lab = new St.Label({text: 'reserved', style: `color:${DIM}; padding-right:8px;`});
+        // mountpoint-labeled now that this strip lives in Advanced ▸ rather
+        // than directly under its own mount's row — "reserved" alone would
+        // be ambiguous once several strips sit next to each other.
+        const lab = new St.Label({
+            text: `reserved (${mountpoint})`, style: `color:${DIM}; padding-right:8px;`});
         lab.y_align = 2;   // Clutter.ActorAlign.CENTER
         layout.add_child(lab);
         for (const pct of RESERVE_PRESETS) {
@@ -369,16 +450,8 @@ class ByeByteToggle extends QuickMenuToggle {
     // tmp_size} from the digest (byebyted's build_pill_summary) rather
     // than making its own socket/subprocess call just to know what to
     // highlight — same reasoning as the reserve strip's reserved_percent.
-
-    _renderSystemControls(pill) {
-        this._systemSection.removeAll();
-        if (!pill)
-            return;
-        this._systemSection.addMenuItem(this._buildJournalCapRow(pill.journal_cap));
-        this._systemSection.addMenuItem(this._buildFstrimScheduleRow(pill.fstrim_schedule));
-        for (const row of this._buildTmpSizeRows(pill.tmp_size))
-            this._systemSection.addMenuItem(row);
-    }
+    // Rendered inside _renderAdvanced above; the builders below stay
+    // standalone functions since nothing else about them changed.
 
     _buildJournalCapRow(journalCap) {
         const current = journalCap?.current_cap ?? null;
