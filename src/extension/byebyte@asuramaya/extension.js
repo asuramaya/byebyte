@@ -389,18 +389,24 @@ class ByeByteToggle extends QuickMenuToggle {
         return it;
     }
 
-    // ---- system observations: journal cap / fstrim schedule -----------------
-    // The two knobs that failed Alfred's test (msg 4447) on first honest
-    // check — neither reserved% nor tmp-size needed this (their numbers
-    // already ride a mount's own row), but journal cap and fstrim schedule
-    // have no mount to piggyback on and left zero trace in the popup once
-    // their SEGMENT/TOGGLE moved to Settings. One compact read-only line
-    // each, not a fold — the fact stays, only the control to change it
-    // moved.
+    // ---- system observations: journal cap -----------------------------------
+    // Alfred's rule refined (msg 4454, after I tested "does it feed a
+    // number the popup shows" and he tested "can configured diverge from
+    // effective"): a control may leave without a witness row ONLY IF its
+    // state can't diverge from what the system is actually doing. fstrim
+    // does NOT get a row here even though it failed my first, cruder test
+    // -- byebyted's build_pill_summary reads fstrim_schedule.enabled via a
+    // live `systemctl is-enabled` call every poll tick, never a stored
+    // intent, so configured == effective by construction and there is
+    // nothing for a row to witness. journal cap DOES get one: usage_bytes
+    // is a real, separate filesystem read, and journal_cap()'s own
+    // response says why it can diverge --vacuum-size only prunes archived
+    // files, so usage can exceed the new cap until the active segment
+    // rotates on its own. That's a real, if short-lived, PENDING-shaped
+    // gap with a genuine witness needed.
     _renderSystemObservations(pill) {
         this._systemSection.removeAll();
         this._systemSection.addMenuItem(this._buildJournalCapObservation(pill?.journal_cap));
-        this._systemSection.addMenuItem(this._buildFstrimObservation(pill?.fstrim_schedule));
     }
 
     _buildJournalCapObservation(journalCap) {
@@ -411,20 +417,6 @@ class ByeByteToggle extends QuickMenuToggle {
         const capText = cap ? `of ${Pill.esc(cap)} cap` : 'uncapped';
         it.label.clutter_text.set_markup(
             `<span foreground="${DIM}">journal: ${usageText} ${capText}</span>`);
-        return it;
-    }
-
-    _buildFstrimObservation(fstrimSchedule) {
-        const it = new PopupMenu.PopupMenuItem('', {reactive: false});
-        const enabled = fstrimSchedule?.enabled ?? null;
-        let text;
-        if (enabled === null)
-            text = 'fstrim: fstrim.timer not found on this system';
-        else if (enabled)
-            text = `fstrim: weekly TRIM on${fstrimSchedule?.next_run ? `, next ${Pill.esc(fstrimSchedule.next_run)}` : ''}`;
-        else
-            text = 'fstrim: weekly TRIM off';
-        it.label.clutter_text.set_markup(`<span foreground="${DIM}">${text}</span>`);
         return it;
     }
 
