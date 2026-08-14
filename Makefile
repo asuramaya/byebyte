@@ -23,10 +23,12 @@ check-shell:
 	shellcheck -e SC1090,SC1091 install.sh uninstall.sh tests/smoke.sh tests/test_signing.sh
 
 check-js:
-	@mjs=$$(mktemp --suffix=.mjs); \
-	cp 'src/extension/byebyte@asuramaya/extension.js' "$$mjs"; \
-	node --check "$$mjs"; \
-	rm -f "$$mjs"
+	@for f in extension.js prefs.js; do \
+	    mjs=$$(mktemp --suffix=.mjs); \
+	    cp "src/extension/byebyte@asuramaya/$$f" "$$mjs"; \
+	    node --check "$$mjs" || exit 1; \
+	    rm -f "$$mjs"; \
+	done
 	python3 -c "import json; json.load(open('src/extension/byebyte@asuramaya/metadata.json'))"
 
 # -t -k, not just -Tutf8 -ww: the bare form exits 0 while silently skipping
@@ -149,6 +151,7 @@ deb:
 	install -m 0644 packaging/release-signing/allowed_signers $(DEBROOT)/usr/share/byebyte/allowed_signers
 	install -m 0755 packaging/scripts/seed-owner-uid.py $(DEBROOT)/usr/share/byebyte/scripts/
 	install -m 0644 src/extension/byebyte@asuramaya/extension.js src/extension/byebyte@asuramaya/pill.js \
+	    src/extension/byebyte@asuramaya/prefs.js \
 	    src/extension/byebyte@asuramaya/metadata.json $(DEBROOT)/usr/share/byebyte/extension/byebyte@asuramaya/
 	install -m 0644 src/data/man/man1/byebyte.1 $(DEBROOT)/usr/share/man/man1/byebyte.1
 	install -m 0644 src/data/man/man8/byebyted.8 $(DEBROOT)/usr/share/man/man8/byebyted.8

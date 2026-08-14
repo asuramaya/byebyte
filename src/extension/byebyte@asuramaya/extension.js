@@ -8,7 +8,6 @@
 import GObject from 'gi://GObject';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
-import St from 'gi://St';
 
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {QuickMenuToggle} from 'resource:///org/gnome/shell/ui/quickSettings.js';
@@ -25,22 +24,14 @@ const ICON = 'drive-harddisk-symbolic';
 const STATE_COLOR = {ok: PALETTE.GOOD, warn: PALETTE.WARN, hot: PALETTE.BAD, edquot: PALETTE.BAD};
 const STATE_MARK = {ok: '', warn: '⚠ ', hot: '‼ ', edquot: '✗ '};
 
-// reserved-blocks SEGMENT presets (Part 4) — percent values offered as chips
-const RESERVE_PRESETS = [1, 5, 10, 20];
-
-// layer-3 SEGMENT presets (msg 3502 via Alfred). journal-cap: common
-// journald.conf SystemMaxUse= values. tmp-size: same order of magnitude as
-// ramstein's own SWAP_SIZE_PRESETS (same class of resource, tmpfs sizing
-// vs swap-file sizing) — own judgment call, not copied from any spec.
-const JOURNAL_CAP_PRESETS = ['100M', '500M', '1G', '2G'];
-const TMP_SIZE_PRESETS = ['2G', '4G', '8G', '16G'];
-
 // Parses a byebyte size string (digits + optional K/M/G/T, byebyted's own
 // _SIZE_RE) into bytes, 1024-based — the same convention systemd's own
 // tmpfs Options=size= and journald's SystemMaxUse= both use. Needed only
 // to compare tmp-size's CONFIGURED cap against its EFFECTIVE live total
-// (decision 3b31bc10) — reserve's percent chips never needed this, they
-// compare against a plain integer already.
+// (decision 3b31bc10) for the PENDING badge on /tmp's own row — the SEGMENT
+// chips that used to live here moved to Settings (prefs.js) along with
+// reserved%/journal-cap/fstrim-schedule (msg 4427 via Alfred: the popup
+// stays observation, the window is where you go looking to configure).
 function bytesFromSizeStr(s) {
     const m = typeof s === 'string' ? /^(\d+)([KMGT]?)$/.exec(s) : null;
     if (!m)
@@ -49,28 +40,29 @@ function bytesFromSizeStr(s) {
     return parseInt(m[1], 10) * mult;
 }
 
-// CSS text-overflow: ellipsis cuts the TAIL and keeps the HEAD -- backwards
-// for filesystem paths, which disambiguate at the END and can share a long
-// prefix: /var/lib/waydroid/rootfs and /var/lib/waydroid/rootfs/vendor both
-// collapse to "reserved (/v..." under a naive ellipsis, two rows that read
-// identical but control different mounts (found reviewing the Advanced ▸
-// mock, msg 4419/4423 via Alfred -- a live defect in already-pushed code,
-// not just a mock artifact). Computes the shortest trailing path segment
-// that's unique among the mounts being labeled together, so the label
-// itself is unambiguous rather than trusting CSS to cut somewhere sane.
-function distinguishingMountLabel(mountpoint, allMountpoints, maxChars = 18) {
-    if (mountpoint.length <= maxChars)
-        return mountpoint;
-    const segments = mountpoint.split('/').filter(Boolean);
-    let suffix = '';
-    for (let i = segments.length - 1; i >= 0; i--) {
-        suffix = `/${segments[i]}${suffix}`;
-        const unique = !allMountpoints.some(
-            other => other !== mountpoint && other.endsWith(suffix));
-        if (unique)
-            break;
-    }
-    return suffix ? `…${suffix}` : mountpoint;
+// PENDING (decision 3b31bc10, the fourth affordance beside SEGMENT/TOGGLE/
+// BOUNDED-WAIT): tmp-size's write is instant but /tmp is never remounted by
+// the verb, so CONFIGURED and EFFECTIVE can genuinely diverge. This fact
+// stays on /tmp's own mount row even though the tmp-size KNOB moved to
+// Settings — "the popup shows every fact about what the system is doing
+// right now, including 'you asked for something it hasn't done yet'"
+// (Alfred, msg 4427). Never renders a single value that would read as
+// "done" when it isn't; converges back to nothing shown, on its own, once
+// a reboot/remount actually lands — no code has to be told that happened.
+function tmpPendingBadge(pill) {
+    const tmpSize = pill?.tmp_size;
+    const configured = tmpSize?.configured_cap ?? null;
+    const liveBytes = Pill.num(tmpSize?.live_total_bytes);
+    const configuredBytes = bytesFromSizeStr(configured);
+    // configuredBytes is null both when nothing's configured AND when the
+    // vendor unit's own default is a percentage bytesFromSizeStr can't
+    // parse — either way there's no proof of divergence, so no badge
+    // (same reasoning the old inline chip strip used).
+    const pending = configuredBytes != null && liveBytes != null &&
+        configuredBytes !== liveBytes;
+    if (!pending)
+        return '';
+    return `  <span foreground="${DIM}">[cap ${Pill.esc(configured)} @reboot]</span>`;
 }
 
 // ---- byebyte CLI subprocess: query+response (as opposed to Pill.sendCmd's
@@ -180,10 +172,11 @@ const UPDATE_CHECK_SECONDS = 6 * 3600;
 
 const ByeByteToggle = GObject.registerClass(
 class ByeByteToggle extends QuickMenuToggle {
-    _init(cancellable) {
+    _init(cancellable, onPrefs) {
         super._init({title: 'byebyte', iconName: ICON, toggleMode: false});
         this.menu.setHeader(ICON, 'byebyte', 'bytes at rest');
         this._cancellable = cancellable;
+        this._onPrefs = onPrefs;
 
         // alert banner — hidden until a mount is warn/hot/edquot
         this._alertSection = new PopupMenu.PopupMenuSection();
@@ -218,15 +211,14 @@ class ByeByteToggle extends QuickMenuToggle {
         this._reclaimItems = new Map();   // mountpoint -> {item, built, rows, footerItem, commitItem}
 
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
-        // Advanced ▸ — every "set once, forget" knob in one place: reserved
-        // blocks per mount (Part 4's SEGMENT, no longer inline under each
-        // mount row) plus the three layer-3 system controls (msg 3502 via
-        // Alfred). None of these change on their own and none earn a
-        // standing row every time the pill opens — phanspeed's own
-        // "Advanced ›" is the reference shape (operator design review,
-        // 2026-08-14). Rebuilt every refresh; only the place moved.
-        this._advancedItem = new PopupMenu.PopupSubMenuMenuItem('Advanced ▸');
-        this.menu.addMenuItem(this._advancedItem);
+        // "byebyte Settings…" — every "set once, forget" knob (reserved%
+        // per mount, journal cap, fstrim schedule, tmp size) lives in
+        // GNOME's own extension-preferences window (prefs.js), not the
+        // popup. Kast's own shape (msg 4419/4427 via Alfred): the popup is
+        // pure observation, the window is where you go looking to
+        // configure. The one exception is tmp-size's PENDING divergence,
+        // which stays on /tmp's own row below — see tmpPendingBadge.
+        this.menu.addAction('byebyte Settings…', () => this._onPrefs?.());
 
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
         this._update = new Pill.UpdateSurface('byebyte', {cancellable});
@@ -247,7 +239,6 @@ class ByeByteToggle extends QuickMenuToggle {
             this._mountSection.removeAll();
             this._moreMountsItem.visible = false;
             this._moreMountsItem.menu.removeAll();
-            this._advancedItem.menu.removeAll();
             const it = new PopupMenu.PopupMenuItem(
                 stale ? 'byebyted stopped updating' : 'byebyted not running',
                 {reactive: false});
@@ -306,12 +297,13 @@ class ByeByteToggle extends QuickMenuToggle {
 
         // per-mount rows: root and anything in trouble show by default;
         // everything else folds under "N more mounts ▸" (isSignificantMount)
+        const pill = st.pill ?? null;
         const significant = mounts.filter(isSignificantMount);
         const folded = mounts.filter(m => !isSignificantMount(m));
 
         this._mountSection.removeAll();
         for (const m of significant)
-            this._mountSection.addMenuItem(this._buildMountRow(m));
+            this._mountSection.addMenuItem(this._buildMountRow(m, pill));
 
         this._moreMountsItem.menu.removeAll();
         if (folded.length === 0) {
@@ -321,7 +313,7 @@ class ByeByteToggle extends QuickMenuToggle {
             this._moreMountsItem.label.text =
                 `${folded.length} more mount${folded.length === 1 ? '' : 's'} ▸`;
             for (const m of folded)
-                this._moreMountsItem.menu.addMenuItem(this._buildMountRow(m));
+                this._moreMountsItem.menu.addMenuItem(this._buildMountRow(m, pill));
         }
 
         // Reclaim ▸ pick-lists: only for SIGNIFICANT mounts — a folded mount
@@ -345,18 +337,20 @@ class ByeByteToggle extends QuickMenuToggle {
             }
         }
 
-        this._renderAdvanced(mounts, st.pill ?? null);
-
         const heroSub = hero ? this.subtitle : 'bytes at rest';
         this.menu.setHeader(ICON, 'byebyte', heroSub);
         this._update.setVersion(st.daemon?.version);
     }
 
     // Shared row shape for both the default list and the "N more mounts ▸"
-    // fold — mountpoint, effective free, burn, deadline. No reserve strip
-    // inline any more (Part 4's original shape) — reserved% moved into
-    // Advanced ▸ with the rest of the "set once" knobs.
-    _buildMountRow(m) {
+    // fold — mountpoint, effective free, burn, deadline, plus two READ-ONLY
+    // badges for facts that used to be interactive SEGMENT strips here:
+    // reserved% (load-bearing for what "free" even means on this mount —
+    // Alfred's corollary, msg 4427) and, on /tmp specifically, the PENDING
+    // divergence between its configured cap and live size. The KNOBS to
+    // change either now live in Settings (prefs.js); these badges are the
+    // observation half that stays.
+    _buildMountRow(m, pill) {
         const it = new PopupMenu.PopupMenuItem('', {reactive: false});
         const color = STATE_COLOR[m.state] ?? DIM;
         const quota = m.quota
@@ -366,257 +360,18 @@ class ByeByteToggle extends QuickMenuToggle {
         const snap = btrfs
             ? `  <span foreground="${DIM}">[snap pin ${Pill.fmtBytes(btrfs.pinned)}]</span>`
             : '';
+        const reserved = m.reserved_percent != null
+            ? `  <span foreground="${DIM}">[reserved ${Math.round(m.reserved_percent)}%]</span>`
+            : '';
+        const pendingCap = m.mountpoint === '/tmp' ? tmpPendingBadge(pill) : '';
         it.label.clutter_text.set_markup(
             `<span foreground="${color}" font_weight="bold">●</span> ` +
             `${Pill.esc(m.mountpoint)}  ` +
             `<span foreground="${ACCENT}">${Pill.fmtBytes(m.effective_free)}</span>` +
             `<span foreground="${DIM}"> of ${Pill.fmtBytes(m.total)} · ` +
             `${Pill.esc(fmtBurn(m.burn_bps))} · full ${fmtEta(m.eta_seconds)}</span>` +
-            quota + snap);
+            quota + snap + reserved + pendingCap);
         return it;
-    }
-
-    // ---- Advanced ▸: every "set once, forget" knob in one place ------------
-    // reserved% per mount (Part 4's SEGMENT, grouped here instead of inline
-    // under each mount row) plus the three layer-3 system controls (msg
-    // 3502 via Alfred). Rebuilt every refresh — none of this holds
-    // in-progress user state the way Reclaim's ticked selections do, same
-    // reasoning the old flat _systemSection used.
-    _renderAdvanced(mounts, pill) {
-        const menu = this._advancedItem.menu;
-        menu.removeAll();
-
-        // reserved-blocks SEGMENT — only for mounts the daemon could
-        // actually read a reserved_percent for (ext2/3/4 + tune2fs
-        // readable); absent/null means "not applicable", not "0%", same
-        // principle the old inline placement used. Every such mount, not
-        // just the significant ones — Advanced is the complete view.
-        const reserveMounts = mounts.filter(m => m.reserved_percent != null);
-        const reserveMountpoints = reserveMounts.map(m => m.mountpoint);
-        for (const m of reserveMounts)
-            menu.addMenuItem(this._buildReserveStrip(m, reserveMountpoints));
-        if (reserveMounts.length > 0)
-            menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
-
-        if (!pill) {
-            menu.addMenuItem(new PopupMenu.PopupMenuItem(
-                'daemon status unavailable', {reactive: false}));
-            return;
-        }
-        menu.addMenuItem(this._buildJournalCapRow(pill.journal_cap));
-        menu.addMenuItem(this._buildFstrimScheduleRow(pill.fstrim_schedule));
-        for (const row of this._buildTmpSizeRows(pill.tmp_size))
-            menu.addMenuItem(row);
-    }
-
-    // ---- Part 4: reserve's SEGMENT strip -----------------------------------
-
-    _buildReserveStrip(m, allMountpoints) {
-        const mountpoint = m.mountpoint;
-        // reserved_percent can be a float (5.03) from the block-count-
-        // truncation math the daemon documents — round for the highlight
-        // comparison, don't require exact float equality.
-        const current = Math.round(m.reserved_percent);
-        const box = new PopupMenu.PopupBaseMenuItem({reactive: false, can_focus: false});
-        const layout = new St.BoxLayout({x_expand: true});
-        // mountpoint-labeled now that this strip lives in Advanced ▸ rather
-        // than directly under its own mount's row — "reserved" alone would
-        // be ambiguous once several strips sit next to each other. The
-        // label itself is pre-shortened from the correct end (see
-        // distinguishingMountLabel) rather than left to CSS ellipsis, which
-        // cuts the tail and would make two waydroid mounts read identical.
-        const label = distinguishingMountLabel(mountpoint, allMountpoints);
-        const lab = new St.Label({
-            text: `reserved (${label})`, style: `color:${DIM}; padding-right:8px;`});
-        lab.y_align = 2;   // Clutter.ActorAlign.CENTER
-        layout.add_child(lab);
-        for (const pct of RESERVE_PRESETS) {
-            const btn = new St.Button({
-                label: `${pct}%`, x_expand: true, can_focus: true,
-                style: pct === current ? Pill.CHIP_ON : Pill.CHIP,
-            });
-            btn.connect('clicked', () => this._onReserveClick(mountpoint, pct));
-            layout.add_child(btn);
-        }
-        box.add_child(layout);
-        return box;
-    }
-
-    _onReserveClick(mountpoint, pct) {
-        runByebyteJson(
-            ['reserve', mountpoint, String(pct), '--yes', '--json'], this._cancellable,
-            doc => {
-                if (!doc || doc.error) {
-                    Pill.notify('byebyte', doc?.error || 'reserve failed — daemon unreachable');
-                    return;
-                }
-                if (doc.ok) {
-                    const delta = doc.avail_delta_bytes;
-                    const sign = (delta ?? 0) >= 0 ? '+' : '-';
-                    const deltaText = delta != null
-                        ? `${sign}${Pill.fmtBytes(Math.abs(delta))}` : '?';
-                    Pill.notify('byebyte', `${mountpoint}: ${doc.prior_percent}% → ` +
-                        `${doc.new_percent}% reserved (${deltaText} free)`);
-                } else {
-                    // tune2fs ran but statvfs proved nothing moved — the
-                    // daemon's own honest failure case (reserve()'s "ok"
-                    // computation), not something we infer client-side.
-                    Pill.notify('byebyte',
-                        `${mountpoint}: reserve to ${doc.new_percent}% did not take effect`);
-                }
-                // no forced extra status.json refresh — the chip highlight
-                // catches up on the next routine poll, which is correct:
-                // the toast already reported the daemon's own verified
-                // result, this is just the card's own measurement lagging
-                // a little, honestly.
-            });
-    }
-
-    // ---- layer-3 system controls: journal-cap/tmp-size (SEGMENT) and
-    // fstrim-schedule (TOGGLE) — msg 3502 via Alfred. System-wide, not
-    // per-mount, so one build per refresh rather than one per mount like
-    // the reserve strip above. Reads pill.{journal_cap,fstrim_schedule,
-    // tmp_size} from the digest (byebyted's build_pill_summary) rather
-    // than making its own socket/subprocess call just to know what to
-    // highlight — same reasoning as the reserve strip's reserved_percent.
-    // Rendered inside _renderAdvanced above; the builders below stay
-    // standalone functions since nothing else about them changed.
-
-    _buildJournalCapRow(journalCap) {
-        const current = journalCap?.current_cap ?? null;
-        const box = new PopupMenu.PopupBaseMenuItem({reactive: false, can_focus: false});
-        const layout = new St.BoxLayout({x_expand: true});
-        const lab = new St.Label({text: 'journal cap', style: `color:${DIM}; padding-right:8px;`});
-        lab.y_align = 2;   // Clutter.ActorAlign.CENTER
-        layout.add_child(lab);
-        for (const size of JOURNAL_CAP_PRESETS) {
-            const btn = new St.Button({
-                label: size, x_expand: true, can_focus: true,
-                style: size === current ? Pill.CHIP_ON : Pill.CHIP,
-            });
-            btn.connect('clicked', () => this._onJournalCapClick(size));
-            layout.add_child(btn);
-        }
-        box.add_child(layout);
-        return box;
-    }
-
-    _onJournalCapClick(size) {
-        runByebyteJson(['journal-cap', size, '--yes', '--json'], this._cancellable, doc => {
-            if (!doc || doc.error) {
-                Pill.notify('byebyte', doc?.error || 'journal-cap failed — daemon unreachable');
-                return;
-            }
-            const freed = Pill.num(doc.freed_bytes);
-            const tail = freed ? `, freed ${Pill.fmtBytes(Math.max(freed, 0))}` : '';
-            Pill.notify('byebyte',
-                `journal cap: ${doc.prior_cap ?? 'uncapped'} → ${doc.new_cap}${tail}`);
-            // no forced refresh — same reasoning as reserve, the digest
-            // catches up on the next routine poll
-        });
-    }
-
-    // TOGGLE: PopupMenu.PopupSwitchMenuItem, GNOME's own stock widget —
-    // ramstein's own shape for oomd/zram (msg 3502 cites it as the family
-    // reference), no bespoke widget needed. `enabled === null` means
-    // fstrim.timer doesn't exist on this system (byebyted's own
-    // _systemctl_is_enabled convention) — an absent unit gets the same
-    // actionable-text-instead-of-a-dead-switch treatment ramstein's zram
-    // row uses for a missing systemd-zram-generator.
-    _buildFstrimScheduleRow(fstrimSchedule) {
-        const enabled = fstrimSchedule?.enabled ?? null;
-        if (enabled === null) {
-            const it = new PopupMenu.PopupMenuItem('', {reactive: false});
-            it.label.clutter_text.set_markup(
-                `<span foreground="${DIM}">fstrim schedule: fstrim.timer not found on this system</span>`);
-            return it;
-        }
-        const it = new PopupMenu.PopupSwitchMenuItem('fstrim schedule (weekly TRIM)', enabled);
-        it.connect('toggled', (_item, state) => this._onFstrimToggle(state));
-        return it;
-    }
-
-    _onFstrimToggle(state) {
-        runByebyteJson(['fstrim-schedule', state ? 'on' : 'off', '--yes', '--json'],
-            this._cancellable, doc => {
-                if (!doc || doc.error) {
-                    Pill.notify('byebyte', doc?.error || 'fstrim-schedule failed — daemon unreachable');
-                    this.refresh();   // switch reverts to the real state
-                    return;
-                }
-                Pill.notify('byebyte',
-                    `fstrim schedule ${doc.new_enabled ? 'enabled' : 'disabled'} (confirmed live)`);
-            });
-    }
-
-    // PENDING (decision 3b31bc10, the fourth affordance beside SEGMENT/
-    // TOGGLE/BOUNDED-WAIT): tmp-size's write is instant but /tmp is never
-    // remounted by the verb, so CONFIGURED (the drop-in byebyte last wrote,
-    // or the vendor unit's own size= if byebyte has never touched it) and
-    // EFFECTIVE (live_total_bytes, a real statvfs("/tmp") read) can
-    // genuinely diverge. The UI contract is binding: render BOTH, visibly
-    // distinct, whenever they differ — never collapse to a single value
-    // that would read as "done" when it isn't. When a reboot/manual
-    // remount lands, configuredBytes and liveBytes converge on their own
-    // and this collapses back to one line, with nothing here having to be
-    // told that happened.
-    _buildTmpSizeRows(tmpSize) {
-        const configured = tmpSize?.configured_cap ?? null;
-        const liveBytes = Pill.num(tmpSize?.live_total_bytes);
-        const configuredBytes = bytesFromSizeStr(configured);
-        // configuredBytes is null both when nothing's configured AND when
-        // the vendor unit's own default is a percentage (e.g. "50%" — this
-        // family's own tmp.mount fixture, and Ubuntu/Debian's real stock
-        // default) that bytesFromSizeStr can't parse. Either way there is
-        // no proof of divergence to show — a false "pending" would be
-        // exactly the drift class this affordance exists to prevent, just
-        // inverted (claiming a change is in flight when none was ever
-        // requested). Only claim pending when both sides are comparable
-        // numbers and they actually differ.
-        const pending = configuredBytes != null && liveBytes != null &&
-            configuredBytes !== liveBytes;
-
-        const status = new PopupMenu.PopupMenuItem('', {reactive: false});
-        const nowText = liveBytes != null ? Pill.fmtBytes(liveBytes) : '?';
-        status.label.clutter_text.set_markup(pending
-            ? `<span foreground="${DIM}">/tmp: </span>${Pill.esc(nowText)}` +
-              `<span foreground="${DIM}"> now — </span>${Pill.esc(configured)}` +
-              `<span foreground="${DIM}"> after reboot</span>`
-            : `<span foreground="${DIM}">/tmp: </span>${Pill.esc(nowText)}`);
-
-        const box = new PopupMenu.PopupBaseMenuItem({reactive: false, can_focus: false});
-        const layout = new St.BoxLayout({x_expand: true});
-        const lab = new St.Label({text: 'tmp size', style: `color:${DIM}; padding-right:8px;`});
-        lab.y_align = 2;
-        layout.add_child(lab);
-        for (const size of TMP_SIZE_PRESETS) {
-            const btn = new St.Button({
-                label: size, x_expand: true, can_focus: true,
-                style: size === configured ? Pill.CHIP_ON : Pill.CHIP,
-            });
-            btn.connect('clicked', () => this._onTmpSizeClick(size));
-            layout.add_child(btn);
-        }
-        box.add_child(layout);
-        return [status, box];
-    }
-
-    _onTmpSizeClick(size) {
-        runByebyteJson(['tmp-size', size, '--yes', '--json'], this._cancellable, doc => {
-            if (!doc || doc.error) {
-                Pill.notify('byebyte', doc?.error || 'tmp-size failed — daemon unreachable');
-                return;
-            }
-            // PENDING: the write succeeded, but /tmp is never remounted by
-            // this verb — the toast must never claim the effective size
-            // changed, only that the new cap was set (ruling 3b31bc10)
-            const live = Pill.num(doc.live_total_bytes);
-            const liveText = live != null ? `, still ${Pill.fmtBytes(live)} now` : '';
-            Pill.notify('byebyte',
-                `/tmp cap: ${doc.prior_cap ?? 'default'} → ${doc.new_cap} ` +
-                `(after reboot${liveText})`);
-            // no forced refresh — same reasoning as reserve/journal-cap
-        });
     }
 
     // ---- Part 3: declare's Reclaim ▸ pick-list ------------------------------
@@ -797,7 +552,7 @@ class ByeByteToggle extends QuickMenuToggle {
 export default class ByeByteExtension extends Extension {
     enable() {
         this._cancellable = new Gio.Cancellable();
-        this._toggle = new ByeByteToggle(this._cancellable);
+        this._toggle = new ByeByteToggle(this._cancellable, () => this.openPreferences());
         this._indicator = Pill.addQuickSettingsToggle(this._toggle);
         this._toggle.refresh();
         this._toggle.checkForUpdate();
