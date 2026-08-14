@@ -49,6 +49,30 @@ function bytesFromSizeStr(s) {
     return parseInt(m[1], 10) * mult;
 }
 
+// CSS text-overflow: ellipsis cuts the TAIL and keeps the HEAD -- backwards
+// for filesystem paths, which disambiguate at the END and can share a long
+// prefix: /var/lib/waydroid/rootfs and /var/lib/waydroid/rootfs/vendor both
+// collapse to "reserved (/v..." under a naive ellipsis, two rows that read
+// identical but control different mounts (found reviewing the Advanced ▸
+// mock, msg 4419/4423 via Alfred -- a live defect in already-pushed code,
+// not just a mock artifact). Computes the shortest trailing path segment
+// that's unique among the mounts being labeled together, so the label
+// itself is unambiguous rather than trusting CSS to cut somewhere sane.
+function distinguishingMountLabel(mountpoint, allMountpoints, maxChars = 18) {
+    if (mountpoint.length <= maxChars)
+        return mountpoint;
+    const segments = mountpoint.split('/').filter(Boolean);
+    let suffix = '';
+    for (let i = segments.length - 1; i >= 0; i--) {
+        suffix = `/${segments[i]}${suffix}`;
+        const unique = !allMountpoints.some(
+            other => other !== mountpoint && other.endsWith(suffix));
+        if (unique)
+            break;
+    }
+    return suffix ? `…${suffix}` : mountpoint;
+}
+
 // ---- byebyte CLI subprocess: query+response (as opposed to Pill.sendCmd's
 // fire-and-forget socket write) — the established family pattern for verbs
 // whose result the pill actually waits on and renders (kast's readKastJson).
@@ -368,8 +392,9 @@ class ByeByteToggle extends QuickMenuToggle {
         // principle the old inline placement used. Every such mount, not
         // just the significant ones — Advanced is the complete view.
         const reserveMounts = mounts.filter(m => m.reserved_percent != null);
+        const reserveMountpoints = reserveMounts.map(m => m.mountpoint);
         for (const m of reserveMounts)
-            menu.addMenuItem(this._buildReserveStrip(m));
+            menu.addMenuItem(this._buildReserveStrip(m, reserveMountpoints));
         if (reserveMounts.length > 0)
             menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
@@ -386,7 +411,7 @@ class ByeByteToggle extends QuickMenuToggle {
 
     // ---- Part 4: reserve's SEGMENT strip -----------------------------------
 
-    _buildReserveStrip(m) {
+    _buildReserveStrip(m, allMountpoints) {
         const mountpoint = m.mountpoint;
         // reserved_percent can be a float (5.03) from the block-count-
         // truncation math the daemon documents — round for the highlight
@@ -396,9 +421,13 @@ class ByeByteToggle extends QuickMenuToggle {
         const layout = new St.BoxLayout({x_expand: true});
         // mountpoint-labeled now that this strip lives in Advanced ▸ rather
         // than directly under its own mount's row — "reserved" alone would
-        // be ambiguous once several strips sit next to each other.
+        // be ambiguous once several strips sit next to each other. The
+        // label itself is pre-shortened from the correct end (see
+        // distinguishingMountLabel) rather than left to CSS ellipsis, which
+        // cuts the tail and would make two waydroid mounts read identical.
+        const label = distinguishingMountLabel(mountpoint, allMountpoints);
         const lab = new St.Label({
-            text: `reserved (${mountpoint})`, style: `color:${DIM}; padding-right:8px;`});
+            text: `reserved (${label})`, style: `color:${DIM}; padding-right:8px;`});
         lab.y_align = 2;   // Clutter.ActorAlign.CENTER
         layout.add_child(lab);
         for (const pct of RESERVE_PRESETS) {
