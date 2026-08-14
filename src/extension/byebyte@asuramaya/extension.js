@@ -409,11 +409,29 @@ class ByeByteToggle extends QuickMenuToggle {
         this._systemSection.addMenuItem(this._buildJournalCapObservation(pill?.journal_cap));
     }
 
+    // The full PENDING form (Alfred, msg 4465): configured, effective, AND
+    // the event that clears the gap, not just the divergence -- the same
+    // shape tmp-size's own badge already names ("after reboot"), applied
+    // here now that there's a real computable divergence to name it for.
+    // Deliberately qualitative, not a timestamp: the daemon has no
+    // rotation-ETA data (checked byebyted directly -- journal_cap()'s own
+    // note documents the MECHANISM, never a "when"), and inventing a time
+    // the data doesn't have is exactly the trap Till named on his own
+    // oomd row. "Clears when the active segment rotates" is true
+    // regardless of timing; a fabricated ETA would not be.
     _buildJournalCapObservation(journalCap) {
         const it = new PopupMenu.PopupMenuItem('', {reactive: false});
         const usage = Pill.num(journalCap?.usage_bytes);
         const cap = journalCap?.current_cap ?? null;
+        const capBytes = bytesFromSizeStr(cap);
         const usageText = usage != null ? Pill.fmtBytes(usage) : '?';
+        if (usage != null && capBytes != null && usage > capBytes) {
+            it.label.clutter_text.set_markup(
+                `<span foreground="${DIM}">journal: </span>${Pill.esc(usageText)}` +
+                `<span foreground="${DIM}"> over ${Pill.esc(cap)} cap — clears when the ` +
+                `active segment rotates</span>`);
+            return it;
+        }
         const capText = cap ? `of ${Pill.esc(cap)} cap` : 'uncapped';
         it.label.clutter_text.set_markup(
             `<span foreground="${DIM}">journal: ${usageText} ${capText}</span>`);
