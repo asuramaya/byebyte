@@ -190,25 +190,34 @@ class ByeByteToggle extends QuickMenuToggle {
 
         // "N more mounts ▸" — the fold for mounts nobody needs to see by
         // default (see isSignificantMount). Same row shape as the default
-        // list, minus Reclaim (a folded mount essentially never has
-        // anything worth declaring — it's system-owned, not user files;
-        // `byebyte why <mount>` stays the CLI escape hatch for the rare
-        // case it does). Single persistent item, hidden when nothing folds.
+        // list, PLUS its own Reclaim ▸ per folded mount — a fold may hide a
+        // mount, it must never hide the one lever that fixes it (Alfred,
+        // msg 4508). Two sub-sections inside, same split as the top level:
+        // _moreMountsRowsSection is cheap display rows, rebuilt every poll;
+        // _moreMountsReclaimSection holds the persistent Reclaim items,
+        // diffed like _reclaimSection below rather than rebuilt. Single
+        // persistent outer item, hidden when nothing folds.
         this._moreMountsItem = new PopupMenu.PopupSubMenuMenuItem('more mounts ▸');
         this._moreMountsItem.visible = false;
+        this._moreMountsRowsSection = new PopupMenu.PopupMenuSection();
+        this._moreMountsItem.menu.addMenuItem(this._moreMountsRowsSection);
+        this._moreMountsReclaimSection = new PopupMenu.PopupMenuSection();
+        this._moreMountsItem.menu.addMenuItem(this._moreMountsReclaimSection);
         this.menu.addMenuItem(this._moreMountsItem);
 
         // Reclaim ▸ pick-lists — ONE persistent PopupSubMenuMenuItem per
-        // SIGNIFICANT mountpoint, never blanket-removeAll()'d on a routine
-        // refresh the way _mountSection above is. refresh() fires every
-        // poll_interval (~30s) via Pill.StatusWatcher regardless of user
-        // action; a user who's ticked boxes here and paused to think must
-        // not have them silently destroyed by the next automatic tick.
-        // _apply() diffs this map against the significant-mount list
-        // instead of rebuilding it.
+        // mountpoint (significant OR folded), never blanket-removeAll()'d on
+        // a routine refresh the way _mountSection above is. refresh() fires
+        // every poll_interval (~30s) via Pill.StatusWatcher regardless of
+        // user action; a user who's ticked boxes here and paused to think
+        // must not have them silently destroyed by the next automatic tick.
+        // _apply() diffs this map against the live mount list instead of
+        // rebuilding it — see the reclaimMountpoints/rec.section handling
+        // there for the one case (a mount crossing the significance
+        // boundary mid-selection) this can't preserve, and why.
         this._reclaimSection = new PopupMenu.PopupMenuSection();
         this.menu.addMenuItem(this._reclaimSection);
-        this._reclaimItems = new Map();   // mountpoint -> {item, built, rows, footerItem, commitItem}
+        this._reclaimItems = new Map();   // mountpoint -> {item, section, built, rows, footerItem, commitItem}
 
         // Read-only observation rows for the two knobs that moved to
         // Settings but have no OTHER row reporting their effective state
@@ -250,7 +259,10 @@ class ByeByteToggle extends QuickMenuToggle {
             this._alertSection.removeAll();
             this._mountSection.removeAll();
             this._moreMountsItem.visible = false;
-            this._moreMountsItem.menu.removeAll();
+            this._moreMountsRowsSection.removeAll();
+            this._moreMountsReclaimSection.removeAll();
+            this._reclaimSection.removeAll();
+            this._reclaimItems.clear();
             this._systemSection.removeAll();
             const it = new PopupMenu.PopupMenuItem(
                 stale ? 'byebyted stopped updating' : 'byebyted not running',
@@ -318,7 +330,7 @@ class ByeByteToggle extends QuickMenuToggle {
         for (const m of significant)
             this._mountSection.addMenuItem(this._buildMountRow(m, pill));
 
-        this._moreMountsItem.menu.removeAll();
+        this._moreMountsRowsSection.removeAll();
         if (folded.length === 0) {
             this._moreMountsItem.visible = false;
         } else {
@@ -326,18 +338,38 @@ class ByeByteToggle extends QuickMenuToggle {
             this._moreMountsItem.label.text =
                 `${folded.length} more mount${folded.length === 1 ? '' : 's'} ▸`;
             for (const m of folded)
-                this._moreMountsItem.menu.addMenuItem(this._buildMountRow(m, pill));
+                this._moreMountsRowsSection.addMenuItem(this._buildMountRow(m, pill));
         }
 
-        // Reclaim ▸ pick-lists: only for SIGNIFICANT mounts — a folded mount
-        // promotes here the moment it stops being healthy. Diffed against
-        // the live significant-mount list instead of rebuilding — see the
-        // _init() note by _reclaimSection. A mount present in both keeps
-        // its existing submenu (ticks and all) completely untouched; only
-        // appearing/disappearing mounts change anything here.
-        const reclaimMountpoints = new Set(significant.map(m => m.mountpoint));
+        // Reclaim ▸ pick-lists: every mount gets one now, significant or
+        // folded — a fold hides the mount, never the lever (Alfred, msg
+        // 4508). Diffed against the live mount list instead of rebuilding,
+        // same reasoning as before: a mount present with the same
+        // significance keeps its existing submenu (ticks and all)
+        // completely untouched.
+        //
+        // The one case this can't preserve: a mount CROSSING the
+        // significance boundary between polls, with a live selection on
+        // it. GNOME's PopupMenuBase has no supported way to move an
+        // existing item to a different parent menu without destroying it —
+        // removeAll() always calls destroy(), and there is no public
+        // removeMenuItem (verified against Shell's own popupMenu.js).
+        // Rather than reach into box/actor internals to fake a re-parent,
+        // this rebuilds fresh in the new location and the selection resets.
+        // That's an honest trade: the move itself is visible (Reclaim
+        // relocates between the flat list and "more mounts ▸"), unlike the
+        // original bug where the lever was silently absent altogether.
+        const significantMountpoints = new Set(significant.map(m => m.mountpoint));
+        const allMountpoints = new Set(mounts.map(m => m.mountpoint));
         for (const [mp, rec] of this._reclaimItems) {
-            if (!reclaimMountpoints.has(mp)) {
+            if (!allMountpoints.has(mp)) {
+                rec.item.destroy();
+                this._reclaimItems.delete(mp);
+            }
+        }
+        for (const [mp, rec] of this._reclaimItems) {
+            const wantSection = significantMountpoints.has(mp) ? 'sig' : 'fold';
+            if (rec.section !== wantSection) {
                 rec.item.destroy();
                 this._reclaimItems.delete(mp);
             }
@@ -345,7 +377,16 @@ class ByeByteToggle extends QuickMenuToggle {
         for (const m of significant) {
             if (!this._reclaimItems.has(m.mountpoint)) {
                 const rec = this._createReclaimItem(m.mountpoint);
+                rec.section = 'sig';
                 this._reclaimSection.addMenuItem(rec.item);
+                this._reclaimItems.set(m.mountpoint, rec);
+            }
+        }
+        for (const m of folded) {
+            if (!this._reclaimItems.has(m.mountpoint)) {
+                const rec = this._createReclaimItem(m.mountpoint);
+                rec.section = 'fold';
+                this._moreMountsReclaimSection.addMenuItem(rec.item);
                 this._reclaimItems.set(m.mountpoint, rec);
             }
         }
