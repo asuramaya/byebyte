@@ -451,9 +451,15 @@ class ByeByteToggle extends QuickMenuToggle {
         const snap = btrfs
             ? `  <span foreground="${DIM}">[snap pin ${Pill.fmtBytes(btrfs.pinned)}]</span>`
             : '';
+        // "not applicable" (no key at all — a non-ext mount) and "I don't
+        // know" (reserved_percent_unknown — an ext mount tune2fs couldn't
+        // read, e.g. missing on a trimmed image) must render differently
+        // (ruling 2c45d78e) — both used to collapse to the same blank badge.
         const reserved = m.reserved_percent != null
             ? `  <span foreground="${DIM}">[reserved ${Math.round(m.reserved_percent)}%]</span>`
-            : '';
+            : m.reserved_percent_unknown
+                ? `  <span foreground="${DIM}">[reserved: unknown]</span>`
+                : '';
         const pendingCap = m.mountpoint === '/tmp' ? tmpPendingBadge(pill) : '';
         it.label.clutter_text.set_markup(
             `<span foreground="${color}" font_weight="bold">●</span> ` +
@@ -474,10 +480,15 @@ class ByeByteToggle extends QuickMenuToggle {
         const menu = this._advancedItem.menu;
         menu.removeAll();
 
-        // reserved-blocks SEGMENT — only for mounts the daemon could
-        // actually read a reserved_percent for (ext2/3/4 + tune2fs
-        // readable); absent/null means "not applicable", not "0%".
-        const reserveMounts = mounts.filter(m => m.reserved_percent != null);
+        // reserved-blocks SEGMENT — for every mount reserved% APPLIES to
+        // (ext2/3/4), whether or not the daemon could currently read the
+        // value. A read failure (reserved_percent_unknown) still gets a
+        // strip — the concept applies here, we just don't know the current
+        // number this poll — never silently drops off Advanced the way an
+        // unreadable value used to collapse with "not applicable" (ruling
+        // 2c45d78e).
+        const reserveMounts = mounts.filter(
+            m => m.reserved_percent != null || m.reserved_percent_unknown);
         const reserveMountpoints = reserveMounts.map(m => m.mountpoint);
         for (const m of reserveMounts)
             menu.addMenuItem(this._buildReserveStrip(m, reserveMountpoints));
@@ -548,13 +559,18 @@ class ByeByteToggle extends QuickMenuToggle {
         const mountpoint = m.mountpoint;
         // reserved_percent can be a float (5.03) from the block-count-
         // truncation math the daemon documents — round for the highlight
-        // comparison, don't require exact float equality.
-        const current = Math.round(m.reserved_percent);
+        // comparison, don't require exact float equality. null here means
+        // "couldn't read it this poll" (reserved_percent_unknown), never
+        // "0%" — no preset gets highlighted as current, and the label says
+        // so explicitly rather than silently picking a chip.
+        const current = m.reserved_percent != null ? Math.round(m.reserved_percent) : null;
         const box = new PopupMenu.PopupBaseMenuItem({reactive: false, can_focus: false});
         const layout = new St.BoxLayout({x_expand: true});
         const label = distinguishingMountLabel(mountpoint, allMountpoints);
+        const labText = current != null
+            ? `reserved (${label})` : `reserved (${label}): unknown`;
         const lab = new St.Label({
-            text: `reserved (${label})`, style: `color:${DIM}; padding-right:8px;`});
+            text: labText, style: `color:${DIM}; padding-right:8px;`});
         lab.y_align = 2;   // Clutter.ActorAlign.CENTER
         layout.add_child(lab);
         for (const pct of RESERVE_PRESETS) {

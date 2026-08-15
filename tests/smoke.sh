@@ -1187,10 +1187,8 @@ assert avail_final == avail_before, \
 
 # poll_mount() must publish reserved_percent for an ext4 mount -- this is
 # the pill's own SEGMENT strip's data source (status.json, not a per-render
-# subprocess call), so a mount the daemon can't read tune2fs for must not
-# silently look identical to one that just isn't ext2/3/4 -- both the pill
-# and this assertion treat None/absent as "don't show the control", but the
-# fixture here IS readable, so the field must actually be populated.
+# subprocess call). The fixture here IS readable, so the field must
+# actually be populated with a real value, not left None.
 poll_cfg = dict(mod.DEFAULTS)
 poll_cfg.update({"exclude_mounts": [], "tmpfs_mounts": [], "include_fstypes": ["ext4"]})
 row = mod.poll_mount({"mountpoint": mnt, "fstype": "ext4", "device": dev},
@@ -1198,11 +1196,37 @@ row = mod.poll_mount({"mountpoint": mnt, "fstype": "ext4", "device": dev},
 assert row is not None, "poll_mount returned nothing for a live ext4 mount"
 assert row.get("reserved_percent") == mod._tune2fs_reserved_percent(dev), \
     f"poll_mount's reserved_percent disagrees with a fresh tune2fs read: {row}"
+assert "reserved_percent_unknown" not in row, \
+    f"a successful read must not also carry the unknown flag: {row}"
+
+# ruling 2c45d78e: a mount tune2fs genuinely can't be read for (binary
+# missing -- e2fsprogs isn't universally installed) must NOT render
+# identically to a mount reserved% simply doesn't apply to. Before this
+# fix both were a bare None with no other trace -- simulate the binary
+# vanishing and confirm the row now says "I don't know" instead of going
+# silent.
+import subprocess as _subprocess
+_real_run = _subprocess.run
+def _tune2fs_missing(cmd, *a, **kw):
+    if cmd and cmd[0] == "tune2fs":
+        raise FileNotFoundError("tune2fs: no such file")
+    return _real_run(cmd, *a, **kw)
+_subprocess.run = _tune2fs_missing
+try:
+    unknown_row = mod.poll_mount({"mountpoint": mnt, "fstype": "ext4", "device": dev},
+                                  {}, poll_cfg, poll_cfg["owner_uid"], __import__("time").time())
+finally:
+    _subprocess.run = _real_run
+assert unknown_row.get("reserved_percent") is None, \
+    f"a missing tune2fs must still report reserved_percent as unknown, not a stale value: {unknown_row}"
+assert unknown_row.get("reserved_percent_unknown") is True, \
+    f"a missing tune2fs must set reserved_percent_unknown -- 'no' and 'I don't know' must not collapse: {unknown_row}"
 
 print(f"reserve ok: {original}% -> 1% -> {original}%, statvfs avail moved and "
       f"restored byte-exact ({avail_after - avail_before}B), 0% refused by the "
       "compiled-in floor, ledgered with prior+new percent, poll_mount publishes "
-      f"reserved_percent ({row['reserved_percent']}%)")
+      f"reserved_percent ({row['reserved_percent']}%), and distinguishes "
+      "tune2fs-unreadable from not-applicable (reserved_percent_unknown)")
 PY
         cleanup_reserve
     else

@@ -555,7 +555,22 @@ def poll_mount(m, state, cfg, uid, now):
     if m["fstype"] == "btrfs":
         row["btrfs"] = btrfs_info(m["mountpoint"])
     if m["fstype"] in _RESERVE_FSTYPES:
-        row["reserved_percent"] = _tune2fs_reserved_percent(m["device"])
+        pct = _tune2fs_reserved_percent(m["device"])
+        row["reserved_percent"] = pct
+        # A genuinely non-ext mount never reaches this branch at all (its
+        # row has no reserved_percent key, ever -- the correct "not
+        # applicable"). Ruling 2c45d78e: a "no" and an "I don't know" must
+        # never render identically. Without this flag they did -- a read
+        # failure here (tune2fs missing; e2fsprogs isn't universally
+        # installed, and a trimmed/minimal image is a real byebyte target,
+        # not a theoretical one) produced the same bare None a non-ext
+        # filesystem produces, and the pill's own `!= null` check can't
+        # tell "undefined, never applicable" from "null, couldn't read"
+        # apart -- both silently dropped the mount's reserve row from
+        # Advanced entirely. This DOES apply here; we just couldn't read
+        # it this time.
+        if pct is None:
+            row["reserved_percent_unknown"] = True
     return row
 
 
