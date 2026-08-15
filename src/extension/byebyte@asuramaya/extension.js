@@ -27,9 +27,9 @@ const STATE_MARK = {ok: '', warn: '⚠ ', hot: '‼ ', edquot: '✗ '};
 
 // Variant A (operator ruling, "a for both ram and bye" — byebyte and
 // ramstein stay siblings, decision fdf6fa0d): every "set once, forget"
-// knob lives inline under Advanced ▸ rather than a separate GNOME
-// preferences window. Variant B (external prefs.js) is shelved, not
-// deleted — preserved whole on the variant-b-shelved branch.
+// knob lives inline in the popup rather than a separate GNOME preferences
+// window. Variant B (external prefs.js) is shelved, not deleted —
+// preserved whole on the variant-b-shelved branch.
 const RESERVE_PRESETS = [1, 5, 10, 20];
 const JOURNAL_CAP_PRESETS = ['100M', '500M', '1G', '2G'];
 const TMP_SIZE_PRESETS = ['2G', '4G', '8G', '16G'];
@@ -48,35 +48,10 @@ function bytesFromSizeStr(s) {
     return parseInt(m[1], 10) * mult;
 }
 
-// CSS text-overflow: ellipsis cuts the TAIL and keeps the HEAD -- backwards
-// for filesystem paths, which disambiguate at the END and can share a long
-// prefix: /var/lib/waydroid/rootfs and /var/lib/waydroid/rootfs/vendor both
-// collapse to "reserved (/v..." under a naive ellipsis, two rows that read
-// identical but control different mounts (found reviewing the Advanced ▸
-// mock, msg 4419/4423 via Alfred). Computes the shortest trailing path
-// segment that's unique among the mounts being labeled together, so the
-// label itself is unambiguous rather than trusting CSS to cut somewhere
-// sane. Correct under Variant A's fixed-width chip-strip layout (Alfred,
-// msg 4459) — Variant B's full-width ComboRow never needed it.
-function distinguishingMountLabel(mountpoint, allMountpoints, maxChars = 18) {
-    if (mountpoint.length <= maxChars)
-        return mountpoint;
-    const segments = mountpoint.split('/').filter(Boolean);
-    let suffix = '';
-    for (let i = segments.length - 1; i >= 0; i--) {
-        suffix = `/${segments[i]}${suffix}`;
-        const unique = !allMountpoints.some(
-            other => other !== mountpoint && other.endsWith(suffix));
-        if (unique)
-            break;
-    }
-    return suffix ? `…${suffix}` : mountpoint;
-}
-
 // configuredBytes is null both when nothing's configured AND when the
 // vendor unit's own default is a percentage bytesFromSizeStr can't parse —
 // either way there's no proof of divergence. Shared by /tmp's own mount-row
-// badge (below) and Advanced ▸'s fold-header caveat count, so the two never
+// badge (below) and Advanced ▸'s fold-header caveat, so the two never
 // disagree about whether tmp-size is pending.
 function isTmpSizePending(pill) {
     const tmpSize = pill?.tmp_size;
@@ -87,8 +62,8 @@ function isTmpSizePending(pill) {
 
 // journal-cap's own divergence check (--vacuum-size only prunes archived
 // files, so usage can exceed a fresh cap until the active segment rotates)
-// — shared by Advanced ▸'s caption row and its fold-header caveat count,
-// same reasoning as isTmpSizePending above.
+// — shared by Advanced ▸'s caption row and its fold-header caveat, same
+// reasoning as isTmpSizePending above.
 function isJournalCapPending(journalCap) {
     const usage = Pill.num(journalCap?.usage_bytes);
     const capBytes = bytesFromSizeStr(journalCap?.current_cap ?? null);
@@ -98,12 +73,12 @@ function isJournalCapPending(journalCap) {
 // PENDING (decision 3b31bc10, the fourth affordance beside SEGMENT/TOGGLE/
 // BOUNDED-WAIT): tmp-size's write is instant but /tmp is never remounted by
 // the verb, so CONFIGURED and EFFECTIVE can genuinely diverge. This fact
-// stays on /tmp's own mount row regardless of variant — "the popup shows
-// every fact about what the system is doing right now, including 'you
-// asked for something it hasn't done yet'" (Alfred, msg 4427). Never
-// renders a single value that would read as "done" when it isn't;
-// converges back to nothing shown, on its own, once a reboot/remount
-// actually lands — no code has to be told that happened.
+// stays on /tmp's own mount row — "the popup shows every fact about what
+// the system is doing right now, including 'you asked for something it
+// hasn't done yet'" (Alfred, msg 4427). Never renders a single value that
+// would read as "done" when it isn't; converges back to nothing shown, on
+// its own, once a reboot/remount actually lands — no code has to be told
+// that happened.
 function tmpPendingBadge(pill) {
     if (!isTmpSizePending(pill))
         return '';
@@ -226,53 +201,43 @@ class ByeByteToggle extends QuickMenuToggle {
         this._alertSection = new PopupMenu.PopupMenuSection();
         this.menu.addMenuItem(this._alertSection);
 
-        // one row per SIGNIFICANT mount (root, or already in trouble),
-        // rebuilt on refresh (mounts come and go). Everything else lives
-        // in _moreMountsItem, folded by default.
+        // ONE PopupSubMenuMenuItem per mount, SIGNIFICANT ones flat here,
+        // everything else inside "more mounts ▸" — diffed by mountpoint
+        // identity against the live list every refresh, NEVER blanket-
+        // rebuilt, so an open mount / ticked Reclaim selection / an open
+        // reserved% strip all survive a routine 30s poll.
+        //
+        // Redesign 2026-08-15 (operator ruling — "roll up the repetition,
+        // slaughter all is on the table"): this collapses what used to be
+        // THREE separate lists that each enumerated every mount name —
+        // plain observation rows, a flat "Reclaim on X ▸" list, Advanced's
+        // per-mount reserved% strips — into ONE. A mount's name now
+        // appears exactly once anywhere in the pill. Everything about that
+        // mount (reserved% if it's ext, tmp-size if it's /tmp, Reclaim)
+        // lives one click inside its own row, via _mountItems below.
         this._mountSection = new PopupMenu.PopupMenuSection();
         this.menu.addMenuItem(this._mountSection);
+        this._mountItems = new Map();   // mountpoint -> {item, section, mountpoint, controlsSection, reclaim}
+        this._offlinePlaceholder = null;
 
         // "N more mounts ▸" — the fold for mounts nobody needs to see by
-        // default (see isSignificantMount). Same row shape as the default
-        // list, PLUS its own Reclaim ▸ per folded mount — a fold may hide a
-        // mount, it must never hide the one lever that fixes it (Alfred,
-        // msg 4508). Two sub-sections inside, same split as the top level:
-        // _moreMountsRowsSection is cheap display rows, rebuilt every poll;
-        // _moreMountsReclaimSection holds the persistent Reclaim items,
-        // diffed like _reclaimSection below rather than rebuilt. Single
-        // persistent outer item, hidden when nothing folds.
+        // default (see isSignificantMount). Holds the same per-mount items
+        // directly now — no separate rebuilt row-list, no separate diffed
+        // Reclaim sub-section; a fold may hide a mount, it must never hide
+        // the capabilities that live inside it (Alfred, msg 4508).
         this._moreMountsItem = new PopupMenu.PopupSubMenuMenuItem('more mounts ▸');
         this._moreMountsItem.visible = false;
-        this._moreMountsRowsSection = new PopupMenu.PopupMenuSection();
-        this._moreMountsItem.menu.addMenuItem(this._moreMountsRowsSection);
-        this._moreMountsReclaimSection = new PopupMenu.PopupMenuSection();
-        this._moreMountsItem.menu.addMenuItem(this._moreMountsReclaimSection);
         this.menu.addMenuItem(this._moreMountsItem);
 
-        // Reclaim ▸ pick-lists — ONE persistent PopupSubMenuMenuItem per
-        // mountpoint (significant OR folded), never blanket-removeAll()'d on
-        // a routine refresh the way _mountSection above is. refresh() fires
-        // every poll_interval (~30s) via Pill.StatusWatcher regardless of
-        // user action; a user who's ticked boxes here and paused to think
-        // must not have them silently destroyed by the next automatic tick.
-        // _apply() diffs this map against the live mount list instead of
-        // rebuilding it — see the reclaimMountpoints/rec.section handling
-        // there for the one case (a mount crossing the significance
-        // boundary mid-selection) this can't preserve, and why.
-        this._reclaimSection = new PopupMenu.PopupMenuSection();
-        this.menu.addMenuItem(this._reclaimSection);
-        this._reclaimItems = new Map();   // mountpoint -> {item, section, built, rows, footerItem, commitItem}
-
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
-        // Advanced ▸ — every "set once, forget" knob in one place: reserved
-        // blocks per mount, journal cap, fstrim schedule, tmp size.
-        // Variant A (operator ruling fdf6fa0d): inline fold, matching
-        // ramstein's own Advanced ▸ shape, not a separate preferences
-        // window. Defaults CLOSED, and the fold's own LABEL carries a live
-        // caveat count (_updateAdvancedHeader) — collapsing the fold can't
-        // hide that journal-cap or tmp-size is currently pending, same
-        // rule ramstein's oomd/auto-calm caveats follow. Built once here;
-        // only its contents and label get rebuilt on refresh.
+        // Advanced ▸ — now ONLY the true system-wide singletons: journal
+        // cap, fstrim schedule. reserved% and tmp-size both moved into
+        // each mount's own row (they're about a specific mount, not the
+        // system) — Advanced dropped from ~7 rows to 2. Defaults CLOSED,
+        // and the fold's own LABEL still carries a live caveat (journal-
+        // cap's the only one left that can diverge with no other witness;
+        // reserved%/tmp-size both pass without one now, same as before —
+        // their numbers AND their controls live on the mount's own row).
         this._advancedItem = new PopupMenu.PopupSubMenuMenuItem('Advanced ▸');
         this.menu.addMenuItem(this._advancedItem);
 
@@ -292,18 +257,18 @@ class ByeByteToggle extends QuickMenuToggle {
             this.subtitle = stale ? 'status stale' : 'daemon offline';
             this.checked = false;
             this._alertSection.removeAll();
-            this._mountSection.removeAll();
+            for (const [, rec] of this._mountItems)
+                rec.item.destroy();
+            this._mountItems.clear();
             this._moreMountsItem.visible = false;
-            this._moreMountsRowsSection.removeAll();
-            this._moreMountsReclaimSection.removeAll();
-            this._reclaimSection.removeAll();
-            this._reclaimItems.clear();
             this._advancedItem.menu.removeAll();
             this._advancedItem.label.text = 'Advanced ▸';
-            const it = new PopupMenu.PopupMenuItem(
+            if (this._offlinePlaceholder)
+                this._offlinePlaceholder.destroy();
+            this._offlinePlaceholder = new PopupMenu.PopupMenuItem(
                 stale ? 'byebyted stopped updating' : 'byebyted not running',
                 {reactive: false});
-            this._mountSection.addMenuItem(it);
+            this._mountSection.addMenuItem(this._offlinePlaceholder);
             this._update.setVersion(null);
             return;
         }
@@ -312,6 +277,15 @@ class ByeByteToggle extends QuickMenuToggle {
 
     _apply(st) {
         const mounts = st.mounts.filter(Pill.isObj);
+        const pill = st.pill ?? null;
+
+        // the daemon is confirmed live again — drop the offline placeholder
+        // (a no-op if we were already online; _mountSection otherwise holds
+        // only real mount items, never blanket-rebuilt below)
+        if (this._offlinePlaceholder) {
+            this._offlinePlaceholder.destroy();
+            this._offlinePlaceholder = null;
+        }
 
         // tile: the worst mount is the hero; ties go to the biggest burn
         let hero = null;
@@ -356,93 +330,123 @@ class ByeByteToggle extends QuickMenuToggle {
             this._alertSection.addMenuItem(it);
         }
 
-        // per-mount rows: root and anything in trouble show by default;
-        // everything else folds under "N more mounts ▸" (isSignificantMount)
-        const pill = st.pill ?? null;
-        const significant = mounts.filter(isSignificantMount);
-        const folded = mounts.filter(m => !isSignificantMount(m));
-
-        this._mountSection.removeAll();
-        for (const m of significant)
-            this._mountSection.addMenuItem(this._buildMountRow(m, pill));
-
-        this._moreMountsRowsSection.removeAll();
-        if (folded.length === 0) {
-            this._moreMountsItem.visible = false;
-        } else {
-            this._moreMountsItem.visible = true;
-            this._moreMountsItem.label.text =
-                `${folded.length} more mount${folded.length === 1 ? '' : 's'} ▸`;
-            for (const m of folded)
-                this._moreMountsRowsSection.addMenuItem(this._buildMountRow(m, pill));
-        }
-
-        // Reclaim ▸ pick-lists: every mount gets one now, significant or
-        // folded — a fold hides the mount, never the lever (Alfred, msg
-        // 4508). Diffed against the live mount list instead of rebuilding,
-        // same reasoning as before: a mount present with the same
-        // significance keeps its existing submenu (ticks and all)
-        // completely untouched.
+        // per-mount items: root and anything in trouble show by default;
+        // everything else folds under "N more mounts ▸" (isSignificantMount).
+        // Diffed against the live mount list by mountpoint identity —
+        // a mount present with the same significance keeps its existing
+        // item (open/closed state, ticked Reclaim selections, all of it)
+        // completely untouched; only appearing/disappearing/crossing
+        // mounts change anything here.
         //
         // The one case this can't preserve: a mount CROSSING the
-        // significance boundary between polls, with a live selection on
-        // it. GNOME's PopupMenuBase has no supported way to move an
-        // existing item to a different parent menu without destroying it —
-        // removeAll() always calls destroy(), and there is no public
-        // removeMenuItem (verified against Shell's own popupMenu.js).
+        // significance boundary between polls. GNOME's PopupMenuBase has
+        // no supported way to move an existing item to a different parent
+        // menu without destroying it — removeAll() always calls destroy(),
+        // and there is no public removeMenuItem (verified against Shell's
+        // own popupMenu.js, decision from the earlier Reclaim-reach work).
         // Rather than reach into box/actor internals to fake a re-parent,
-        // this rebuilds fresh in the new location and the selection resets.
-        // That's an honest trade: the move itself is visible (Reclaim
-        // relocates between the flat list and "more mounts ▸"), unlike the
-        // original bug where the lever was silently absent altogether.
+        // this rebuilds fresh in the new location and EVERYTHING about
+        // that row resets — expanded state, reserved% chip focus, any
+        // ticked Reclaim selection, all of it, together, since it's all
+        // one object now. That's a bigger reset than the old design's
+        // (which only lost Reclaim's ticks), but still an honest trade:
+        // the move itself is visible, unlike the original bug where the
+        // lever was silently absent altogether.
+        const significant = mounts.filter(isSignificantMount);
+        const folded = mounts.filter(m => !isSignificantMount(m));
         const significantMountpoints = new Set(significant.map(m => m.mountpoint));
         const allMountpoints = new Set(mounts.map(m => m.mountpoint));
-        for (const [mp, rec] of this._reclaimItems) {
+
+        for (const [mp, rec] of this._mountItems) {
             if (!allMountpoints.has(mp)) {
                 rec.item.destroy();
-                this._reclaimItems.delete(mp);
+                this._mountItems.delete(mp);
             }
         }
-        for (const [mp, rec] of this._reclaimItems) {
+        for (const [mp, rec] of this._mountItems) {
             const wantSection = significantMountpoints.has(mp) ? 'sig' : 'fold';
             if (rec.section !== wantSection) {
                 rec.item.destroy();
-                this._reclaimItems.delete(mp);
+                this._mountItems.delete(mp);
             }
         }
-        for (const m of significant) {
-            if (!this._reclaimItems.has(m.mountpoint)) {
-                const rec = this._createReclaimItem(m.mountpoint);
-                rec.section = 'sig';
-                this._reclaimSection.addMenuItem(rec.item);
-                this._reclaimItems.set(m.mountpoint, rec);
+        for (const m of mounts) {
+            let rec = this._mountItems.get(m.mountpoint);
+            if (!rec) {
+                rec = this._createMountItem(m.mountpoint);
+                rec.section = significantMountpoints.has(m.mountpoint) ? 'sig' : 'fold';
+                (rec.section === 'sig' ? this._mountSection : this._moreMountsItem.menu)
+                    .addMenuItem(rec.item);
+                this._mountItems.set(m.mountpoint, rec);
             }
-        }
-        for (const m of folded) {
-            if (!this._reclaimItems.has(m.mountpoint)) {
-                const rec = this._createReclaimItem(m.mountpoint);
-                rec.section = 'fold';
-                this._moreMountsReclaimSection.addMenuItem(rec.item);
-                this._reclaimItems.set(m.mountpoint, rec);
-            }
+            this._updateMountItem(rec, m, pill);
         }
 
-        this._renderControls(mounts, pill);
+        this._moreMountsItem.visible = folded.length > 0;
+        if (folded.length > 0) {
+            this._moreMountsItem.label.text =
+                `${folded.length} more mount${folded.length === 1 ? '' : 's'} ▸`;
+        }
+
+        this._renderControls(pill);
 
         const heroSub = hero ? this.subtitle : 'bytes at rest';
         this.menu.setHeader(ICON, 'byebyte', heroSub);
         this._update.setVersion(st.daemon?.version);
     }
 
-    // Shared row shape for both the default list and the "N more mounts ▸"
-    // fold — mountpoint, effective free, burn, deadline, plus two READ-ONLY
-    // badges: reserved% (load-bearing for what "free" even means on this
-    // mount — Alfred's corollary, msg 4427) and, on /tmp specifically, the
-    // PENDING divergence between its configured cap and live size. The
-    // knobs that change either live in Advanced ▸; these badges are the
-    // always-visible observation half.
-    _buildMountRow(m, pill) {
-        const it = new PopupMenu.PopupMenuItem('', {reactive: false});
+    // Builds the persistent per-mount item ONCE: the collapsed row (a
+    // PopupSubMenuMenuItem's own label, updated in place every refresh —
+    // see _updateMountItem) expands to reveal a controlsSection (reserved%/
+    // tmp-size chips, cheap and stateless, safely rebuilt every refresh)
+    // and a persistent nested "Reclaim ▸" item, lazy-loaded on its own
+    // first expand exactly like the old top-level Reclaim items were —
+    // same mechanism, just nested one level deeper now.
+    _createMountItem(mountpoint) {
+        const item = new PopupMenu.PopupSubMenuMenuItem('');
+        const controlsSection = new PopupMenu.PopupMenuSection();
+        item.menu.addMenuItem(controlsSection);
+        const reclaimItem = new PopupMenu.PopupSubMenuMenuItem('Reclaim ▸');
+        item.menu.addMenuItem(reclaimItem);
+
+        const rec = {
+            item, section: null, mountpoint, controlsSection,
+            reclaim: {item: reclaimItem, built: false, rows: new Map(),
+                footerItem: null, commitItem: null},
+        };
+        reclaimItem.menu.connect('open-state-changed', (_menu, open) => {
+            if (open && !rec.reclaim.built) {
+                rec.reclaim.built = true;
+                this._populateReclaimList(mountpoint, rec.reclaim);
+            }
+        });
+        return rec;
+    }
+
+    // Runs every refresh regardless of whether the item is currently
+    // expanded — all cheap markup/chip-strip rebuilds, never touches the
+    // nested Reclaim item (that one only ever changes via its own lazy
+    // load or a user click, see _populateReclaimList).
+    _updateMountItem(rec, m, pill) {
+        rec.item.label.clutter_text.set_markup(this._mountRowMarkup(m, pill));
+
+        rec.controlsSection.removeAll();
+        if (m.reserved_percent != null || m.reserved_percent_unknown)
+            rec.controlsSection.addMenuItem(this._buildReserveStrip(m));
+        if (m.mountpoint === '/tmp') {
+            for (const row of this._buildTmpSizeRows(pill?.tmp_size))
+                rec.controlsSection.addMenuItem(row);
+        }
+    }
+
+    // The collapsed row's own markup — mountpoint, effective free, burn,
+    // deadline, plus two READ-ONLY badges: reserved% (load-bearing for
+    // what "free" even means on this mount — Alfred's corollary, msg 4427)
+    // and, on /tmp specifically, the PENDING divergence between its
+    // configured cap and live size. The KNOBS that change either now live
+    // one click inside this same row (see _updateMountItem); these badges
+    // are the always-visible observation half.
+    _mountRowMarkup(m, pill) {
         const color = STATE_COLOR[m.state] ?? DIM;
         const quota = m.quota
             ? `  <span foreground="${DIM}">[q ${Pill.fmtBytes(m.quota.remaining)}]</span>`
@@ -461,39 +465,22 @@ class ByeByteToggle extends QuickMenuToggle {
                 ? `  <span foreground="${DIM}">[reserved: unknown]</span>`
                 : '';
         const pendingCap = m.mountpoint === '/tmp' ? tmpPendingBadge(pill) : '';
-        it.label.clutter_text.set_markup(
-            `<span foreground="${color}" font_weight="bold">●</span> ` +
+        return `<span foreground="${color}" font_weight="bold">●</span> ` +
             `${Pill.esc(m.mountpoint)}  ` +
             `<span foreground="${ACCENT}">${Pill.fmtBytes(m.effective_free)}</span>` +
             `<span foreground="${DIM}"> of ${Pill.fmtBytes(m.total)} · ` +
             `${Pill.esc(fmtBurn(m.burn_bps))} · full ${fmtEta(m.eta_seconds)}</span>` +
-            quota + snap + reserved + pendingCap);
-        return it;
+            quota + snap + reserved + pendingCap;
     }
 
-    // ---- Advanced ▸: every "set once, forget" knob in one place ------------
-    // reserved% per mount, journal cap, fstrim schedule, tmp size. Rebuilt
-    // every refresh — none of this holds in-progress user state the way
-    // Reclaim's ticked selections do.
-    _renderControls(mounts, pill) {
+    // ---- Advanced ▸: the true system-wide singletons only ------------------
+    // journal cap, fstrim schedule. reserved%/tmp-size live on their own
+    // mount's row now (_updateMountItem above) — neither belongs here
+    // anymore, they're facts about ONE mount, not the system.
+    _renderControls(pill) {
         this._updateAdvancedHeader(pill);
         const menu = this._advancedItem.menu;
         menu.removeAll();
-
-        // reserved-blocks SEGMENT — for every mount reserved% APPLIES to
-        // (ext2/3/4), whether or not the daemon could currently read the
-        // value. A read failure (reserved_percent_unknown) still gets a
-        // strip — the concept applies here, we just don't know the current
-        // number this poll — never silently drops off Advanced the way an
-        // unreadable value used to collapse with "not applicable" (ruling
-        // 2c45d78e).
-        const reserveMounts = mounts.filter(
-            m => m.reserved_percent != null || m.reserved_percent_unknown);
-        const reserveMountpoints = reserveMounts.map(m => m.mountpoint);
-        for (const m of reserveMounts)
-            menu.addMenuItem(this._buildReserveStrip(m, reserveMountpoints));
-        if (reserveMounts.length > 0)
-            menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
         if (!pill) {
             menu.addMenuItem(new PopupMenu.PopupMenuItem(
@@ -505,26 +492,19 @@ class ByeByteToggle extends QuickMenuToggle {
         if (journalCaveat)
             menu.addMenuItem(journalCaveat);
         menu.addMenuItem(this._buildFstrimScheduleRow(pill.fstrim_schedule));
-        for (const row of this._buildTmpSizeRows(pill.tmp_size))
-            menu.addMenuItem(row);
     }
 
-    // The fold's own label carries a live caveat count (ramstein's rule,
-    // Alfred's DM 4458, applied here): a COLLAPSED Advanced must not hide
-    // that journal-cap or tmp-size might currently be pending — collapsing
-    // is the entire point of a disclosure, so the caveat has to survive
-    // it. Fixed short form ("N pending"), not the caveat text itself —
-    // same bounded-length reasoning as ramstein's own header (Alfred's
-    // catch, DM 4466): the detail lives one click in, on the caption row
-    // that names the control specifically.
+    // The fold's own label carries a live caveat (ramstein's rule, Alfred's
+    // DM 4458, applied here): a COLLAPSED Advanced must not hide that
+    // journal-cap might currently be pending — collapsing is the entire
+    // point of a disclosure, so the caveat has to survive it. journal-cap
+    // is the only occupant left that can diverge with no other witness;
+    // reserved%/tmp-size both pass without needing one here, same as
+    // before, now doubly true since their CONTROLS live on the mount row
+    // too, not just their badges.
     _updateAdvancedHeader(pill) {
-        let n = 0;
-        if (isJournalCapPending(pill?.journal_cap))
-            n++;
-        if (isTmpSizePending(pill))
-            n++;
-        this._advancedItem.label.text = n
-            ? `Advanced ▸  ⚠ ${n} pending`
+        this._advancedItem.label.text = isJournalCapPending(pill?.journal_cap)
+            ? 'Advanced ▸  ⚠ pending'
             : 'Advanced ▸';
     }
 
@@ -554,8 +534,15 @@ class ByeByteToggle extends QuickMenuToggle {
     }
 
     // ---- reserve's SEGMENT strip --------------------------------------------
+    // Lives inside a single mount's own expansion now, so there is only
+    // ever ONE strip visible at a time and it never needs to disambiguate
+    // itself from a sibling mount's strip — distinguishingMountLabel and
+    // its whole truncation-collision fix (built earlier tonight for the
+    // old flat, all-strips-at-once Advanced layout) are dead with this
+    // redesign; the structural fix dissolved the bug a third time. Deleted
+    // outright rather than left unused.
 
-    _buildReserveStrip(m, allMountpoints) {
+    _buildReserveStrip(m) {
         const mountpoint = m.mountpoint;
         // reserved_percent can be a float (5.03) from the block-count-
         // truncation math the daemon documents — round for the highlight
@@ -566,11 +553,8 @@ class ByeByteToggle extends QuickMenuToggle {
         const current = m.reserved_percent != null ? Math.round(m.reserved_percent) : null;
         const box = new PopupMenu.PopupBaseMenuItem({reactive: false, can_focus: false});
         const layout = new St.BoxLayout({x_expand: true});
-        const label = distinguishingMountLabel(mountpoint, allMountpoints);
-        const labText = current != null
-            ? `reserved (${label})` : `reserved (${label}): unknown`;
-        const lab = new St.Label({
-            text: labText, style: `color:${DIM}; padding-right:8px;`});
+        const labText = current != null ? 'reserved' : 'reserved: unknown';
+        const lab = new St.Label({text: labText, style: `color:${DIM}; padding-right:8px;`});
         lab.y_align = 2;   // Clutter.ActorAlign.CENTER
         layout.add_child(lab);
         for (const pct of RESERVE_PRESETS) {
@@ -607,7 +591,7 @@ class ByeByteToggle extends QuickMenuToggle {
             });
     }
 
-    // ---- journal-cap / fstrim-schedule / tmp-size ---------------------------
+    // ---- journal-cap / fstrim-schedule --------------------------------------
 
     _buildJournalCapRow(journalCap) {
         const current = journalCap?.current_cap ?? null;
@@ -675,12 +659,13 @@ class ByeByteToggle extends QuickMenuToggle {
             });
     }
 
+    // ---- /tmp's own tmp-size SEGMENT, rendered inside /tmp's mount row -----
     // PENDING (decision 3b31bc10): the status line here restates the same
     // fact /tmp's own mount-row badge already carries (tmpPendingBadge) —
-    // deliberate duplication, not redundancy: the mount row is the
-    // always-visible fact, this one sits right next to the control that
-    // set it, same "detail lives next to the control that owns it" shape
-    // ramstein's captions use.
+    // deliberate duplication, not redundancy: the badge is the always-
+    // visible fact even collapsed, this one sits right next to the control
+    // that sets it once expanded, same "detail lives next to the control
+    // that owns it" shape ramstein's captions use.
     _buildTmpSizeRows(tmpSize) {
         const configured = tmpSize?.configured_cap ?? null;
         const liveBytes = Pill.num(tmpSize?.live_total_bytes);
@@ -725,59 +710,50 @@ class ByeByteToggle extends QuickMenuToggle {
         });
     }
 
-    // ---- Part 3: declare's Reclaim ▸ pick-list ------------------------------
+    // ---- Reclaim ▸ pick-list, nested inside each mount's own row -----------
+    // Same lazy-load-on-first-expand mechanism as before (see
+    // _createMountItem), just addressed via rec.reclaim instead of a
+    // top-level map lookup — mountpoint is still threaded through for the
+    // CLI calls and user-facing notify() text.
 
-    _createReclaimItem(mountpoint) {
-        const item = new PopupMenu.PopupSubMenuMenuItem(`Reclaim on ${mountpoint} ▸`);
-        const rec = {item, built: false, rows: new Map(), footerItem: null, commitItem: null};
-        // lazy build on first expand only — never refetch on later opens;
-        // "↻ Refresh list" inside is the only other way this repopulates.
-        item.menu.connect('open-state-changed', (_menu, open) => {
-            if (open && !rec.built) {
-                rec.built = true;
-                this._populateReclaimList(mountpoint, rec);
-            }
-        });
-        return rec;
-    }
-
-    _addReclaimRefreshRow(mountpoint, rec, menu) {
+    _addReclaimRefreshRow(mountpoint, reclaim, menu) {
         const refresh = new PopupMenu.PopupMenuItem('↻ Refresh list');
-        refresh.connect('activate', () => this._populateReclaimList(mountpoint, rec));
+        refresh.connect('activate', () => this._populateReclaimList(mountpoint, reclaim));
         menu.addMenuItem(refresh);
     }
 
-    _populateReclaimList(mountpoint, rec) {
-        const menu = rec.item.menu;
+    _populateReclaimList(mountpoint, reclaim) {
+        const menu = reclaim.item.menu;
         menu.removeAll();
-        rec.rows = new Map();
-        rec.footerItem = null;
-        rec.commitItem = null;
+        reclaim.rows = new Map();
+        reclaim.footerItem = null;
+        reclaim.commitItem = null;
         menu.addMenuItem(Pill.row(`<span foreground="${DIM}">loading…</span>`));
-        this._addReclaimRefreshRow(mountpoint, rec, menu);
+        this._addReclaimRefreshRow(mountpoint, reclaim, menu);
 
         runByebyteJson(['why', mountpoint, '--json'], this._cancellable, doc => {
-            // The mount may have vanished (unplugged) while this was in
-            // flight — this rec's item may already be destroyed, and a
-            // fresh (or no) entry may sit in _reclaimItems now; touching
+            // The mount may have vanished, or crossed the significance
+            // boundary (destroy-and-rebuild), while this was in flight —
+            // this reclaim record's item may already be destroyed, and a
+            // fresh (or no) mount item may sit in _mountItems now; touching
             // the dead actor here would throw, so bail instead.
-            if (this._reclaimItems.get(mountpoint) !== rec)
+            if (this._mountItems.get(mountpoint)?.reclaim !== reclaim)
                 return;
-            this._renderReclaimList(mountpoint, rec, doc);
+            this._renderReclaimList(mountpoint, reclaim, doc);
         });
     }
 
-    _renderReclaimList(mountpoint, rec, doc) {
-        const menu = rec.item.menu;
+    _renderReclaimList(mountpoint, reclaim, doc) {
+        const menu = reclaim.item.menu;
         menu.removeAll();
-        rec.rows = new Map();
-        rec.footerItem = null;
-        rec.commitItem = null;
+        reclaim.rows = new Map();
+        reclaim.footerItem = null;
+        reclaim.commitItem = null;
 
         if (!doc || doc.error) {
             const msg = doc?.error || 'could not reach the daemon';
             menu.addMenuItem(new PopupMenu.PopupMenuItem(msg, {reactive: false}));
-            this._addReclaimRefreshRow(mountpoint, rec, menu);
+            this._addReclaimRefreshRow(mountpoint, reclaim, menu);
             return;
         }
 
@@ -792,51 +768,51 @@ class ByeByteToggle extends QuickMenuToggle {
                 if (!r || typeof r.path !== 'string')
                     continue;
                 const bytes = Pill.num(r.bytes) ?? 0;
-                rec.rows.set(r.path, {bytes, selected: false});
+                reclaim.rows.set(r.path, {bytes, selected: false});
                 const it = Pill.dataRow(r.path, Pill.fmtBytes(bytes), () => {
-                    const s = rec.rows.get(r.path);
+                    const s = reclaim.rows.get(r.path);
                     s.selected = !s.selected;
                     it.setOrnament(s.selected ? PopupMenu.Ornament.CHECK : PopupMenu.Ornament.NONE);
-                    this._updateReclaimFooter(rec);
+                    this._updateReclaimFooter(reclaim);
                 });
                 it.setOrnament(PopupMenu.Ornament.NONE);
                 menu.addMenuItem(it);
             }
         }
 
-        rec.footerItem = new PopupMenu.PopupMenuItem('', {reactive: false});
-        menu.addMenuItem(rec.footerItem);
+        reclaim.footerItem = new PopupMenu.PopupMenuItem('', {reactive: false});
+        menu.addMenuItem(reclaim.footerItem);
 
-        rec.commitItem = new PopupMenu.PopupMenuItem('');
-        rec.commitItem.connect('activate', () => this._commitReclaim(mountpoint, rec));
-        menu.addMenuItem(rec.commitItem);
+        reclaim.commitItem = new PopupMenu.PopupMenuItem('');
+        reclaim.commitItem.connect('activate', () => this._commitReclaim(mountpoint, reclaim));
+        menu.addMenuItem(reclaim.commitItem);
 
-        this._addReclaimRefreshRow(mountpoint, rec, menu);
-        this._updateReclaimFooter(rec);
+        this._addReclaimRefreshRow(mountpoint, reclaim, menu);
+        this._updateReclaimFooter(reclaim);
     }
 
-    _updateReclaimFooter(rec) {
-        if (!rec.footerItem)
+    _updateReclaimFooter(reclaim) {
+        if (!reclaim.footerItem)
             return;
         let n = 0, bytes = 0;
-        for (const s of rec.rows.values()) {
+        for (const s of reclaim.rows.values()) {
             if (s.selected) {
                 n++;
                 bytes += s.bytes;
             }
         }
-        rec.footerItem.label.clutter_text.set_markup(
+        reclaim.footerItem.label.clutter_text.set_markup(
             `<span foreground="${DIM}">` +
             (n === 0 ? 'Selected: none' : `Selected: ${n} · ${Pill.esc(Pill.fmtBytes(bytes))}`) +
             '</span>');
-        if (!rec.commitItem)
+        if (!reclaim.commitItem)
             return;
         if (n === 0) {
-            rec.commitItem.visible = false;
+            reclaim.commitItem.visible = false;
         } else {
-            rec.commitItem.visible = true;
-            rec.commitItem.reactive = true;
-            rec.commitItem.label.text =
+            reclaim.commitItem.visible = true;
+            reclaim.commitItem.reactive = true;
+            reclaim.commitItem.label.text =
                 `Reclaim selected — ${Pill.fmtBytes(bytes)} (${n} path${n === 1 ? '' : 's'})`;
         }
     }
@@ -844,17 +820,17 @@ class ByeByteToggle extends QuickMenuToggle {
     // Deletes every ticked path, one declare() at a time (sequential — no
     // overlapping daemon writes to reason about), then toasts the daemon's
     // own verified totals and refreshes the list against reality.
-    _commitReclaim(mountpoint, rec) {
+    _commitReclaim(mountpoint, reclaim) {
         const paths = [];
-        for (const [path, s] of rec.rows) {
+        for (const [path, s] of reclaim.rows) {
             if (s.selected)
                 paths.push(path);
         }
         if (paths.length === 0)
             return;
-        if (rec.commitItem) {
-            rec.commitItem.reactive = false;
-            rec.commitItem.label.text = 'declaring…';
+        if (reclaim.commitItem) {
+            reclaim.commitItem.reactive = false;
+            reclaim.commitItem.label.text = 'declaring…';
         }
 
         let freedBytes = 0, skipped = 0, failed = 0;
@@ -877,9 +853,10 @@ class ByeByteToggle extends QuickMenuToggle {
                 Pill.notify('byebyte', summary);
                 // refresh against reality: whatever's left now that some
                 // paths are gone (this is a harmless no-op if the mount
-                // itself vanished in the meantime)
-                if (this._reclaimItems.get(mountpoint) === rec)
-                    this._populateReclaimList(mountpoint, rec);
+                // itself vanished, or crossed the significance boundary,
+                // in the meantime)
+                if (this._mountItems.get(mountpoint)?.reclaim === reclaim)
+                    this._populateReclaimList(mountpoint, reclaim);
                 return;
             }
             runByebyteJson(['declare', paths[i], '--yes', '--json'], this._cancellable, doc => {
