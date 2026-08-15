@@ -26,6 +26,20 @@ case "$1" in
     else
       systemctl start byebyted.service || true
     fi
+    # The GNOME pill stages here (/usr/share/byebyte/extension/) but GNOME
+    # Shell only ever scans /usr/share/gnome-shell/extensions/ (system-wide)
+    # or ~/.local/share/gnome-shell/extensions/ (per-account) — this path is
+    # neither, deliberately: install.sh's own bootstrap path prints this
+    # same reminder, but that's the curl-pipe-bash install only. A plain
+    # `dpkg -i`/`apt install ./byebyte.deb` never sees it otherwise, and the
+    # pill would silently never appear for anyone who installed that way
+    # (found by Till auditing ramstein's own packaging, flagged not fixed).
+    echo
+    echo ">>> the GNOME pill is a separate, per-account, NO-ROOT step — as yourself: <<<"
+    echo "  mkdir -p ~/.local/share/gnome-shell/extensions"
+    echo "  cp -r /usr/share/byebyte/extension/byebyte@asuramaya ~/.local/share/gnome-shell/extensions/"
+    echo "  gnome-extensions enable byebyte@asuramaya"
+    echo "  (then log out and back in once — Wayland reloads extensions at login)"
     ;;
 esac
 
