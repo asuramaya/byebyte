@@ -1980,7 +1980,6 @@ for want in usr/bin/byebyted usr/bin/byebyte usr/bin/byebyte-healthcheck \
             usr/share/byebyte/lib/sutra_xen.commit \
             usr/share/byebyte/allowed_signers \
             usr/share/byebyte/extension/byebyte@asuramaya/extension.js \
-            usr/share/byebyte/extension/byebyte@asuramaya/prefs.js \
             usr/share/byebyte/extension/byebyte@asuramaya/pill.js \
             lib/systemd/system/byebyted.service \
             lib/systemd/system/byebyte-update.service \
