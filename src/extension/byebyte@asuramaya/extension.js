@@ -157,11 +157,43 @@ const RANK = {ok: 0, warn: 1, hot: 2, edquot: 3};
 // /dev/shm — folds under "N more mounts ▸": still fully reachable, just
 // not making the pill read like a `mount` dump every time it opens
 // (operator design review, 2026-08-14: "shrink it by 70%, more like
-// phanspeed/kast"). A folded mount promotes into the default list, with
-// its own Reclaim ▸, the moment it stops being healthy — the fold is a
-// "nothing to see right now" claim, not a wall.
-function isSignificantMount(m) {
-    return m.mountpoint === '/' || (RANK[m.state] ?? 0) >= 1;
+// phanspeed/kast").
+function isTroubledMount(m) {
+    return (RANK[m.state] ?? 0) >= 1;
+}
+
+// Once a row consolidated to ONE per mount (2026-08-16), a state flap
+// costs far more than it used to: the whole item — open/closed, an open
+// reserved% strip, any ticked Reclaim selection — gets destroyed and
+// rebuilt on every crossing (no supported GNOME re-parent; see the
+// significance-crossing comment in _apply). classify()'s two inputs are
+// held to different standards: eta is a 30-min EWMA (burn_tau=1800s)
+// before it ever reaches "warn", so it can't flap poll-to-poll, but
+// free% is compared against warn_free_pct on a RAW, unsmoothed statvfs
+// read every single 30s poll — a mount idling right at that line with
+// ordinary churn (temp files, log rotation, a build cache) can cross it
+// every poll with zero damping (Alfred's read was "rare either way";
+// checking classify() directly found it's only true for one of the two
+// inputs).
+//
+// Fixed with ASYMMETRIC hysteresis, not a value-based band: PROMOTE
+// INSTANTLY, DEMOTE SLOWLY — never delay showing a problem, only ever
+// delay hiding one, the same "fail toward the honest direction" rule
+// this whole session has run on, applied to timing instead of state. A
+// band (release only once free% clears warn_free_pct by some margin)
+// was considered and rejected: warn_free_pct is never published to
+// status.json/the pill digest (checked byebyted's build_pill_summary
+// directly), so the pill has no way to build a band around the ACTUAL
+// configured threshold — hardcoding a guessed one would silently
+// diverge from a customized daemon config, which is worse than the
+// poll-count compromise, not better. Poll-counting only needs the
+// state string the daemon already computed, nothing invented.
+const DEMOTE_AFTER_OK_POLLS = 3;   // ~90s at the default 30s poll interval
+
+// Root is always significant, unconditionally — the one mount everyone
+// thinks of first, not subject to the trouble/hysteresis gate at all.
+function isAlwaysSignificantMount(m) {
+    return m.mountpoint === '/';
 }
 
 // V2.M2: when snapshots pin a big enough slice of a btrfs mount, the free-
@@ -221,7 +253,8 @@ class ByeByteToggle extends QuickMenuToggle {
         this._offlinePlaceholder = null;
 
         // "N more mounts ▸" — the fold for mounts nobody needs to see by
-        // default (see isSignificantMount). Holds the same per-mount items
+        // default (see isTroubledMount/_isEffectivelySignificant). Holds
+        // the same per-mount items
         // directly now — no separate rebuilt row-list, no separate diffed
         // Reclaim sub-section; a fold may hide a mount, it must never hide
         // the capabilities that live inside it (Alfred, msg 4508).
@@ -273,6 +306,29 @@ class ByeByteToggle extends QuickMenuToggle {
             return;
         }
         this._apply(st);
+    }
+
+    // Asymmetric hysteresis (see DEMOTE_AFTER_OK_POLLS above): promotes on
+    // the SAME poll trouble is first seen, no debounce — but only demotes
+    // after DEMOTE_AFTER_OK_POLLS consecutive ok reads. Reads/advances
+    // stableOkPolls on whatever rec already exists in _mountItems from the
+    // PRIOR poll (this runs before that map is touched for the current
+    // one) — a mount with no rec yet, or one that was already folded,
+    // never touches the counter at all; it only exists on a currently-
+    // significant mount that's trying to recover.
+    _isEffectivelySignificant(m) {
+        if (isAlwaysSignificantMount(m))
+            return true;
+        const rec = this._mountItems.get(m.mountpoint);
+        if (isTroubledMount(m)) {
+            if (rec)
+                rec.stableOkPolls = 0;
+            return true;
+        }
+        if (rec?.section !== 'sig')
+            return false;
+        rec.stableOkPolls = (rec.stableOkPolls ?? 0) + 1;
+        return rec.stableOkPolls < DEMOTE_AFTER_OK_POLLS;
     }
 
     _apply(st) {
@@ -331,7 +387,12 @@ class ByeByteToggle extends QuickMenuToggle {
         }
 
         // per-mount items: root and anything in trouble show by default;
-        // everything else folds under "N more mounts ▸" (isSignificantMount).
+        // everything else folds under "N more mounts ▸" — significance is
+        // now hysteresis-aware (_isEffectivelySignificant), not a bare
+        // predicate; see DEMOTE_AFTER_OK_POLLS above for why. Computed
+        // once per mount into a Map since the method has a side effect
+        // (it advances each mount's own stableOkPolls counter) — filtering
+        // twice would double-count polls for whichever branch ran second.
         // Diffed against the live mount list by mountpoint identity —
         // a mount present with the same significance keeps its existing
         // item (open/closed state, ticked Reclaim selections, all of it)
@@ -352,8 +413,10 @@ class ByeByteToggle extends QuickMenuToggle {
         // (which only lost Reclaim's ticks), but still an honest trade:
         // the move itself is visible, unlike the original bug where the
         // lever was silently absent altogether.
-        const significant = mounts.filter(isSignificantMount);
-        const folded = mounts.filter(m => !isSignificantMount(m));
+        const sigByMountpoint = new Map(
+            mounts.map(m => [m.mountpoint, this._isEffectivelySignificant(m)]));
+        const significant = mounts.filter(m => sigByMountpoint.get(m.mountpoint));
+        const folded = mounts.filter(m => !sigByMountpoint.get(m.mountpoint));
         const significantMountpoints = new Set(significant.map(m => m.mountpoint));
         const allMountpoints = new Set(mounts.map(m => m.mountpoint));
 
