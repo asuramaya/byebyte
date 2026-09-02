@@ -28,7 +28,13 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {SystemIndicator} from 'resource:///org/gnome/shell/ui/quickSettings.js';
 
-export const PILL_JS_VERSION = '0.1.2';
+// Tracks THIS FILE's own content history only, never packaging/VERSION --
+// a deliberate, separate axis (ARCHITECTURE.md's exemptions table), ruled
+// and mechanically enforced by tests/check_version.sh. For "is this
+// vendored copy current," read the .version/.commit anchors vendor.sh
+// writes, or run check-sutra -- never grep this line and compare it to
+// the package version.
+export const PILL_JS_VERSION = '0.1.3';
 
 // ---- palette (FAMILY.md doctrine #12) --------------------------------------
 // The five concept colors every pill shares, plus the chip/dot button styles

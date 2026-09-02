@@ -44,7 +44,16 @@ import subprocess
 import threading
 import time
 
-SUTRA_VERSION = "0.3.2"
+# Tracks THIS FILE's own content history only, never packaging/VERSION --
+# a deliberate, separate axis (ARCHITECTURE.md's exemptions table), ruled
+# and mechanically enforced by tests/check_version.sh; a check that once
+# asserted VERSION == this constant was itself wrong, red since 0.2.0,
+# corrected in 0.7.5. For "is this vendored copy current," read the
+# .version/.commit anchors vendor.sh writes, or run check-sutra -- never
+# grep this line and compare it to the package version (msg 6426/6432 via
+# Alfred: exactly that grep cost two wrong readings before the anchors
+# settled it).
+SUTRA_VERSION = "0.3.3"
 
 
 # --- config: the seed, never the master -------------------------------------
