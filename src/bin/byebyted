@@ -521,7 +521,7 @@ def _btrfs_notice_for_path(path):
 
 # --- polling ----------------------------------------------------------------
 
-def poll_mount(m, state, cfg, uid, now):
+def poll_mount(m, state, cfg, uid, now, first_seen):
     try:
         sv = os.statvfs(m["mountpoint"])
     except OSError:
@@ -532,29 +532,51 @@ def poll_mount(m, state, cfg, uid, now):
     quota = quota_headroom(m["mountpoint"], uid)
     eff_free = free if quota is None else min(free, quota["remaining"])
 
-    prev = state.get(m["mountpoint"])
-    # prev is None on the very first poll ever seen for this mount (fresh
-    # daemon start, or a mount that just appeared) -- sutra.ewma_rate()
-    # seeds burn=0.0 in that case, indistinguishable on the wire from a
-    # genuinely stable mount that's been measured for a real window and
-    # settled near zero. Those are different facts (NO MEASUREMENT YET vs.
-    # a measurement that says "nothing's happening") and must not share a
-    # word -- ruling 60bc15db's "no" vs "I don't know" doctrine, applied to
-    # a rate instead of a boolean. Recorded here, not inside sutra.ewma_rate
-    # itself: sutra.py is vendored from the canonical sutra repo (check-sutra
-    # integrity-guarded), not byebyte's to edit -- prev is already byebyted's
-    # own local state, so this needs no change to the vendored function at all.
-    warming_up = prev is None
-    state[m["mountpoint"]], ewma = sutra.ewma_rate(prev, used, now, cfg["burn_tau"])
+    mp = m["mountpoint"]
+    prev = state.get(mp)
+    # first_seen tracks, per mountpoint, WHEN this daemon PROCESS first
+    # started measuring it -- resets on every daemon restart (in-memory
+    # only, same as `state` itself), which is correct: the EWMA's own
+    # history resets right along with it, so "how long have I actually
+    # been watching" has to reset too, not just "do I have one prior
+    # sample" (prev is None). Alfred's live repro (msg 6411, install.sh
+    # restarting byebyted) found prev-is-None alone wasn't enough: a
+    # transient burst 60-240s after restart -- his own install activity --
+    # still fell inside the seeded-but-unconverged interval between tick
+    # two and roughly one tau, and printed a confident, order-of-magnitude-
+    # wrong rate with a bang and a false "full in ~3d" alarm. The gap
+    # wasn't the first tick, it was the first TAU.
+    if mp not in first_seen:
+        first_seen[mp] = now
+    history_seconds = now - first_seen[mp]
+    # A full tau is the standard reference point for "the estimator has
+    # had a chance to reflect one full window of behaviour" -- not full
+    # settling (which some conventions put at 3x tau), but the shortest
+    # span past which a reader treating "(30m avg)" as meaning what it
+    # says is no longer being misled (Alfred: "the qualifier has to be
+    # derived from ACTUAL accumulated history... only once thirty minutes
+    # exist"). Sub-tau, the honest label is "warming up", full stop --
+    # no partial number with a partial-history caveat to invent, no
+    # credential the estimator hasn't earned yet.
+    warming_up = history_seconds < cfg["burn_tau"]
+    state[mp], ewma = sutra.ewma_rate(prev, used, now, cfg["burn_tau"])
 
     eta = None
-    if ewma > 1.0:  # below 1 B/s the ETA is astrology
+    # During warm-up the EWMA can be dominated by whatever transient
+    # burst happened to occur in the last few polls (Alfred's own install
+    # activity, six pills unpacked in the preceding minutes) -- gating eta
+    # on warming_up, not just on ewma's raw magnitude, stops that transient
+    # from promoting itself into a standing forecast ("full ~3d") and a
+    # false alarm bang. classify() below still independently catches a
+    # REAL low-free-space emergency via pct, which needs no history at
+    # all and must never wait on this gate.
+    if not warming_up and ewma > 1.0:  # below 1 B/s the ETA is astrology
         eta = eff_free / ewma
         if eta > cfg["eta_cap_days"] * 86400:
             eta = None
 
     row = {
-        "mountpoint": m["mountpoint"],
+        "mountpoint": mp,
         "fstype": m["fstype"],
         "total": total,
         "free": free,
@@ -2760,6 +2782,7 @@ def main():
         signal.signal(sig, lambda *_: stop.set())
 
     state = {}
+    first_seen = {}   # mountpoint -> when THIS daemon process first polled it
     latest = {"doc": {"error": "no status yet"}}
     indexer = Indexer(cfg)
     ballast_build(cfg)
@@ -2782,7 +2805,7 @@ def main():
 
     while not stop.is_set():
         now = time.time()
-        rows = [r for r in (poll_mount(m, state, cfg, uid, now)
+        rows = [r for r in (poll_mount(m, state, cfg, uid, now, first_seen)
                             for m in discover_mounts(cfg)) if r]
         doc = {
             "v": 1,

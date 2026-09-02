@@ -1192,7 +1192,7 @@ assert avail_final == avail_before, \
 poll_cfg = dict(mod.DEFAULTS)
 poll_cfg.update({"exclude_mounts": [], "tmpfs_mounts": [], "include_fstypes": ["ext4"]})
 row = mod.poll_mount({"mountpoint": mnt, "fstype": "ext4", "device": dev},
-                      {}, poll_cfg, poll_cfg["owner_uid"], __import__("time").time())
+                      {}, poll_cfg, poll_cfg["owner_uid"], __import__("time").time(), {})
 assert row is not None, "poll_mount returned nothing for a live ext4 mount"
 assert row.get("reserved_percent") == mod._tune2fs_reserved_percent(dev), \
     f"poll_mount's reserved_percent disagrees with a fresh tune2fs read: {row}"
@@ -1214,7 +1214,7 @@ def _tune2fs_missing(cmd, *a, **kw):
 _subprocess.run = _tune2fs_missing
 try:
     unknown_row = mod.poll_mount({"mountpoint": mnt, "fstype": "ext4", "device": dev},
-                                  {}, poll_cfg, poll_cfg["owner_uid"], __import__("time").time())
+                                  {}, poll_cfg, poll_cfg["owner_uid"], __import__("time").time(), {})
 finally:
     _subprocess.run = _real_run
 assert unknown_row.get("reserved_percent") is None, \
@@ -1992,6 +1992,75 @@ finally:
     shutil.rmtree(fake_frag_dir, ignore_errors=True)
     shutil.rmtree(tmp_dropin_dir, ignore_errors=True)
     shutil.rmtree(state_dir, ignore_errors=True)
+PY
+
+# --- V3.M7: burn warm-up / false-alarm suppression (ruling 60bc15db,
+# Alfred's live repro msg 6398/6411: `sudo systemctl restart byebyted &&
+# sleep 240 && byebyte status` on a real machine kept printing a confident,
+# order-of-magnitude-wrong burn rate -- and once, a false "!"/full-in-~3d
+# alarm off a transient install burst -- for the entire span between the
+# daemon's first poll and roughly one burn_tau of real history, not just
+# the first tick (prev is None). This is THE ONE CONDITION NOBODY EXERCISES
+# BY HAND (Alfred's own words) -- a permanent regression test, not gated on
+# root/e2fsprogs/sudo, so it always runs.
+python3 - <<'PY'
+import importlib.util, os
+from importlib.machinery import SourceFileLoader
+
+loader = SourceFileLoader("byebyted_mod_warmup", "src/bin/byebyted")
+spec = importlib.util.spec_from_loader("byebyted_mod_warmup", loader)
+mod = importlib.util.module_from_spec(spec)
+loader.exec_module(mod)
+
+class FakeStatvfs:
+    # 1.8T total, 428G free -- same order of magnitude as Alfred's own
+    # repro box, chosen so a real burst rate is unambiguously implausible
+    # (no consumer disk sustains tens of gigabytes/day) rather than merely
+    # improbable.
+    f_blocks = 450_000_000
+    f_bavail = 107_000_000
+    f_frsize = 4096
+
+mod.os.statvfs = lambda p: FakeStatvfs()
+mod.quota_headroom = lambda mp, uid: None
+cfg = dict(mod.DEFAULTS)
+m = {"mountpoint": "/warmup-fixture", "fstype": "ext4", "device": "/dev/fake-warmup"}
+state = {}
+first_seen = {}
+
+# tick 1 (t=0): the daemon has just started, prev is None -- warming_up
+# must be true and no rate/eta printed, same as before this fix.
+row0 = mod.poll_mount(m, state, cfg, 1000, now=0.0, first_seen=first_seen)
+assert row0["burn_warming_up"] is True, row0
+assert row0["eta_seconds"] is None, row0
+
+# tick 2 (t=60s): a transient burst -- 6GB written in one minute, Alfred's
+# own "six pills unpacked" scenario -- lands well inside the seeded-but-
+# unconverged interval (60s << burn_tau=1800s default). THIS is the case
+# prev-is-None alone missed: a real prior sample exists, so the old gate
+# would have let it through.
+class FakeStatvfsAfterBurst(FakeStatvfs):
+    f_bavail = FakeStatvfs.f_bavail - int(6 * 1024**3 / FakeStatvfs.f_frsize)
+mod.os.statvfs = lambda p: FakeStatvfsAfterBurst()
+row1 = mod.poll_mount(m, state, cfg, 1000, now=60.0, first_seen=first_seen)
+assert row1["burn_warming_up"] is True, \
+    f"60s of history (< 1 tau) must still warm up, not just tick 1: {row1}"
+assert row1["eta_seconds"] is None, \
+    f"a warm-up-era transient must not manufacture an ETA/false alarm: {row1}"
+assert row1["state"] != "hot", \
+    f"a transient burst must not classify hot purely off an unconverged eta: {row1}"
+
+# once real history reaches a full tau, the gate lifts and a genuine,
+# settled reading is trusted again -- same fixture, same daemon lifetime,
+# now t = burn_tau + 1s past first_seen.
+tau = cfg["burn_tau"]
+row2 = mod.poll_mount(m, state, cfg, 1000, now=tau + 1.0, first_seen=first_seen)
+assert row2["burn_warming_up"] is False, \
+    f"once history >= burn_tau the estimator has earned trust: {row2}"
+
+print("burn warm-up ok: a transient burst inside one tau of daemon start "
+      "warms up and suppresses eta/alarm; a mount's own state resets its "
+      "first_seen clock, not just prev-is-None, matching Alfred's live repro")
 PY
 
 # --- M4: make deb — builds a real .deb; contents include bins+units+man.
