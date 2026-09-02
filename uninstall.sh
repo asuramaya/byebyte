@@ -33,7 +33,8 @@ echo "== byebyte uninstaller =="
 
 echo "-- stopping service + timers"
 systemctl disable --now byebyted.service byebyte-update.timer byebyte-update.service \
-  byebyte-sweep.timer byebyte-sweep.service 2>/dev/null || true
+  byebyte-sweep.timer byebyte-sweep.service byebyte-notify.timer byebyte-notify.service \
+  2>/dev/null || true
 
 echo "-- removing files"
 for b in byebyted byebyte byebyte-healthcheck byebyte-update; do
@@ -47,7 +48,8 @@ rm -f "$BINDIR"/sutra.py "$BINDIR"/sutra.version "$BINDIR"/sutra.commit \
       "$BINDIR"/sutra_update.py "$BINDIR"/sutra_update.version "$BINDIR"/sutra_update.commit \
       "$BINDIR"/sutra_xen.py "$BINDIR"/sutra_xen.version "$BINDIR"/sutra_xen.commit
 rm -f "$UNITDIR/byebyted.service" "$UNITDIR/byebyte-update.service" "$UNITDIR/byebyte-update.timer" \
-      "$UNITDIR/byebyte-sweep.service" "$UNITDIR/byebyte-sweep.timer"
+      "$UNITDIR/byebyte-sweep.service" "$UNITDIR/byebyte-sweep.timer" \
+      "$UNITDIR/byebyte-notify.service" "$UNITDIR/byebyte-notify.timer"
 rm -rf "$SHAREDIR"
 rm -f "$PREFIX/share/man/man1/byebyte.1" "$PREFIX/share/man/man8/byebyted.8"
 systemctl daemon-reload

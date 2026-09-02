@@ -218,18 +218,21 @@ else
 fi
 
 # 3. systemd: daemon + daily update-CHECK timer + the sweep timer (both
-# opt-in). update.timer only ever runs `byebyte-update --check` — it
-# notifies, it never installs unattended. sweep.timer runs `byebyte sweep`,
-# which only ACTS on categories explicitly armed in config.json's
-# sweep_categories — everything else stays a dry-run preview regardless of
-# whether this timer is enabled (family doctrine: updates and unattended
-# reclaim are both click-to-install/opt-in, never on by default).
+# opt-in) + the notify timer (ON by default — see below). update.timer
+# only ever runs `byebyte-update --check` — it notifies, it never installs
+# unattended. sweep.timer runs `byebyte sweep`, which only ACTS on
+# categories explicitly armed in config.json's sweep_categories —
+# everything else stays a dry-run preview regardless of whether this timer
+# is enabled (family doctrine: updates and unattended reclaim are both
+# click-to-install/opt-in, never on by default).
 echo "-- systemd units + enabling"
 install -m 0644 "$SRC/src/data/systemd/system/byebyted.service"       "$UNITDIR/byebyted.service"
 install -m 0644 "$SRC/src/data/systemd/system/byebyte-update.service" "$UNITDIR/byebyte-update.service"
 install -m 0644 "$SRC/src/data/systemd/system/byebyte-update.timer"   "$UNITDIR/byebyte-update.timer"
 install -m 0644 "$SRC/src/data/systemd/system/byebyte-sweep.service"  "$UNITDIR/byebyte-sweep.service"
 install -m 0644 "$SRC/src/data/systemd/system/byebyte-sweep.timer"    "$UNITDIR/byebyte-sweep.timer"
+install -m 0644 "$SRC/src/data/systemd/system/byebyte-notify.service" "$UNITDIR/byebyte-notify.service"
+install -m 0644 "$SRC/src/data/systemd/system/byebyte-notify.timer"   "$UNITDIR/byebyte-notify.timer"
 systemctl daemon-reload
 systemctl enable byebyted.service
 # `enable --now` on an ALREADY-active unit is a no-op start — it would leave
@@ -244,6 +247,16 @@ fi
 # The daily update timer only ever CHECKS (notify-only, unprivileged) — but
 # even a check that phones GitHub is opt-in, family-wide. Enable deliberately:
 #   sudo systemctl enable --now byebyte-update.timer
+
+# notify.timer is the one exception to "opt-in, never on by default": it
+# never deletes anything and never phones out, only reads and — gated by
+# notify_categories' own conservative default set, crossing-once — shows
+# at most a desktop toast for something already true. An opt-in
+# notification feature would just reproduce the exact "byebyte feels
+# useless" problem it exists to fix (ruling, msg 6489/6501). Silenceable
+# per-category in config.json's notify_categories, or disable this timer
+# outright — either is a real off switch.
+systemctl enable --now byebyte-notify.timer
 
 # 4. verify perms
 echo "-- verifying"
@@ -269,6 +282,12 @@ AND naming categories in sweep_categories (/etc/byebyte/config.json); nothing
 acts until both are set, and only named categories ever act (everything else
 stays a dry-run, ledgered, notified):
   sudo systemctl enable --now byebyte-sweep.timer
+
+notify (unprompted desktop toasts for a threshold crossing or a named
+discovery — never a bare number) is ON BY DEFAULT for a conservative set;
+never deletes anything, never shares sweep's opt-in gate. Silence a category
+or turn it off entirely in /etc/byebyte/config.json's notify_categories, or:
+  sudo systemctl disable --now byebyte-notify.timer
 
 >>> the GNOME pill is a separate, per-account, NO-ROOT step — as yourself: <<<
   make pill

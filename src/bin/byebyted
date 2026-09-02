@@ -10,6 +10,7 @@ stdlib only, by constitution.
 """
 
 import argparse
+import copy
 import ctypes
 import json
 import os
@@ -25,7 +26,7 @@ import sys
 import threading
 import time
 
-# --- sutra bootstrap (sutra 0.12.9; see docs/BOOTSTRAP.md -- do not hand-edit) ----
+# --- sutra bootstrap (sutra 0.14.3; see docs/BOOTSTRAP.md -- do not hand-edit) ----
 import os as _os
 import sys as _sys
 _PILL = "byebyte"
@@ -97,7 +98,25 @@ DEFAULTS = {
     "burn_path_lru": 4096,    # (pid, dir) pairs kept by burn's fanotify aggregator
     "sweep_categories": [],   # REGISTRY category ids armed for sweep's unattended
                               # ACT path — never validated wider than REGISTRY
+    # notify_categories: which unprompted-notification categories are armed
+    # (see _compute_notify_queue). Fully decoupled from sweep_categories/
+    # purge_disabled -- notification never deletes anything, so it carries
+    # its own, lighter consent bar rather than sharing sweep's double-opt-in
+    # gate (Alfred's ruling msg 6489/6501, "must not require enabling a
+    # destructive feature to get a non-destructive notice"). Default ON for
+    # a conservative starter set -- every category here is a threshold-
+    # crossing fact or a named discovery, never a bare number, never a
+    # forecast: "off is what already produced 'byebyte feels useless'"
+    # (Alfred). eta_soon/cold_cache/ghosts_heavy stay opt-in until
+    # crossing-once has been trusted in the field.
+    "notify_categories": ["mount_alert", "quota_low", "fast_grower"],
 }
+
+# The complete set notify_categories may name -- anything else is silently
+# ignored the same way sweep_categories ignores a name outside REGISTRY,
+# never validated wider than this.
+NOTIFY_CATEGORIES = {"mount_alert", "quota_low", "fast_grower", "eta_soon",
+                      "cold_cache", "ghosts_heavy"}
 
 CLAMPS = {
     "poll_interval": (2, 3600),
@@ -2599,6 +2618,189 @@ def advise(cfg, status_doc, indexer):
     return {"findings": findings}
 
 
+# --- notify: the unprompted voice (Alfred's ruling, msg 6489/6501) ----------
+# advise()'s own findings are complete facts, always fresh, meant to be
+# PULLED (a user runs `byebyte advise` because they already suspect
+# something). Everything below turns a SUBSET of that same knowledge into
+# something PUSHED -- byebyte's only other voice, notify_owner() in the CLI,
+# was previously reachable only through sweep's own destructive opt-in
+# (swept bytes -> a toast). That coupling was the actual bug: the operator's
+# stated complaint ("byebyte and ramstein feeling kind of useless") measured
+# down to byebyte having exactly one notification path, gated behind a
+# feature that deletes files and is off by default. This is a SEPARATE,
+# non-destructive opt-in with its own consent (notify_categories), never
+# sharing a gate with sweep_categories/purge_disabled.
+#
+# Three rules for what's worth an interruption (Alfred's framing, argued and
+# ruled): a NAMED, SPECIFIC, ACTIONABLE discovery is worth speaking, a bare
+# number is not; a THRESHOLD CROSSING is worth speaking once, on the
+# crossing, never again while it holds; a FORECAST is worth speaking only
+# when the ETA is short AND the trend is real. The third rule is why this
+# function could not have existed before tonight's other fixes: eta_seconds
+# is now None during warm-up and never inflated by an unconverged EWMA
+# (poll_mount's own history_seconds/burn_tau gate), so "the trend is real"
+# is already structurally guaranteed by the time this function ever sees an
+# eta value, rather than something notify has to re-derive.
+_NOTIFY_ETA_SOON_DAYS = 3.0
+# Separate from advise()'s own eta_soon rule (14 days) on purpose -- a
+# forecast someone chose to pull up voluntarily can afford a softer bar
+# than one that interrupts them unprompted. The two thresholds answer
+# different questions and must not share a number (Alfred's ruling; Till
+# reached the identical split independently on ramstein the same night --
+# the display bucket and the notify threshold turned out to be separate
+# decisions there too).
+
+# Severity order for mount_alert's crossing detection -- the pill's own
+# extension.js carries an identical RANK table for the same purpose
+# (picking the tile's hero mount); this daemon-side copy exists because
+# nothing in byebyted itself previously needed a numeric ordering over
+# classify()'s state strings, only the strings themselves.
+_NOTIFY_RANK = {"ok": 0, "warn": 1, "hot": 2, "edquot": 3}
+
+
+def _mount_for_path(path, mounts):
+    """The mount owning `path` -- longest mountpoint prefix match against
+    the SAME rows this poll already computed, not a fresh stat/mountinfo
+    walk. Used only to annotate a fast_grower notification when its path
+    lands on a tmpfs (RAM, not disk) -- the distinction that made tonight's
+    own pytest-xdist finding land instead of reading like abstract bytes."""
+    best = None
+    for m in mounts:
+        mp = m["mountpoint"]
+        if path == mp or path.startswith(mp.rstrip("/") + "/"):
+            if best is None or len(mp) > len(best["mountpoint"]):
+                best = m
+    return best
+
+
+def _compute_notify_queue(cfg, status_doc, indexer, mem):
+    """Returns a list of raw-data notify items -- {"category", ...facts} --
+    for whatever is NEWLY worth an unprompted notification this poll.
+    Deliberately returns FACTS, not formatted text: the CLI (which already
+    owns human_bytes/human_eta/human_dt) renders each into a summary/body,
+    the same daemon-computes/CLI-renders split every other surface here
+    already uses.
+
+    CROSSING-ONCE, never repeated while a condition holds: `mem` is the
+    daemon's own in-memory last-notified state, carried across polls by
+    the caller (same lifetime as poll_mount's `state`/`first_seen`) --
+    reset on every daemon restart. That reset is an HONEST, DISCLOSED gap,
+    not a durability promise: a restart re-arms every category, and a
+    condition that's still genuinely true re-surfaces on the very next
+    real poll. A second on-disk state file to survive restarts was
+    considered and rejected (Alfred's ruling) -- it would be a second
+    thing that can drift from reality, and this family has spent a month
+    on exactly that class of problem.
+
+    Never fires for a mount whose state is itself unavailable, and never
+    for anything still warming up -- checked explicitly here as defense in
+    depth, not merely inherited from eta_seconds already being None during
+    warm-up.
+    """
+    cats = set(cfg.get("notify_categories") or []) & NOTIFY_CATEGORIES
+    if not cats:
+        return []
+    mounts = (status_doc or {}).get("mounts") or []
+    queue = []
+
+    if "mount_alert" in cats:
+        severity_mem = mem.setdefault("mount_severity", {})
+        for m in mounts:
+            if m.get("burn_warming_up"):
+                continue
+            mp = m["mountpoint"]
+            rank = _NOTIFY_RANK.get(m["state"], 0)
+            if rank >= 1 and rank > severity_mem.get(mp, 0):
+                queue.append({
+                    "category": "mount_alert", "mountpoint": mp,
+                    "state": m["state"], "eta_seconds": m.get("eta_seconds"),
+                    "effective_free": m.get("effective_free"), "total": m.get("total"),
+                })
+            severity_mem[mp] = rank
+
+    if "quota_low" in cats:
+        quota_mem = mem.setdefault("quota_low", {})
+        for m in mounts:
+            mp = m["mountpoint"]
+            q = m.get("quota")
+            low = bool(q and q.get("limit", 0) > 0 and q["remaining"] < 0.2 * q["limit"])
+            if low and not quota_mem.get(mp, False):
+                queue.append({"category": "quota_low", "mountpoint": mp,
+                              "remaining": q["remaining"], "limit": q["limit"]})
+            quota_mem[mp] = low
+
+    if "eta_soon" in cats:
+        eta_mem = mem.setdefault("eta_soon", {})
+        for m in mounts:
+            if m.get("burn_warming_up"):
+                continue
+            mp = m["mountpoint"]
+            eta = m.get("eta_seconds")
+            soon = eta is not None and eta < _NOTIFY_ETA_SOON_DAYS * 86400
+            if soon and not eta_mem.get(mp, False):
+                queue.append({"category": "eta_soon", "mountpoint": mp,
+                              "eta_seconds": eta, "burn_bps": m.get("burn_bps", 0)})
+            eta_mem[mp] = soon
+
+    if "fast_grower" in cats:
+        grower = _top_grower_rate(indexer)
+        if grower is not None:
+            path, rate, delta, dt_days = grower
+            dt_hours = dt_days * 24
+            reliable = dt_hours >= _FAST_GROWER_MIN_DT_HOURS
+            # unreliable (sub-floor) growth never queues a notification at
+            # all, same "never fire on an unknown" discipline applied to
+            # this category specifically -- an interruption has to be able
+            # to say a rate, or it isn't the shape Alfred approved.
+            if rate > _FAST_GROWER_BPS_DAY and reliable and path != mem.get("fast_grower_path"):
+                owner = _mount_for_path(path, mounts)
+                queue.append({
+                    "category": "fast_grower", "path": path,
+                    "delta_bytes": delta, "dt_hours": dt_hours, "bytes_per_day": rate,
+                    "tmpfs": bool(owner and owner.get("fstype") == "tmpfs"),
+                })
+            # only the winning path updates the latch -- a grower that
+            # drops out of first place without ever being reported doesn't
+            # need tracking; nothing was said about it to contradict.
+            mem["fast_grower_path"] = path
+
+    if "cold_cache" in cats or "ghosts_heavy" in cats:
+        # Reuses advise()'s own detection rather than re-deriving it -- one
+        # place computes what "cold" or "heavy" means, this only adds the
+        # crossing-once memory on top. Called exactly ONCE regardless of
+        # how many of the two categories are armed: it's real work
+        # (ghosts() walks /proc, cold_cache stats several cache dirs),
+        # not something to pay for twice in the same poll.
+        adv_findings = advise(cfg, status_doc, indexer)["findings"]
+        seen_cold = {f["category"] for f in adv_findings if f["rule"] == "cold_cache"}
+        saw_ghosts = any(f["rule"] == "ghosts_heavy" for f in adv_findings)
+
+        if "cold_cache" in cats:
+            cold_mem = mem.setdefault("cold_cache", {})
+            for f in adv_findings:
+                if f["rule"] != "cold_cache":
+                    continue
+                cat = f["category"]
+                if not cold_mem.get(cat, False):
+                    queue.append({"category": "cold_cache", "cache_category": cat,
+                                  "bytes": f["bytes"], "newest_mtime": f["newest_mtime"]})
+                cold_mem[cat] = True
+            # a category that no longer detects as cold (the CLI's own
+            # underlying facts changed, e.g. a manual purge) clears its
+            # latch so a FUTURE re-crossing notifies again.
+            for cat in list(cold_mem):
+                if cat not in seen_cold:
+                    cold_mem[cat] = False
+
+        if "ghosts_heavy" in cats:
+            if saw_ghosts and not mem.get("ghosts_heavy", False):
+                heavy = next(f for f in adv_findings if f["rule"] == "ghosts_heavy")
+                queue.append({"category": "ghosts_heavy", "bytes": heavy["bytes"]})
+            mem["ghosts_heavy"] = saw_ghosts
+
+    return queue
+
+
 # --- burn: live per-process writes (stdlib route, v1) ------------------------
 # /proc/<pid>/io's write_bytes only moves for real block-layer I/O — tmpfs
 # writes never touch it, by design; that's expected, not a bug to work around.
@@ -2665,7 +2867,7 @@ def _burn_seconds(req):
 # lives in sutra.ControlServer now. This dispatch closure carries only the
 # domain commands; ping/status are sutra's job.
 
-def _make_dispatch(cfg, indexer, get_status, path_attr=None):
+def _make_dispatch(cfg, indexer, get_status, path_attr=None, notify_mem=None):
     def dispatch(cmd, req):
         if cmd == "scan":
             started = indexer.scan()
@@ -2749,6 +2951,22 @@ def _make_dispatch(cfg, indexer, get_status, path_attr=None):
             return kernels()
         if cmd == "advise":
             return advise(cfg, get_status(), indexer)
+        if cmd == "notify_check":
+            # notify_mem is None only for callers that never wire it in
+            # (e.g. a future test harness exercising dispatch directly) --
+            # treat that as "nothing armed" rather than crash a socket
+            # command over an internal wiring gap.
+            if notify_mem is None:
+                return {"notifications": []}
+            dry_run = req.get("dry", False)
+            if not isinstance(dry_run, bool):
+                raise ValueError("dry must be a bool")
+            # dry=True computes on a THROWAWAY copy of the crossing-once
+            # memory: a preview must never consume the real notification
+            # opportunity it's only supposed to be showing, or the next
+            # genuine timer tick would silently see nothing new to say.
+            mem = copy.deepcopy(notify_mem) if dry_run else notify_mem
+            return {"notifications": _compute_notify_queue(cfg, get_status(), indexer, mem)}
         if cmd == "burn":
             return burn(_burn_seconds(req), _limit(req), path_attr)
         if cmd == "sweep":
@@ -2783,6 +3001,8 @@ def main():
 
     state = {}
     first_seen = {}   # mountpoint -> when THIS daemon process first polled it
+    notify_mem = {}   # crossing-once memory for _compute_notify_queue, same
+                       # in-memory/resets-on-restart lifetime as state/first_seen
     latest = {"doc": {"error": "no status yet"}}
     indexer = Indexer(cfg)
     ballast_build(cfg)
@@ -2798,7 +3018,7 @@ def main():
                             "scanning": indexer.scanning}
         return doc
 
-    dispatch = _make_dispatch(cfg, indexer, live_status, path_attr)
+    dispatch = _make_dispatch(cfg, indexer, live_status, path_attr, notify_mem)
     ctl = sutra.ControlServer(SOCKET_PATH, sutra.allow_uids({0, uid}), VERSION,
                               dispatch, live_status, socket_owner=(cfg["owner_uid"], -1))
     ctl.start()

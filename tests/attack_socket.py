@@ -122,7 +122,7 @@ def alive(where):
 # ------------------------------------------------------------- command surface
 print("== command-surface hostile fuzz (scan/why/blame/purge/declare/reserve/"
       "journal-cap/fstrim-schedule/tmp-size/ghosts/ballast/kernels/advise/"
-      "burn/sweep) ==")
+      "burn/sweep/notify_check) ==")
 HOSTILE = [
     {"cmd": "status"}, {"cmd": "scan"}, {"cmd": "scan", "extra": "garbage"},
     {"cmd": "why"}, {"cmd": "why", "path": 123}, {"cmd": "why", "path": []},
@@ -220,6 +220,9 @@ HOSTILE = [
     {"cmd": "sweep", "history": True, "limit": -1},
     {"cmd": "sweep", "history": True, "limit": "lots"},
     {"cmd": "sweep", "history": "yes"},
+    {"cmd": "notify_check"}, {"cmd": "notify_check", "dry": "yes"},
+    {"cmd": "notify_check", "dry": 1}, {"cmd": "notify_check", "dry": None},
+    {"cmd": "notify_check", "dry": []}, {"cmd": "notify_check", "extra": "garbage"},
     {"cmd": "wat"}, {"cmd": 123}, {"cmd": None}, {}, {"cmd": []},
 ]
 for msg in HOSTILE:

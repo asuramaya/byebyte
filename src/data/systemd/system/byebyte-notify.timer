@@ -1,0 +1,19 @@
+[Unit]
+Description=byebyte notify — unprompted, non-destructive findings
+
+# Enabled BY DEFAULT (postinst/install.sh), unlike sweep/update: those are
+# opt-in because they either delete files or phone GitHub. This one only
+# reads and, at most, shows a desktop toast for a threshold crossing or a
+# named discovery already gated by notify_categories (config.json) and by
+# a crossing-once memory that never repeats while a condition holds — an
+# opt-in notification feature would just reproduce the exact "byebyte
+# feels useless" problem it exists to fix (ruling, msg 6489/6501).
+# Silenceable per-category in config.json's notify_categories, or disable
+# this timer outright — either is a real off switch.
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

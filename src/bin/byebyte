@@ -20,6 +20,7 @@ so it still answers even mid-daemon-restart. Every verb accepts --json.
   advise                  one-line nudges: near-full mounts, fast growers, cold caches
   burn [--seconds N] [--limit N]   live per-process write rates
   sweep [--dry] [--history]   the unattended reclaim policy (double-consent)
+  notify [--dry]          send any newly-worth-an-interruption finding as a desktop notification
   update [--check]        delegates to byebyte-update
 
 With no verb, runs status. See byebyte(1) for full detail.
@@ -33,7 +34,7 @@ import subprocess
 import sys
 import time
 
-# --- sutra bootstrap (sutra 0.12.9; see docs/BOOTSTRAP.md -- do not hand-edit) ----
+# --- sutra bootstrap (sutra 0.14.3; see docs/BOOTSTRAP.md -- do not hand-edit) ----
 import os as _os
 import sys as _sys
 _PILL = "byebyte"
@@ -709,6 +710,92 @@ def cmd_sweep(argv):
                   "(apt install libnotify-bin)")
 
 
+# --- notify: the unprompted voice (Alfred's ruling, msg 6489/6501) ----------
+# Runs from byebyte-notify.timer (its own unit, its own cadence, enabled by
+# default -- unlike sweep/update this one is meant to work out of the box,
+# since an opt-in notification feature would just reproduce the exact
+# "byebyte feels useless" problem it exists to fix). notify_categories
+# (config.json) is a SEPARATE consent from sweep_categories/purge_disabled
+# -- nothing here ever deletes anything, so it never shares sweep's
+# double-opt-in gate. Delivery reuses notify_owner() below, the same path
+# sweep already proved live in production; this only removes the
+# unnecessary coupling between a working notifier and the one feature that
+# deletes files.
+def _fmt_notify(item):
+    """category -> (summary, body), using the SAME human_* helpers every
+    other verb here renders with -- one place owns formatting, so the
+    notify text can never drift from what `byebyte status`/`advise` say
+    about the identical fact. fast_grower is written to the standard
+    Alfred set (a named path, a real size, a real window, and — when it
+    applies — the tmpfs/RAM annotation): that combination is what made
+    the pytest-xdist finding land instead of reading as an abstract
+    number. It does NOT invent a file count or a human description of
+    WHY a path grew (e.g. "226 abandoned pytest dirs") -- the daemon
+    only ever knows bytes and a path, and inventing detail it doesn't
+    have is exactly the discipline this whole feature was built under."""
+    cat = item["category"]
+    if cat == "mount_alert":
+        mp = item["mountpoint"]
+        if item["state"] == "edquot":
+            why = "quota exhausted"
+        elif item.get("eta_seconds") is not None:
+            why = f"full in {human_eta(item['eta_seconds'])}"
+        else:
+            why = (f"{human_bytes(item.get('effective_free', 0))} of "
+                    f"{human_bytes(item.get('total', 0))} free")
+        return (f"{mp}: {item['state']}", f"{why} — see: byebyte status")
+    if cat == "quota_low":
+        mp = item["mountpoint"]
+        pct = 100 * item["remaining"] / item["limit"] if item["limit"] else 0
+        return (f"{mp}: quota headroom low",
+                f"{human_bytes(item['remaining'])} of {human_bytes(item['limit'])} "
+                f"left ({pct:.0f}%)")
+    if cat == "eta_soon":
+        mp = item["mountpoint"]
+        return (f"{mp} fills in {human_eta(item['eta_seconds'])}",
+                f"burn {human_burn(item['burn_bps'])} — see: byebyte status")
+    if cat == "fast_grower":
+        tmpfs_note = " (tmpfs — this is RAM, not disk)" if item.get("tmpfs") else ""
+        rate_note = (f", {human_bytes(item['bytes_per_day'])}/day"
+                     if item.get("bytes_per_day") is not None else "")
+        return (f"{human_bytes(item['delta_bytes'])} in {item['path']}{tmpfs_note}",
+                f"grew over {human_dt(item['dt_hours'])}{rate_note} — "
+                f"see: byebyte why {os.path.dirname(item['path']) or item['path']}")
+    if cat == "cold_cache":
+        return (f"{item['cache_category']}: cold cache",
+                f"{human_bytes(item['bytes'])}, untouched 90+ days — see: byebyte advise")
+    if cat == "ghosts_heavy":
+        return ("deleted-but-open files holding disk",
+                f"{human_bytes(item['bytes'])} — see: byebyte ghosts")
+    return (cat, json.dumps(item))
+
+
+def cmd_notify(argv):
+    dry = "--dry" in argv
+    doc = request_or_die({"cmd": "notify_check", "dry": dry}, as_json="--json" in argv)
+    if "--json" in argv:
+        print(json.dumps(doc, indent=2))
+        return
+    items = doc.get("notifications", [])
+    if not items:
+        if dry:
+            print("notify: nothing newly worth an interruption")
+        return
+    uid = None
+    if not dry:
+        status = request({"cmd": "status"})
+        uid = (status or {}).get("daemon", {}).get("owner_uid")
+    for item in items:
+        summary, body = _fmt_notify(item)
+        if dry:
+            print(f"  [{item['category']}] {summary} — {body}")
+        else:
+            notify_owner(uid, summary, body)
+    if not dry and shutil.which("notify-send") is None:
+        print("  note: desktop notifications unavailable "
+              "(apt install libnotify-bin)")
+
+
 def cmd_update(argv):
     """Delegate straight to byebyte-update (execvp — its exit code becomes
     ours). `byebyte update --check --json` is the pill's UpdateSurface
@@ -740,7 +827,7 @@ def main():
              "tmp-size": cmd_tmp_size,
              "ghosts": cmd_ghosts, "ballast": cmd_ballast, "kernels": cmd_kernels,
              "advise": cmd_advise, "burn": cmd_burn, "sweep": cmd_sweep,
-             "update": cmd_update}
+             "notify": cmd_notify, "update": cmd_update}
     if verb in verbs:
         verbs[verb](rest)
     elif verb in PLANNED:

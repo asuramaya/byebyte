@@ -1,0 +1,19 @@
+[Unit]
+Description=byebyte notify — deliver newly-crossed findings to the owner
+Documentation=https://github.com/asuramaya/byebyte
+After=byebyted.service
+Requires=byebyted.service
+
+[Service]
+Type=oneshot
+# Same shape as byebyte-sweep.service: a thin socket client, root only so
+# the peercred gate connects unconditionally, byebyted does the actual
+# work (computing what's newly worth saying) and this only delivers it.
+# Unlike sweep, this never writes to disk and never deletes anything —
+# root here is for socket access, not privilege the verb itself needs.
+ExecStart=/usr/local/bin/byebyte notify
+TimeoutStartSec=30
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=no

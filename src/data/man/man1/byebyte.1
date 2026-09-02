@@ -231,6 +231,31 @@ already excludes itself from. Arm it to see real candidates.
 replays past sweep acts and previews from the ledger (default 15, most
 recent first).
 .TP
+.B notify " [\-\-dry]"
+Delivers a desktop notification for whatever is newly worth an
+unprompted interruption, driven by
+.I byebyte\-notify.timer
+(enabled by default, every 5 minutes) and gated by
+.I notify_categories
+in
+.IR config.json .
+Unlike
+.B sweep
+this never deletes anything and never shares its double-consent gate: a
+category worth speaking is either a threshold crossing (a mount entering
+.BR warn / hot / edquot ,
+quota headroom dropping under 20%) or a named, specific discovery (a fast
+index grower, a cold cache, heavy ghosts) \(em never a bare number, never a
+forecast that hasn't earned its confidence.
+.I mount_alert " , " quota_low " , " fast_grower
+are armed by default;
+.I eta_soon " , " cold_cache " , " ghosts_heavy
+are opt-in. Each category speaks once per crossing and stays silent while
+the condition holds, never repeating every timer tick.
+.B \-\-dry
+prints what would be sent without sending it, and without consuming the
+notification opportunity it previewed \(em the next real run still sees it.
+.TP
 .B update " [\-\-check] [\-\-json]"
 Delegates straight to
 .BR byebyte\-update (8).

@@ -2063,6 +2063,85 @@ print("burn warm-up ok: a transient burst inside one tau of daemon start "
       "first_seen clock, not just prev-is-None, matching Alfred's live repro")
 PY
 
+# --- V3.M8: notify -- the unprompted voice (ruling msg 6489/6501). Exercises
+# _compute_notify_queue directly (crossing-once per category, the
+# warming_up guard as defense in depth, fast_grower's reliability floor and
+# tmpfs annotation) and the real dispatch layer's dry-run isolation
+# (copy.deepcopy of the crossing-once memory) -- a dry preview must never
+# consume the real notification opportunity it's only supposed to show.
+# Unconditional, not gated on root/sudo, same as V3.M7.
+python3 - <<'PY'
+import importlib.util
+from importlib.machinery import SourceFileLoader
+
+loader = SourceFileLoader("byebyted_mod_notify", "src/bin/byebyted")
+spec = importlib.util.spec_from_loader("byebyted_mod_notify", loader)
+mod = importlib.util.module_from_spec(spec)
+loader.exec_module(mod)
+
+# --- mount_alert: crossing-once in both directions, warming_up gates it ---
+cfg = dict(mod.DEFAULTS)
+cfg["notify_categories"] = ["mount_alert"]
+mem = {}
+
+def mount(state, warming=False):
+    return {"mounts": [{"mountpoint": "/", "state": state, "eta_seconds": 3 * 86400,
+                        "effective_free": 50, "total": 1000, "burn_warming_up": warming}]}
+
+assert mod._compute_notify_queue(cfg, mount("ok"), None, mem) == []
+q = mod._compute_notify_queue(cfg, mount("warn"), None, mem)
+assert len(q) == 1 and q[0]["category"] == "mount_alert", q
+assert mod._compute_notify_queue(cfg, mount("warn"), None, mem) == [], \
+    "a held condition must not repeat"
+q = mod._compute_notify_queue(cfg, mount("hot"), None, mem)
+assert len(q) == 1, "a FURTHER crossing (warn->hot) notifies again"
+assert mod._compute_notify_queue(cfg, mount("warn"), None, mem) == [], "improving never notifies"
+assert mod._compute_notify_queue(cfg, mount("ok"), None, mem) == [], "recovery never notifies"
+q = mod._compute_notify_queue(cfg, mount("warn"), None, mem)
+assert len(q) == 1, "a fresh crossing after recovery notifies again"
+
+mem2 = {}
+assert mod._compute_notify_queue(cfg, mount("warn", warming=True), None, mem2) == [], \
+    "warming_up suppresses mount_alert even when state itself reads warn"
+
+# --- fast_grower: reliability floor, path-change gate, tmpfs annotation ---
+cfg2 = dict(mod.DEFAULTS)
+cfg2["notify_categories"] = ["fast_grower"]
+mem3 = {}
+status_tmp = {"mounts": [{"mountpoint": "/tmp", "fstype": "tmpfs"}]}
+delta = 5 * 1024**3
+mod._top_grower_rate = lambda indexer: ("/tmp/worker3", delta / 1.0, delta, 1.0)
+q = mod._compute_notify_queue(cfg2, status_tmp, object(), mem3)
+assert len(q) == 1 and q[0]["tmpfs"] is True and q[0]["bytes_per_day"] is not None, q
+assert mod._compute_notify_queue(cfg2, status_tmp, object(), mem3) == [], \
+    "the same top-grower path does not re-notify"
+mod._top_grower_rate = lambda indexer: ("/tmp/worker3", delta / (0.05 / 24), delta, 0.05 / 24)
+assert mod._compute_notify_queue(cfg2, status_tmp, object(), mem3) == [], \
+    "an unreliable (sub-floor) window never queues fast_grower, even for a new-looking rate"
+
+# --- dispatch layer: dry-run must never consume the real crossing ---
+notify_mem = {}
+cfg3 = dict(cfg)
+dispatch = mod._make_dispatch(cfg3, indexer=object(), get_status=lambda: mount("warn"),
+                               path_attr=None, notify_mem=notify_mem)
+r1 = dispatch("notify_check", {"dry": True})
+assert len(r1["notifications"]) == 1 and notify_mem == {}, \
+    "a dry check reports the crossing but leaves the real memory untouched"
+r2 = dispatch("notify_check", {"dry": True})
+assert len(r2["notifications"]) == 1, "a second dry check still sees it -- nothing was consumed"
+r3 = dispatch("notify_check", {"dry": False})
+assert len(r3["notifications"]) == 1 and notify_mem != {}, "the real check consumes it for real"
+assert dispatch("notify_check", {"dry": False})["notifications"] == [], \
+    "a second real check reports nothing new"
+
+print("notify ok: mount_alert crossing-once (both directions) and its "
+      "warming_up guard, fast_grower's reliability floor + tmpfs "
+      "annotation + path-change gate, and dry-run's real/preview "
+      "isolation via the actual dispatch layer -- all verified against "
+      "the shipped _compute_notify_queue and _make_dispatch, not a "
+      "reimplementation of their logic")
+PY
+
 # --- M4: make deb — builds a real .deb; contents include bins+units+man.
 # Builds and inspects only — never installed. The log path is per-invocation
 # unique: a shared dev box runs concurrent smoke passes (root and
@@ -2093,6 +2172,8 @@ for want in usr/bin/byebyted usr/bin/byebyte usr/bin/byebyte-healthcheck \
             lib/systemd/system/byebyte-update.timer \
             lib/systemd/system/byebyte-sweep.service \
             lib/systemd/system/byebyte-sweep.timer \
+            lib/systemd/system/byebyte-notify.service \
+            lib/systemd/system/byebyte-notify.timer \
             usr/share/man/man1/byebyte.1 usr/share/man/man8/byebyted.8 \
             etc/byebyte/config.json; do
     echo "$CONTENTS" | grep -q "$want" \

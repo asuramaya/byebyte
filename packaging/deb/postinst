@@ -26,6 +26,15 @@ case "$1" in
     else
       systemctl start byebyted.service || true
     fi
+    # notify.timer is the one timer enabled BY DEFAULT here, unlike
+    # sweep/update: it never deletes anything and never phones out, only
+    # reads and — gated by notify_categories' own conservative default set,
+    # crossing-once — shows at most a desktop toast for something already
+    # true. An opt-in notification feature would just reproduce the exact
+    # "byebyte feels useless" problem it exists to fix (ruling, msg
+    # 6489/6501). Silenceable per-category in config.json, or:
+    #   sudo systemctl disable --now byebyte-notify.timer
+    systemctl enable --now byebyte-notify.timer >/dev/null 2>&1 || true
     # The GNOME pill stages here (/usr/share/byebyte/extension/) but GNOME
     # Shell only ever scans /usr/share/gnome-shell/extensions/ (system-wide)
     # or ~/.local/share/gnome-shell/extensions/ (per-account) — this path is

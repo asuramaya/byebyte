@@ -96,7 +96,7 @@ burn_path_lru@4096@64\(en65536 (pid/dir pairs kept)
 .PP
 List-typed keys (validated as a list of strings, never clamped):
 .IR include_fstypes ", " tmpfs_mounts ", " exclude_mounts ", " scan_roots ", "
-.IR purge_disabled ", " sweep_categories .
+.IR purge_disabled ", " sweep_categories ", " notify_categories .
 .I purge_disabled
 may only name existing category ids to switch off \(em it can never add a
 path or a category the daemon doesn't already compile in.
@@ -106,6 +106,20 @@ may only name existing category ids to arm for
 unattended ACT path (same invariant, opposite direction: naming one
 enables acting on it, and only on it \(em never widens beyond the
 compiled-in registry).
+.I notify_categories
+names which
+.B notify
+categories are armed
+.RI ( mount_alert ", " quota_low ", " fast_grower ", " eta_soon ", "
+.IR cold_cache ", " ghosts_heavy ),
+defaulting to
+.IR mount_alert ", " quota_low ", " fast_grower .
+Entirely separate from
+.I sweep_categories
+and
+.I purge_disabled
+\(em notify never deletes anything, so it carries its own, lighter
+consent rather than sharing sweep's double opt-in gate.
 .SH FILES
 .TP
 .I /etc/byebyte/config.json
