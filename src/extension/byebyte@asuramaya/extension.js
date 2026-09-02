@@ -131,11 +131,26 @@ function runByebyteJson(args, cancellable, onDone) {
     }
 }
 
-function fmtBurn(bps) {
+// warmingUp/tauSeconds mirror byebyte CLI's own human_burn (src/bin/byebyte)
+// exactly, same fix, same reasoning: a freshly-seeded EWMA (prev=None in
+// poll_mount, byebyted's own state) is NOT a rate of zero, it's NO
+// MEASUREMENT YET, and sharing "quiet"'s word with a genuinely settled
+// reading was the actual defect Alfred found live in the installed CLI
+// (msg 6385/6393) — the pill reads the identical status.json field, so it
+// carried the identical bug even though nobody had looked at it yet.
+function fmtBurn(bps, warmingUp, tauSeconds) {
+    if (warmingUp)
+        return 'warming up';
     const perDay = (bps ?? 0) * 86400;
+    const tauNote = tauSeconds ? ` (${fmtTau(tauSeconds)})` : '';
     if (Math.abs(perDay) < 1024 * 1024)
-        return 'quiet';
-    return `${Pill.fmtBytes(perDay)}/day`;
+        return 'quiet' + tauNote;
+    return `${Pill.fmtBytes(perDay)}/day${tauNote}`;
+}
+function fmtTau(seconds) {
+    if (seconds >= 3600)
+        return `${Math.round((seconds / 3600) * 10) / 10}h avg`;
+    return `${Math.round(seconds / 60)}m avg`;
 }
 function fmtEta(s) {
     if (s == null)
@@ -532,7 +547,8 @@ class ByeByteToggle extends QuickMenuToggle {
             `${Pill.esc(m.mountpoint)}  ` +
             `<span foreground="${ACCENT}">${Pill.fmtBytes(m.effective_free)}</span>` +
             `<span foreground="${DIM}"> of ${Pill.fmtBytes(m.total)} · ` +
-            `${Pill.esc(fmtBurn(m.burn_bps))} · full ${fmtEta(m.eta_seconds)}</span>` +
+            `${Pill.esc(fmtBurn(m.burn_bps, m.burn_warming_up, pill?.burn_tau_seconds))} · ` +
+            `full ${fmtEta(m.eta_seconds)}</span>` +
             quota + snap + reserved + pendingCap;
     }
 

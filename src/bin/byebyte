@@ -99,11 +99,45 @@ def human_bytes(n):
     return f"{n:.1f}T"
 
 
-def human_burn(bps):
+def human_tau(seconds):
+    if seconds is None:
+        return None
+    if seconds >= 3600:
+        return f"{seconds / 3600:g}h avg"
+    return f"{int(seconds / 60)}m avg"
+
+
+# advise's fast_grower window can genuinely be seconds wide (a manual
+# `byebyte scan` moments earlier) -- "0.0h" reads as no elapsed time at
+# all, the same collapse dt_hours' own precision fix (byebyted, see
+# advise()) exists to end. Picks whichever unit keeps at least one
+# significant figure instead of assuming hours always fit.
+def human_dt(hours):
+    seconds = hours * 3600
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    if seconds < 3600:
+        return f"{seconds / 60:.1f}m"
+    return f"{hours:.1f}h"
+
+
+# warming_up/tau_seconds are optional: callers that already have byebyted's
+# per-mount row (cmd_status) and pill digest (burn_tau_seconds) can supply
+# both; callers that only have a bare burn_bps (advise's eta_soon aside)
+# fall back to the old unqualified rendering rather than plumb tau through
+# every surface for a secondary mention. A freshly-seeded EWMA (prev=None
+# in poll_mount) is NOT a rate of zero and not a rate of anything -- it's
+# NO MEASUREMENT YET, and sharing "quiet"'s word with a genuinely settled,
+# real-window reading was the actual defect (ruling 60bc15db, Alfred's
+# finding msg 6385/6393): both used to print identically.
+def human_burn(bps, warming_up=False, tau_seconds=None):
+    if warming_up:
+        return "warming up"
     per_day = bps * 86400
+    tau_note = f" ({human_tau(tau_seconds)})" if tau_seconds else ""
     if abs(per_day) < 1024 * 1024:
-        return "quiet"
-    return f"{human_bytes(per_day)}/day"
+        return "quiet" + tau_note
+    return f"{human_bytes(per_day)}/day{tau_note}"
 
 
 def human_eta(seconds):
@@ -128,12 +162,14 @@ def cmd_status(argv):
         return
     age = int(time.time() - doc["ts"])
     print(f"byebyte v{doc['daemon']['version']}   (status {age}s old)")
+    tau_seconds = (doc.get("pill") or {}).get("burn_tau_seconds")
     for m in doc["mounts"]:
         flag = FLAGS.get(m["state"], "?")
+        burn_text = human_burn(m["burn_bps"], m.get("burn_warming_up", False), tau_seconds)
         line = (f" {flag} {m['mountpoint']:<12} "
                 f"{human_bytes(m['effective_free']):>8} free "
                 f"of {human_bytes(m['total']):>8}   "
-                f"burn {human_burn(m['burn_bps']):<12} "
+                f"burn {burn_text:<12} "
                 f"full {human_eta(m['eta_seconds'])}")
         if m.get("quota"):
             q = m["quota"]
@@ -529,7 +565,16 @@ def cmd_advise(argv):
                   f"{human_bytes(f['remaining'])} of {human_bytes(f['limit'])}"
                   f" left ({pct:.0f}%) — EDQUOT risk")
         elif rule == "fast_grower":
-            print(f"  {f['path']} growing {human_bytes(f['bytes_per_day'])}/day")
+            dt_text = human_dt(f.get("dt_hours", 0))
+            if f.get("bytes_per_day") is not None:
+                print(f"  {f['path']} growing {human_bytes(f['bytes_per_day'])}/day"
+                      f" (measured over {dt_text})")
+            else:
+                # window too short to trust a daily extrapolation (ruling
+                # 60bc15db) -- report the real observation instead of a
+                # manufactured rate; delta_bytes/dt_hours are always real.
+                print(f"  {f['path']} +{human_bytes(f['delta_bytes'])} over "
+                      f"{dt_text} — too short a window to project a daily rate")
         elif rule == "cold_cache":
             print(f"  {f['category']} is {human_bytes(f['bytes'])} and untouched"
                   f" 90+ days — cold cache")

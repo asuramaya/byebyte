@@ -533,6 +533,18 @@ def poll_mount(m, state, cfg, uid, now):
     eff_free = free if quota is None else min(free, quota["remaining"])
 
     prev = state.get(m["mountpoint"])
+    # prev is None on the very first poll ever seen for this mount (fresh
+    # daemon start, or a mount that just appeared) -- sutra.ewma_rate()
+    # seeds burn=0.0 in that case, indistinguishable on the wire from a
+    # genuinely stable mount that's been measured for a real window and
+    # settled near zero. Those are different facts (NO MEASUREMENT YET vs.
+    # a measurement that says "nothing's happening") and must not share a
+    # word -- ruling 60bc15db's "no" vs "I don't know" doctrine, applied to
+    # a rate instead of a boolean. Recorded here, not inside sutra.ewma_rate
+    # itself: sutra.py is vendored from the canonical sutra repo (check-sutra
+    # integrity-guarded), not byebyte's to edit -- prev is already byebyted's
+    # own local state, so this needs no change to the vendored function at all.
+    warming_up = prev is None
     state[m["mountpoint"]], ewma = sutra.ewma_rate(prev, used, now, cfg["burn_tau"])
 
     eta = None
@@ -549,6 +561,7 @@ def poll_mount(m, state, cfg, uid, now):
         "effective_free": eff_free,
         "quota": quota,
         "burn_bps": round(ewma, 1),
+        "burn_warming_up": warming_up,
         "eta_seconds": None if eta is None else int(eta),
         "state": classify(total, eff_free, eta, quota, cfg),
     }
@@ -2284,7 +2297,7 @@ def tmp_size(size, dry_run, cfg):
 # more than a file read or a single systemctl query, and byebyted's own
 # poll_interval (default 30s) is already the slow cadence a separate
 # sampler would exist to approximate.
-def build_pill_summary():
+def build_pill_summary(cfg):
     journal_dir = _journal_dir()
     tmp_options = _tmp_current_options()
     return {
@@ -2300,6 +2313,14 @@ def build_pill_summary():
             "configured_cap": _size_from_options(tmp_options) if tmp_options else None,
             "live_total_bytes": _tmp_live_total_bytes(),
         },
+        # Rides along so a reader (CLI or pill) can disclose the REAL
+        # configured window a burn_bps figure was averaged over, e.g.
+        # "8.6G/day (30m avg)" -- rather than a hardcoded "30m" that would
+        # silently diverge from a customized burn_tau (Alfred's finding,
+        # msg 6385/6393: two rates sharing a "/day" label with no window
+        # named is what let a sign-flipped short-window read pass as a
+        # daily trend).
+        "burn_tau_seconds": cfg["burn_tau"],
     }
 
 
@@ -2435,8 +2456,13 @@ def _category_totals(category, cfg, indexer):
 
 
 def _top_grower_rate(indexer):
-    """Compare the two most recent snapshots per root; return (path,
-    bytes_per_day) for the single biggest grower across all roots, if any."""
+    """Compare the two most recent snapshots per root; return
+    (path, bytes_per_day, delta_bytes, dt_days) for the single biggest
+    grower across all roots, if any. dt_days is the REAL elapsed time
+    between the two snapshots compared -- there is no fixed window here;
+    a manual `byebyte scan` run shortly before this call makes dt_days
+    small, same as any other pair. Callers must check it before trusting
+    bytes_per_day as a daily rate (see _FAST_GROWER_MIN_DT_HOURS)."""
     if indexer is None:
         return None
     con = indexer._connect()
@@ -2467,7 +2493,7 @@ def _top_grower_rate(indexer):
             path, delta = grow
             rate = delta / dt_days
             if best is None or rate > best[1]:
-                best = (path, rate)
+                best = (path, rate, delta, dt_days)
         return best
     finally:
         con.close()
@@ -2476,6 +2502,18 @@ def _top_grower_rate(indexer):
 _COLD_CACHE_BYTES = 5 * 1024 ** 3
 _COLD_CACHE_DAYS = 90
 _FAST_GROWER_BPS_DAY = 2 * 1024 ** 3
+# Below this, dt_days is small enough that extrapolating to a daily rate
+# amplifies ordinary short-window noise into a large, confident, WRONG
+# number -- exactly backwards from doubt (Alfred's finding, msg 6393: a
+# manual `byebyte scan` right before `advise` is the most natural user
+# gesture there is, and it makes the very next comparison span minutes,
+# not a day). A three-minute gap extrapolated to /day is an ~480x
+# multiplier on whatever noise that window happened to contain. One hour
+# is a floor, not a target: short enough that the common scan-then-advise
+# case still gets a real number once genuine time has passed, generous
+# enough that a snapshot pair minutes apart refuses to claim a trend
+# instead of manufacturing one.
+_FAST_GROWER_MIN_DT_HOURS = 1.0
 _GHOSTS_HEAVY_BYTES = 1 * 1024 ** 3
 # advise must stay cheap: only categories whose detect() is a handful of
 # fixed-path stats qualify. project-artifacts has no index shortcut for
@@ -2501,9 +2539,27 @@ def advise(cfg, status_doc, indexer):
                               "remaining": q["remaining"], "limit": q["limit"]})
 
     grower = _top_grower_rate(indexer)
-    if grower is not None and grower[1] > _FAST_GROWER_BPS_DAY:
-        findings.append({"rule": "fast_grower", "path": grower[0],
-                          "bytes_per_day": grower[1]})
+    if grower is not None:
+        path, rate, delta, dt_days = grower
+        if rate > _FAST_GROWER_BPS_DAY:
+            dt_hours = dt_days * 24
+            # bytes_per_day is None when the window is too short to trust
+            # as a daily rate -- delta/dt_hours are ALWAYS the real,
+            # observed numbers regardless, so a caller that can't show a
+            # rate can still show what actually happened (ruling 60bc15db:
+            # refuse to extrapolate, don't refuse to report).
+            findings.append({
+                # dt_hours is NOT rounded here -- round(x, 2) collapses any
+                # sub-36-second window to a flat 0.0, which is exactly the
+                # "genuinely tiny" vs "no measurement" collapse this whole
+                # fix exists to end (caught live by tests/smoke.sh's own
+                # ~1.1s M2 growth fixture: a real, honest window rounded to
+                # an indistinguishable zero). Full precision travels on the
+                # wire; the CLI picks display units (see human_dt below).
+                "rule": "fast_grower", "path": path,
+                "delta_bytes": delta, "dt_hours": dt_hours,
+                "bytes_per_day": rate if dt_hours >= _FAST_GROWER_MIN_DT_HOURS else None,
+            })
 
     for category in _ADVISE_COLD_CACHE_CATEGORIES:
         if category in cfg.get("purge_disabled", []):
@@ -2741,7 +2797,7 @@ def main():
                      "top_paths": path_attr.top_n(10)},
         }
         try:
-            doc["pill"] = build_pill_summary()
+            doc["pill"] = build_pill_summary(cfg)
         except Exception:
             # display-only digest, computed every poll tick alongside mount
             # scanning -- an unexpected failure here (e.g. systemctl

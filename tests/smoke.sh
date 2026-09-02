@@ -1647,9 +1647,22 @@ doc = ask({"cmd": "advise"})
 assert isinstance(doc.get("findings"), list), doc
 growers = [f for f in doc["findings"] if f["rule"] == "fast_grower"]
 assert growers and growers[0]["path"].endswith("/growth"), doc["findings"]
+# ruling 60bc15db (Alfred, msg 6385/6393): this fixture's own two scans are
+# ~1.1s apart -- exactly the "manual scan right before advise" shape that
+# used to extrapolate a sub-second delta into a confident daily rate. Below
+# _FAST_GROWER_MIN_DT_HOURS the daemon must refuse the /day claim outright
+# and report only the real, observed delta/window -- this is a REAL exercise
+# of that floor via the live daemon, not just an isolated logic check.
+g = growers[0]
+assert g["bytes_per_day"] is None, \
+    f"a ~1.1s-apart scan pair must not be extrapolated to a daily rate: {g}"
+assert g["delta_bytes"] >= 3 * 1024 * 1024 * 0.9, g   # same tolerance the M2 blame assertion above uses
+assert 0 < g["dt_hours"] < (1.0 / 60), \
+    f"dt_hours should reflect the real sub-minute window, not a fabricated one: {g}"
 assert ask({"cmd": "ping"})["ok"] is True, "daemon died during advise test"
 print(f"advise ok: {len(doc['findings'])} finding(s), fast_grower on "
-      f"{growers[0]['path']}")
+      f"{g['path']} correctly refuses to extrapolate a {g['dt_hours']*3600:.1f}s "
+      "window to a daily rate")
 PY
 
 BYEBYTE_RUNTIME_DIR=$RD python3 src/bin/byebyte advise | grep -q "growth" \
@@ -1946,7 +1959,7 @@ try:
     # tmp-size's own current_options falls back to the vendor fragment when
     # no byebyte drop-in exists yet (same fallback tmp_size() itself uses),
     # so this reads the FIXTURE's own size=50%, not None
-    empty = mod.build_pill_summary()
+    empty = mod.build_pill_summary(mod.DEFAULTS)
     assert empty["journal_cap"]["current_cap"] is None, empty
     assert empty["journal_cap"]["usage_bytes"] == 32768, empty
     assert empty["tmp_size"]["configured_cap"] == "50%", empty
@@ -1955,13 +1968,14 @@ try:
     fstrim = empty["fstrim_schedule"]
     assert "enabled" in fstrim and "next_run" in fstrim, fstrim
     assert fstrim["enabled"] is None or isinstance(fstrim["enabled"], bool), fstrim
+    assert empty["burn_tau_seconds"] == mod.DEFAULTS["burn_tau"], empty
     assert fstrim["next_run"] is None or isinstance(fstrim["next_run"], str), fstrim
 
     # after real applies: the digest reads back byebyte's own drop-ins,
     # exactly as journal-cap's/tmp-size's own round-trip dry-runs do above
     mod.journal_cap("500M", False, {})
     mod.tmp_size("2G", False, {})
-    after = mod.build_pill_summary()
+    after = mod.build_pill_summary(mod.DEFAULTS)
     assert after["journal_cap"]["current_cap"] == "500M", after
     assert after["tmp_size"]["configured_cap"] == "2G", after
     # tmp-size never remounts /tmp -- live_total_bytes must be genuinely
