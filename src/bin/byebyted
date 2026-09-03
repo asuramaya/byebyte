@@ -3035,6 +3035,32 @@ def _with_mount_context(item, mounts):
     return item
 
 
+def _collapse_nested(items):
+    """Keep only the SHALLOWEST qualifying directory per subtree -- a
+    parent that already qualifies makes every descendant redundant: same
+    bytes counted again at each depth, nine rows for one finding (Alfred's
+    ruling, msg 6673, off the tier's first real-world run: a 253.5G
+    heinrich/data/runs surfaced alongside its own children four and five
+    levels deep, none of the rows summing to anything a reader could
+    trust). Same instinct tier 1 already applies to Trash -- one row with
+    an item count, never one row per entry; `why <path>` already exists
+    for drilling into a finding, so this tier stays a survey, not a tree.
+    Shallowest-first by path depth so a parent is always decided before
+    its children are checked against it; a child that qualifies on its
+    own but whose parent does NOT (the parent fell under large_bytes)
+    stays its own row -- nothing here demotes a genuine, independent
+    finding, only a re-statement of one already reported."""
+    ordered = sorted(items, key=lambda it: it["path"].count(os.sep))
+    kept = []
+    for it in ordered:
+        if any(it["path"] == k["path"]
+               or it["path"].startswith(k["path"].rstrip("/") + "/")
+               for k in kept):
+            continue
+        kept.append(it)
+    return kept
+
+
 _ACCOUNTING_LARGE_LIMIT = 20
 
 
@@ -3090,6 +3116,7 @@ def accounting(cfg, status_doc, indexer):
         item = {"path": path, "bytes": b, "last_access_ts": last,
                  "atime_confidence": _atime_confidence(path, mount_opts)}
         unknown_large.append(_with_mount_context(item, mounts))
+    unknown_large = _collapse_nested(unknown_large)
     unknown_large.sort(key=lambda it: -it["bytes"])
     unknown_large = unknown_large[:_ACCOUNTING_LARGE_LIMIT]
 

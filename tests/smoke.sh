@@ -2208,16 +2208,41 @@ with open(big_file, "wb") as f:
     f.write(b"z" * 16)
 os.utime(big_file, (old_ts, old_ts))
 
+# a child of big_dir that ALSO independently qualifies -- Alfred's real
+# finding (msg 6673): a parent and its own descendants both surfacing as
+# peers, none of the rows summing to anything trustworthy. This one must
+# be collapsed away once its parent qualifies.
+nested_dir = os.path.join(big_dir, "nested")
+os.makedirs(nested_dir)
+nested_file = os.path.join(nested_dir, "g")
+with open(nested_file, "wb") as f:
+    f.write(b"n" * 16)
+os.utime(nested_file, (old_ts, old_ts))
+
+# a SEPARATE tree whose parent does NOT qualify (too small) but whose
+# child does -- must stay its own row: nothing here should demote a
+# genuine, independent finding, only a re-statement of one already
+# reported under a qualifying parent.
+small_parent = os.path.join(tmp, "smallparent")
+child_only = os.path.join(small_parent, "childonly")
+os.makedirs(child_only)
+child_file = os.path.join(child_only, "h")
+with open(child_file, "wb") as f:
+    f.write(b"h" * 16)
+os.utime(child_file, (old_ts, old_ts))
+
 db_path = os.path.join(tmp, "index.db")
 con = sqlite3.connect(db_path)
 con.executescript(mod._SCHEMA)
 cur = con.execute("INSERT INTO scans(ts, root, status) VALUES(?,?,?)",
                    (now, tmp, "done"))
 scan_id = cur.lastrowid
-con.execute("INSERT INTO paths(path) VALUES(?)", (big_dir,))
-path_id = con.execute("SELECT id FROM paths WHERE path=?", (big_dir,)).fetchone()[0]
-con.execute("INSERT INTO dir_stats VALUES(?,?,?,?,?)",
-            (scan_id, path_id, 10 * 1024**3, 1, old_ts))
+for p, b in ((big_dir, 10 * 1024**3), (nested_dir, 8 * 1024**3),
+             (small_parent, 1 * 1024**3), (child_only, 6 * 1024**3)):
+    con.execute("INSERT INTO paths(path) VALUES(?)", (p,))
+    pid = con.execute("SELECT id FROM paths WHERE path=?", (p,)).fetchone()[0]
+    con.execute("INSERT INTO dir_stats VALUES(?,?,?,?,?)",
+                (scan_id, pid, b, 1, old_ts))
 con.commit()
 con.close()
 
@@ -2261,6 +2286,15 @@ assert big_dir in large_paths, tiers["unknown_large"]
 # appear in tier 3 even though its own index row (if any) could qualify.
 assert pip_cache_dir not in large_paths, \
     "a tier-2 cache dir must never also surface as tier-3 unknown-large"
+# Alfred's nesting fix (msg 6673): a qualifying child of an already-
+# qualifying parent must never appear as its own peer row...
+assert nested_dir not in large_paths, \
+    "a descendant of an already-qualifying dir must be collapsed away"
+# ...but a qualifying child of a NON-qualifying parent stays its own,
+# genuine finding -- collapsing must never demote it.
+assert child_only in large_paths, \
+    "a child that qualifies on its own, under a parent that doesn't, must still be reported"
+assert small_parent not in large_paths, tiers["unknown_large"]
 
 # accounting_disabled: names a source, never adds one -- silencing "trash"
 # and "pip-cache" must drop them from their tiers and nothing else.
@@ -2295,11 +2329,14 @@ with open(mod.ACCOUNTING_PATH) as f:
 assert written["tiers"]["condemned"][0]["bytes"] == 4096, written
 
 print("accounting ok: three tiers never merge, tier 3 never re-reports a "
-      "tier 1/2 source, DeletionDate (not mtime) dates Trash, mount "
-      "context (fraction + growth-days) is real and only ever present "
-      "when the underlying figures are, accounting_disabled silences by "
-      "name only, atime_confidence reads noatime/relatime/strictatime "
-      "correctly, and --write round-trips through the real dispatch layer")
+      "tier 1/2 source and collapses a qualifying child of an "
+      "already-qualifying parent while still reporting a qualifying "
+      "child of a non-qualifying one, DeletionDate (not mtime) dates "
+      "Trash, mount context (fraction + growth-days) is real and only "
+      "ever present when the underlying figures are, accounting_disabled "
+      "silences by name only, atime_confidence reads "
+      "noatime/relatime/strictatime correctly, and --write round-trips "
+      "through the real dispatch layer")
 PY
 
 # --- M4: make deb — builds a real .deb; contents include bins+units+man.
