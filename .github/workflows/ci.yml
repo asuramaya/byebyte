@@ -63,5 +63,5 @@ jobs:
       - name: Build the .deb
         run: make deb
 
-      - name: Install for real and poll all four units to completion
+      - name: Install for real and poll all five units to completion
         run: sudo make check-systemd-live

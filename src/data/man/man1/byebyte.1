@@ -256,6 +256,65 @@ the condition holds, never repeating every timer tick.
 prints what would be sent without sending it, and without consuming the
 notification opportunity it previewed \(em the next real run still sees it.
 .TP
+.B accounting " [\-\-write]"
+The stock report, distinct from every other verb here: everything else
+measures a RATE (burn, ETA, thresholds); this measures accumulated,
+unmoving material a rate can never trip an alarm for. Three tiers, always
+rendered separately and in this order \(em CONDEMNED, COLD, UNKNOWN:
+.RS
+.IP \(bu 2
+.B CONDEMNED
+\(em currently just Trash
+.RI ( ~/.local/share/Trash ),
+sized and dated from the freedesktop trash spec's own
+.I DeletionDate
+field (the RECORDED decision, not an inferred one from file mtime).
+.IP \(bu 2
+.B COLD
+\(em extends
+.BR purge 's
+own cache-category detectors (hf\-hub, pip\-cache, uv\-cache, thumbnails,
+rotated\-logs), gated on last\-ACCESS time past
+.I accounting_cold_days
+rather than
+.BR advise 's
+own mtime\-based heuristic.
+.IP \(bu 2
+.B UNKNOWN
+(large & old)
+\(em anything else from the index at or above
+.I accounting_large_bytes
+and past
+.IR accounting_cold_days ,
+not already covered by the first two tiers. Claims NO confidence \(em a
+large, cold directory is not the same fact as safe to remove, and this
+tier never blurs the two (on a machine with real project trees, this is
+the longest and least useful section, by design).
+.RE
+.PP
+Every item is placed next to context the operator already has: what
+fraction of its mount it is, and how many days of that mount's current
+growth it represents \(em placed, never editorialized past that; no
+recommendation is ever printed. Last\-access is sampled (bounded, not a
+full recursive walk) and a mount's atime reliability is checked and
+disclosed:
+.I noatime
+marks a reading as unreliable, and
+.I relatime
+(the common Linux default) marks it as coarse \(em both are said outright
+rather than silently trusted.
+.PP
+Report\-only: no
+.BR \-\-yes ,
+no act path, never wired to
+.BR purge / sweep / declare .
+.B \-\-write
+persists the run to
+.IR /var/lib/byebyte/accounting.json
+(what
+.I byebyte\-accounting.timer
+calls, monthly); an interactive run always computes fresh either way.
+.TP
 .B update " [\-\-check] [\-\-json]"
 Delegates straight to
 .BR byebyte\-update (8).

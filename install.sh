@@ -218,7 +218,8 @@ else
 fi
 
 # 3. systemd: daemon + daily update-CHECK timer + the sweep timer (both
-# opt-in) + the notify timer (ON by default — see below). update.timer
+# opt-in) + the notify timer + the accounting timer (both ON by default —
+# see below). update.timer
 # only ever runs `byebyte-update --check` — it notifies, it never installs
 # unattended. sweep.timer runs `byebyte sweep`, which only ACTS on
 # categories explicitly armed in config.json's sweep_categories —
@@ -233,6 +234,8 @@ install -m 0644 "$SRC/src/data/systemd/system/byebyte-sweep.service"  "$UNITDIR/
 install -m 0644 "$SRC/src/data/systemd/system/byebyte-sweep.timer"    "$UNITDIR/byebyte-sweep.timer"
 install -m 0644 "$SRC/src/data/systemd/system/byebyte-notify.service" "$UNITDIR/byebyte-notify.service"
 install -m 0644 "$SRC/src/data/systemd/system/byebyte-notify.timer"   "$UNITDIR/byebyte-notify.timer"
+install -m 0644 "$SRC/src/data/systemd/system/byebyte-accounting.service" "$UNITDIR/byebyte-accounting.service"
+install -m 0644 "$SRC/src/data/systemd/system/byebyte-accounting.timer"   "$UNITDIR/byebyte-accounting.timer"
 systemctl daemon-reload
 systemctl enable byebyted.service
 # `enable --now` on an ALREADY-active unit is a no-op start — it would leave
@@ -257,6 +260,14 @@ fi
 # per-category in config.json's notify_categories, or disable this timer
 # outright — either is a real off switch.
 systemctl enable --now byebyte-notify.timer
+
+# accounting.timer is the other exception: report-only (Trash, cold caches,
+# large-and-old dirs -- never deletes, no --yes, no act path at all), so
+# there's nothing here to gate behind a second opt-in either. Monthly, not
+# a poller -- it only writes a passive record to accounting.json, never a
+# desktop push, so it can't turn into the same alert fatigue notify.timer
+# is built to avoid (ruling, msg 6633/6643).
+systemctl enable --now byebyte-accounting.timer
 
 # 4. verify perms
 echo "-- verifying"
@@ -288,6 +299,12 @@ discovery — never a bare number) is ON BY DEFAULT for a conservative set;
 never deletes anything, never shares sweep's opt-in gate. Silence a category
 or turn it off entirely in /etc/byebyte/config.json's notify_categories, or:
   sudo systemctl disable --now byebyte-notify.timer
+
+accounting (the monthly stock report: what's already in Trash, what's a
+cold cache, what's large-and-old with no confidence claimed) is ALSO ON BY
+DEFAULT — report-only, never deletes, never pushes a desktop toast of its
+own. Read it any time: byebyte accounting
+  sudo systemctl disable --now byebyte-accounting.timer
 
 >>> the GNOME pill is a separate, per-account, NO-ROOT step — as yourself: <<<
   make pill

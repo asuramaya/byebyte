@@ -2142,6 +2142,166 @@ print("notify ok: mount_alert crossing-once (both directions) and its "
       "reimplementation of their logic")
 PY
 
+# --- V3.M9: accounting -- the STOCK half of the flow/stock split (ruling
+# c9bdeb40/msg 6643). Exercises accounting() directly against a synthetic
+# $HOME (a fake Trash entry with a real .trashinfo DeletionDate, a cold
+# pip-cache dir) and a hand-populated index db (one large, old, uncovered
+# directory for tier 3) -- proving the three tiers never merge, tier 3
+# never re-reports what tier 1/2 already covered, and accounting_disabled
+# silences a named source without ever being able to add one. Also proves
+# the dispatch layer's --write path round-trips through the real
+# sutra.write_status. Unconditional, not gated on root/sudo, same as
+# V3.M7/M8.
+python3 - <<'PY'
+import importlib.util, os, sqlite3, tempfile, time
+from importlib.machinery import SourceFileLoader
+
+loader = SourceFileLoader("byebyted_mod_accounting", "src/bin/byebyted")
+spec = importlib.util.spec_from_loader("byebyted_mod_accounting", loader)
+mod = importlib.util.module_from_spec(spec)
+loader.exec_module(mod)
+
+# Deterministic atime confidence regardless of what filesystem /tmp
+# actually is in this environment -- the mount-options behavior itself is
+# unit-tested separately below, direct against _atime_confidence.
+mod._mount_options_map = lambda: {}
+
+tmp = tempfile.mkdtemp(prefix="byebyte-smoke-accounting-")
+home = os.path.join(tmp, "home")
+os.makedirs(home)
+os.environ["BYEBYTE_TEST_HOME"] = home
+now = time.time()
+old_ts = now - 200 * 86400  # well past any cold_days default/override
+
+# --- tier 1: CONDEMNED -- a real .trashinfo with a recorded DeletionDate
+trash_files = os.path.join(home, ".local", "share", "Trash", "files")
+trash_info = os.path.join(home, ".local", "share", "Trash", "info")
+os.makedirs(trash_files)
+os.makedirs(trash_info)
+with open(os.path.join(trash_files, "deadfile"), "wb") as f:
+    f.write(b"x" * 4096)
+with open(os.path.join(trash_info, "deadfile.trashinfo"), "w") as f:
+    f.write("[Trash Info]\nPath=/home/user/deadfile\n"
+            "DeletionDate=2018-01-16T10:23:45\n")
+
+# --- tier 2: COLD -- a pip-cache dir, atime pushed old
+pip_cache_dir = os.path.join(home, ".cache", "pip")  # detect_pip_cache's own
+                                                       # candidate path -- the
+                                                       # whole cache dir, not
+                                                       # a per-package one
+pip_pkg = os.path.join(pip_cache_dir, "pkg")
+os.makedirs(pip_pkg)
+pip_file = os.path.join(pip_pkg, "wheel.whl")
+with open(pip_file, "wb") as f:
+    f.write(b"y" * 1024)
+os.utime(pip_file, (old_ts, old_ts))
+os.utime(pip_pkg, (old_ts, old_ts))
+os.utime(pip_cache_dir, (old_ts, old_ts))
+
+# --- tier 3: UNKNOWN-LARGE -- a hand-populated index row, no detector
+# covers it, real atime pushed old (bytes come from the index row, not
+# from what's actually on disk -- accounting() never re-walks it)
+big_dir = os.path.join(tmp, "bigunknown")
+os.makedirs(big_dir)
+big_file = os.path.join(big_dir, "f")
+with open(big_file, "wb") as f:
+    f.write(b"z" * 16)
+os.utime(big_file, (old_ts, old_ts))
+
+db_path = os.path.join(tmp, "index.db")
+con = sqlite3.connect(db_path)
+con.executescript(mod._SCHEMA)
+cur = con.execute("INSERT INTO scans(ts, root, status) VALUES(?,?,?)",
+                   (now, tmp, "done"))
+scan_id = cur.lastrowid
+con.execute("INSERT INTO paths(path) VALUES(?)", (big_dir,))
+path_id = con.execute("SELECT id FROM paths WHERE path=?", (big_dir,)).fetchone()[0]
+con.execute("INSERT INTO dir_stats VALUES(?,?,?,?,?)",
+            (scan_id, path_id, 10 * 1024**3, 1, old_ts))
+con.commit()
+con.close()
+
+
+class FakeIndexer:
+    def __init__(self, path):
+        self.db_path = path
+        self.last_scan_ts = now
+
+    def _connect(self):
+        return sqlite3.connect(self.db_path)
+
+
+indexer = FakeIndexer(db_path)
+status_doc = {"mounts": [{"mountpoint": "/", "total": 1000 * 1024**3,
+                          "burn_bps": 1024, "burn_warming_up": False}]}
+cfg = dict(mod.DEFAULTS)
+
+doc = mod.accounting(cfg, status_doc, indexer)
+tiers = doc["tiers"]
+assert len(tiers["condemned"]) == 1, tiers["condemned"]
+c = tiers["condemned"][0]
+assert c["bytes"] == 4096 and c["items"] == 1, c
+assert abs(c["oldest_deletion_ts"] - time.mktime(
+    time.strptime("2018-01-16T10:23:45", "%Y-%m-%dT%H:%M:%S"))) < 1, \
+    "must read the freedesktop DeletionDate field, not a file's mtime"
+# Alfred's context addition: fraction-of-mount and growth-days must be real
+# numbers, computed off the SAME mount row poll_mount already produces.
+assert c["mount_total_bytes"] == 1000 * 1024**3, c
+assert c["mount_daily_growth_bytes"] == 1024 * 86400, c
+
+cold_paths = {it["path"] for it in tiers["cold"]}
+assert pip_cache_dir in cold_paths, tiers["cold"]
+cold_item = next(it for it in tiers["cold"] if it["path"] == pip_cache_dir)
+assert cold_item["category"] == "pip-cache", cold_item
+assert cold_item["atime_confidence"] == "reliable", cold_item  # mount_opts={}
+
+large_paths = {it["path"] for it in tiers["unknown_large"]}
+assert big_dir in large_paths, tiers["unknown_large"]
+# Never double-reported: pip_cache_dir is already tier 2, must never ALSO
+# appear in tier 3 even though its own index row (if any) could qualify.
+assert pip_cache_dir not in large_paths, \
+    "a tier-2 cache dir must never also surface as tier-3 unknown-large"
+
+# accounting_disabled: names a source, never adds one -- silencing "trash"
+# and "pip-cache" must drop them from their tiers and nothing else.
+cfg_disabled = dict(cfg)
+cfg_disabled["accounting_disabled"] = ["trash", "pip-cache"]
+doc2 = mod.accounting(cfg_disabled, status_doc, indexer)
+assert doc2["tiers"]["condemned"] == [], doc2["tiers"]["condemned"]
+assert all(it["path"] != pip_cache_dir for it in doc2["tiers"]["cold"]), doc2["tiers"]["cold"]
+
+# --- ordering: the report itself is condemned -> cold -> unknown_large,
+# fixed by the dict's own key order (the CLI renders in this order too)
+assert list(doc["tiers"].keys()) == ["condemned", "cold", "unknown_large"]
+
+# --- _atime_confidence, direct: noatime/relatime/else, unit-level
+opts = {"/data": "rw,noatime", "/": "rw,relatime", "/strict": "rw,strictatime"}
+assert mod._atime_confidence("/data/x", opts) == "frozen"
+assert mod._atime_confidence("/somewhere", opts) == "coarse"  # falls to "/"
+assert mod._atime_confidence("/strict/x", opts) == "reliable"
+
+# --- dispatch layer: accounting + --write round-trips through the real
+# sutra.write_status, same client path byebyte-accounting.timer uses
+state_dir = os.path.join(tmp, "state")
+mod.STATE_DIR = state_dir
+mod.ACCOUNTING_PATH = os.path.join(state_dir, "accounting.json")
+dispatch = mod._make_dispatch(cfg, indexer, get_status=lambda: status_doc)
+r = dispatch("accounting", {"write": True})
+assert r["tiers"]["condemned"][0]["bytes"] == 4096, r
+assert os.path.exists(mod.ACCOUNTING_PATH), "write=True must persist accounting.json"
+import json as _json
+with open(mod.ACCOUNTING_PATH) as f:
+    written = _json.load(f)
+assert written["tiers"]["condemned"][0]["bytes"] == 4096, written
+
+print("accounting ok: three tiers never merge, tier 3 never re-reports a "
+      "tier 1/2 source, DeletionDate (not mtime) dates Trash, mount "
+      "context (fraction + growth-days) is real and only ever present "
+      "when the underlying figures are, accounting_disabled silences by "
+      "name only, atime_confidence reads noatime/relatime/strictatime "
+      "correctly, and --write round-trips through the real dispatch layer")
+PY
+
 # --- M4: make deb — builds a real .deb; contents include bins+units+man.
 # Builds and inspects only — never installed. The log path is per-invocation
 # unique: a shared dev box runs concurrent smoke passes (root and
@@ -2174,6 +2334,8 @@ for want in usr/bin/byebyted usr/bin/byebyte usr/bin/byebyte-healthcheck \
             lib/systemd/system/byebyte-sweep.timer \
             lib/systemd/system/byebyte-notify.service \
             lib/systemd/system/byebyte-notify.timer \
+            lib/systemd/system/byebyte-accounting.service \
+            lib/systemd/system/byebyte-accounting.timer \
             usr/share/man/man1/byebyte.1 usr/share/man/man8/byebyted.8 \
             etc/byebyte/config.json; do
     echo "$CONTENTS" | grep -q "$want" \

@@ -92,11 +92,13 @@ index_min_bytes@1048576@4096\(en2^40
 snapshot_ring@30@2\(en365
 ballast_gb@2@0\(en32 (0 = off)
 burn_path_lru@4096@64\(en65536 (pid/dir pairs kept)
+accounting_cold_days@60@7\(en3650 (days)
+accounting_large_bytes@5368709120@1073741824\(en2^40 (bytes)
 .TE
 .PP
 List-typed keys (validated as a list of strings, never clamped):
 .IR include_fstypes ", " tmpfs_mounts ", " exclude_mounts ", " scan_roots ", "
-.IR purge_disabled ", " sweep_categories ", " notify_categories .
+.IR purge_disabled ", " sweep_categories ", " notify_categories ", " accounting_disabled .
 .I purge_disabled
 may only name existing category ids to switch off \(em it can never add a
 path or a category the daemon doesn't already compile in.
@@ -120,6 +122,23 @@ and
 .I purge_disabled
 \(em notify never deletes anything, so it carries its own, lighter
 consent rather than sharing sweep's double opt-in gate.
+.PP
+.I accounting_disabled
+may only name
+.IR trash " or an existing "
+.I purge
+cache\-category id
+.RI ( hf\-hub ", " pip\-cache ", " uv\-cache ", " thumbnails ", " rotated\-logs )
+to silence it from
+.BR byebyte (1)'s
+.I accounting
+report \(em same registry invariant as
+.IR purge_disabled :
+it can suppress a source, never add one. Unrelated to
+.IR sweep_categories / purge_disabled / notify_categories :
+accounting never deletes anything and never pushes a notification, so it
+has no double\-consent gate to share and no crossing\-once memory to
+configure.
 .SH FILES
 .TP
 .I /etc/byebyte/config.json
@@ -148,6 +167,16 @@ category with
 and a
 .I dry_run
 status means it was a preview, never a deletion.
+.TP
+.I /var/lib/byebyte/accounting.json
+The most recent
+.BR byebyte (1)
+.I accounting
+run, written when
+.I \-\-write
+is passed (only
+.I byebyte\-accounting.timer
+does this, monthly) \(em a passive record, never a trigger for anything.
 .TP
 .I /var/lib/byebyte/ballast/
 Pre-allocated emergency-reserve slabs.

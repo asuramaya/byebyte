@@ -1,0 +1,19 @@
+[Unit]
+Description=byebyte accounting — periodic stock report
+
+# Enabled BY DEFAULT (postinst/install.sh): report-only, can't hurt. Monthly,
+# not a 5-minute poll like notify.timer — this is an ACCOUNTING, not a
+# monitor, and a once-a-month report that says something true beats a
+# frequent one that says nothing (Alfred's framing, msg 6633). Deliberately
+# does NOT push a desktop notification on its own — --write only persists
+# the run to /var/lib/byebyte/accounting.json for the next `byebyte
+# accounting` to show. A monthly popup for a standing report would train
+# the operator to dismiss byebyte toasts generally, which is exactly what
+# would cost notify.timer's own crossing/discovery categories their value
+# (ruling msg 6643).
+[Timer]
+OnCalendar=monthly
+Persistent=true
+
+[Install]
+WantedBy=timers.target

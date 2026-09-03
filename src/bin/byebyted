@@ -110,6 +110,15 @@ DEFAULTS = {
     # (Alfred). eta_soon/cold_cache/ghosts_heavy stay opt-in until
     # crossing-once has been trusted in the field.
     "notify_categories": ["mount_alert", "quota_low", "fast_grower"],
+    # accounting: the STOCK half of the flow/stock split (Alfred's ruling
+    # c9bdeb40) -- report-only, never wired to purge/sweep/declare, so it
+    # carries no double-consent gate at all, only a name-level silencer.
+    "accounting_cold_days": 60,     # last-ACCESS (not mtime) age to call "cold"
+    "accounting_large_bytes": 5 * 1024 ** 3,  # tier-3 floor: unknown_large's size gate
+    "accounting_disabled": [],      # "trash" or any _ADVISE_COLD_CACHE_CATEGORIES id
+                                     # -- purge_disabled's shape: silences a
+                                     # tier-1/2 source from the report, can
+                                     # never add one (registry invariant)
 }
 
 # The complete set notify_categories may name -- anything else is silently
@@ -132,6 +141,8 @@ CLAMPS = {
     "snapshot_ring": (2, 365),
     "ballast_gb": (0, 32),
     "burn_path_lru": (64, 65536),
+    "accounting_cold_days": (7, 3650),
+    "accounting_large_bytes": (1 * 1024 ** 3, 1 << 40),
 }
 
 
@@ -654,6 +665,7 @@ def write_status(doc, cfg):
 
 STATE_DIR = os.environ.get("BYEBYTE_STATE_DIR", "/var/lib/byebyte")
 DB_PATH = os.path.join(STATE_DIR, "index.db")
+ACCOUNTING_PATH = os.path.join(STATE_DIR, "accounting.json")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS paths(
@@ -2801,6 +2813,290 @@ def _compute_notify_queue(cfg, status_doc, indexer, mem):
     return queue
 
 
+# --- accounting: the STOCK half of the flow/stock split (Alfred's ruling ----
+# c9bdeb40, 2026-09-03): every measurement above is a RATE, and a rate only
+# matters near a cliff. This machine wasn't near one -- 66 days of runway,
+# zero real OOM across five boots -- while sitting on 45G of files the
+# operator had already condemned to Trash, invisible to every rule above
+# because none of them watch for accumulated, unmoving material. Three
+# tiers, rendered separately, NEVER merged, ordered CONDEMNED -> COLD ->
+# UNKNOWN-LARGE so a reader who stops after the first section got the best
+# thing this run had: on a machine with real, intentional large trees (a
+# code checkout, a backup mirror) tier 3 is the longest and least useful
+# section, and it claims no confidence about any of it -- large and old is
+# not the same fact as safe to remove, and this must never blur the two.
+#
+# Never wired to purge/sweep/declare: report-only, no --yes, no act path,
+# not even a stub -- there is nothing destructive here to gate, so it gets
+# none of that machinery. `accounting_disabled` (config) can silence a
+# tier-1/2 source by name; it can never add one (the same registry
+# invariant as purge_disabled).
+def _mount_options_map():
+    """mountpoint -> its resolved per-mount option string, from
+    mountinfo's pre-hyphen field 6. The kernel always resolves the atime
+    mode explicitly here (one of atime/noatime/relatime/strictatime),
+    which is what makes it possible to know whether a last-access reading
+    from that mount can be trusted at all."""
+    m = {}
+    try:
+        with open("/proc/self/mountinfo") as f:
+            for line in f:
+                pre = line.split(" - ", 1)[0].split()
+                if len(pre) > 5:
+                    m[pre[4]] = pre[5]
+    except OSError:
+        pass
+    return m
+
+
+def _atime_confidence(path, mount_opts):
+    """"frozen" (noatime -- last-access never moves, don't trust it at
+    all), "coarse" (relatime -- the Linux default; atime only updates
+    once/day-ish or on a write, so it lags real reads by design), or
+    "reliable" (atime/strictatime). A wrong "last accessed" reading is
+    exactly the confident-but-false claim this family has spent a month
+    eliminating (burn-rate warm-up, reserved_percent_unknown) -- the same
+    "no vs I don't know" cut applies here, just against a mount option
+    instead of a read failure."""
+    best_mp, best_opts = None, None
+    for mp, opts in mount_opts.items():
+        if path == mp or path.startswith(mp.rstrip("/") + "/") or mp == "/":
+            if best_mp is None or len(mp) > len(best_mp):
+                best_mp, best_opts = mp, opts
+    if best_opts is None:
+        return "reliable"  # no mount data at all -- nothing to distrust yet
+    if "noatime" in best_opts:
+        return "frozen"
+    if "relatime" in best_opts:
+        return "coarse"
+    return "reliable"
+
+
+_ATIME_SAMPLE_CAP = 500
+
+
+def _sample_atime(path):
+    """Bounded last-access probe, at most _ATIME_SAMPLE_CAP file stats
+    across the whole subtree -- not a full recursive walk, and NOT the
+    directory's own atime: a directory's atime only moves when something
+    LISTS it, never when a file inside is read, so it says nothing about
+    whether the CONTENT is cold. Returns None on an empty/unreadable
+    tree -- no fabricated age for something that couldn't be measured."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return None
+    if os.path.islink(path):
+        return None
+    if not os.path.isdir(path):
+        return st.st_atime
+    best = None
+    checked = 0
+    stack = [path]
+    while stack and checked < _ATIME_SAMPLE_CAP:
+        p = stack.pop()
+        try:
+            entries = os.scandir(p)
+        except OSError:
+            continue
+        with entries:
+            for e in entries:
+                if checked >= _ATIME_SAMPLE_CAP:
+                    break
+                try:
+                    if e.is_symlink():
+                        continue
+                    if e.is_dir(follow_symlinks=False):
+                        stack.append(e.path)
+                        continue
+                    est = e.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                checked += 1
+                best = est.st_atime if best is None else max(best, est.st_atime)
+    return best
+
+
+_TRASH_DELETION_DATE = re.compile(
+    r"^DeletionDate=(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})")
+
+
+def _parse_trashinfo(info_path):
+    """The RECORDED DeletionDate from a .trashinfo file (freedesktop trash
+    spec) -- the documented fact, not an inferred one. "already decided"
+    is only true here because this field is where the decision is actually
+    written down; a file's own mtime is usually long before the trashing,
+    not at it. Best-effort: a missing/malformed field dates this one entry
+    as unknown, never fails the whole tier."""
+    try:
+        with open(info_path, "r", errors="replace") as f:
+            for line in f:
+                m = _TRASH_DELETION_DATE.match(line.strip())
+                if m:
+                    try:
+                        return time.mktime(
+                            time.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S"))
+                    except ValueError:
+                        return None
+    except OSError:
+        pass
+    return None
+
+
+def _detect_trash(cfg):
+    """~/.local/share/Trash -- tier 1's one source. A single aggregate
+    item, not one per entry: Trash is one verdict the operator already
+    gave (freedesktop trash spec's own files/+info/ pair), not a pile of
+    separate decisions to re-litigate."""
+    home = _resolve_owner_home(cfg)
+    if not home:
+        return None
+    trash = os.path.join(home, ".local", "share", "Trash")
+    files_dir = os.path.join(trash, "files")
+    info_dir = os.path.join(trash, "info")
+    if not os.path.isdir(files_dir) or not os.path.isdir(info_dir):
+        return None
+    if not _verify_inside(trash, home):
+        return None
+    try:
+        info_entries = list(os.scandir(info_dir))
+    except OSError:
+        return None
+    total = count = 0
+    oldest = None
+    for e in info_entries:
+        if not e.name.endswith(".trashinfo"):
+            continue
+        target = os.path.join(files_dir, e.name[: -len(".trashinfo")])
+        try:
+            st = os.lstat(target)
+        except OSError:
+            continue  # info entry with no matching file — nothing to size
+        b = st.st_size if not os.path.isdir(target) else _dir_size(target)
+        total += b
+        count += 1
+        ts = _parse_trashinfo(e.path)
+        if ts is not None:
+            oldest = ts if oldest is None else min(oldest, ts)
+    if count == 0:
+        return None
+    return {"path": trash, "bytes": total, "items": count,
+            "oldest_deletion_ts": oldest}
+
+
+def _index_latest_dirs(indexer):
+    """{"path", "bytes"} for every indexed dir in each root's single MOST
+    RECENT done scan -- reuses whatever the nightly/manual scan already
+    found, no live walk of its own. Nested dirs both appear (a parent and
+    a large child inside it) exactly as the index already stores them --
+    tier 3 doesn't collapse that, it's the same shape advise/why/blame
+    already show."""
+    if indexer is None:
+        return []
+    con = indexer._connect()
+    try:
+        roots = [r[0] for r in con.execute(
+            "SELECT DISTINCT root FROM scans WHERE status='done'").fetchall()]
+        out = []
+        for root in roots:
+            head = con.execute(
+                "SELECT id FROM scans WHERE status='done' AND root=?"
+                " ORDER BY ts DESC LIMIT 1", (root,)).fetchone()
+            if head is None:
+                continue
+            rows = con.execute(
+                "SELECT p.path, d.bytes FROM dir_stats d"
+                " JOIN paths p ON p.id = d.path_id WHERE d.scan_id=?",
+                (head[0],)).fetchall()
+            out.extend({"path": p, "bytes": b} for p, b in rows)
+        return out
+    finally:
+        con.close()
+
+
+def _with_mount_context(item, mounts):
+    """Alfred's one addition to the proposal: place each tier's number
+    next to something the operator already knows -- what fraction of the
+    mount it is, and how many days of the mount's own current growth it's
+    worth. Both numbers are already computed elsewhere (poll_mount's
+    total/burn_bps); this only attaches them, the CLI does the arithmetic
+    and the sentence, same daemon-computes/CLI-renders split as everywhere
+    else. Never editorializes past that -- no recommendation, just
+    context, and only when the underlying number is real: a warming-up or
+    unreachable mount contributes no growth comparison rather than a
+    fabricated one."""
+    m = _mount_for_path(os.path.abspath(item["path"]), mounts)
+    item["mountpoint"] = m["mountpoint"] if m else None
+    item["mount_total_bytes"] = m.get("total") if m else None
+    growth = None
+    if m and not m.get("burn_warming_up") and m.get("burn_bps", 0) > 0:
+        growth = m["burn_bps"] * 86400
+    item["mount_daily_growth_bytes"] = growth
+    return item
+
+
+_ACCOUNTING_LARGE_LIMIT = 20
+
+
+def accounting(cfg, status_doc, indexer):
+    """The full stock-accounting report: {"ts", "tiers": {"condemned",
+    "cold", "unknown_large"}}, each a list of raw-fact items -- the CLI
+    owns every human_* rendering, same split as advise/notify. On-demand
+    (byebyte accounting) or periodic (byebyte-accounting.timer, monthly),
+    never both an alarm and a monitor: this function is called, it never
+    calls out."""
+    mounts = (status_doc or {}).get("mounts") or []
+    mount_opts = _mount_options_map()
+    disabled = set(cfg.get("accounting_disabled", []))
+    cold_days = cfg["accounting_cold_days"]
+    large_bytes = cfg["accounting_large_bytes"]
+    now = time.time()
+
+    condemned = []
+    covered = []  # trash + cold-cache paths, so tier 3 never re-reports them
+    if "trash" not in disabled:
+        t = _detect_trash(cfg)
+        if t:
+            condemned.append(_with_mount_context(t, mounts))
+            covered.append(t["path"])
+
+    cold = []
+    for category in _ADVISE_COLD_CACHE_CATEGORIES:
+        if category in disabled or category in cfg.get("purge_disabled", []):
+            continue
+        detect, _, _, _ = REGISTRY[category]
+        for c in detect(cfg, indexer):
+            covered.append(c["path"])
+            last = _sample_atime(c["path"])
+            if last is None or (now - last) < cold_days * 86400:
+                continue
+            item = {"category": category, "path": c["path"], "bytes": c["bytes"],
+                     "last_access_ts": last,
+                     "atime_confidence": _atime_confidence(c["path"], mount_opts)}
+            cold.append(_with_mount_context(item, mounts))
+    cold.sort(key=lambda it: -it["bytes"])
+
+    unknown_large = []
+    for row in _index_latest_dirs(indexer):
+        path, b = row["path"], row["bytes"]
+        if b < large_bytes:
+            continue
+        if any(path == cp or path.startswith(cp.rstrip("/") + "/")
+               or cp.startswith(path.rstrip("/") + "/") for cp in covered):
+            continue  # already accounted for in tier 1 or 2 -- never twice
+        last = _sample_atime(path)
+        if last is None or (now - last) < cold_days * 86400:
+            continue
+        item = {"path": path, "bytes": b, "last_access_ts": last,
+                 "atime_confidence": _atime_confidence(path, mount_opts)}
+        unknown_large.append(_with_mount_context(item, mounts))
+    unknown_large.sort(key=lambda it: -it["bytes"])
+    unknown_large = unknown_large[:_ACCOUNTING_LARGE_LIMIT]
+
+    return {"ts": now, "tiers": {"condemned": condemned, "cold": cold,
+                                  "unknown_large": unknown_large}}
+
+
 # --- burn: live per-process writes (stdlib route, v1) ------------------------
 # /proc/<pid>/io's write_bytes only moves for real block-layer I/O — tmpfs
 # writes never touch it, by design; that's expected, not a bug to work around.
@@ -2951,6 +3247,15 @@ def _make_dispatch(cfg, indexer, get_status, path_attr=None, notify_mem=None):
             return kernels()
         if cmd == "advise":
             return advise(cfg, get_status(), indexer)
+        if cmd == "accounting":
+            write = req.get("write", False)
+            if not isinstance(write, bool):
+                raise ValueError("write must be a bool")
+            doc = accounting(cfg, get_status(), indexer)
+            if write:
+                os.makedirs(STATE_DIR, exist_ok=True)
+                sutra.write_status(ACCOUNTING_PATH, doc, owner=(cfg["owner_uid"], -1))
+            return doc
         if cmd == "notify_check":
             # notify_mem is None only for callers that never wire it in
             # (e.g. a future test harness exercising dispatch directly) --

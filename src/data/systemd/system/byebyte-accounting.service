@@ -1,0 +1,21 @@
+[Unit]
+Description=byebyte accounting — periodic stock report (condemned/cold/unknown-large)
+Documentation=https://github.com/asuramaya/byebyte
+After=byebyted.service
+Requires=byebyted.service
+
+[Service]
+Type=oneshot
+# Same shape as byebyte-notify.service: a thin socket client, root only so
+# the peercred gate connects unconditionally, byebyted does the actual
+# work (Trash/cache/index accounting) and this only asks for it. --write
+# persists the run to /var/lib/byebyte/accounting.json — a passive record
+# for `byebyte accounting` to show next time, never a desktop push: a
+# monthly popup for a standing report is noise, not signal, the same
+# failure mode the notify work exists to avoid (Alfred's ruling, msg 6643).
+ExecStart=/usr/local/bin/byebyte accounting --write
+TimeoutStartSec=120
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=no

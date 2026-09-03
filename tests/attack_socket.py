@@ -122,7 +122,7 @@ def alive(where):
 # ------------------------------------------------------------- command surface
 print("== command-surface hostile fuzz (scan/why/blame/purge/declare/reserve/"
       "journal-cap/fstrim-schedule/tmp-size/ghosts/ballast/kernels/advise/"
-      "burn/sweep/notify_check) ==")
+      "burn/sweep/notify_check/accounting) ==")
 HOSTILE = [
     {"cmd": "status"}, {"cmd": "scan"}, {"cmd": "scan", "extra": "garbage"},
     {"cmd": "why"}, {"cmd": "why", "path": 123}, {"cmd": "why", "path": []},
@@ -223,6 +223,14 @@ HOSTILE = [
     {"cmd": "notify_check"}, {"cmd": "notify_check", "dry": "yes"},
     {"cmd": "notify_check", "dry": 1}, {"cmd": "notify_check", "dry": None},
     {"cmd": "notify_check", "dry": []}, {"cmd": "notify_check", "extra": "garbage"},
+    # accounting is report-only (no --yes, no act path at all) and this
+    # harness's BYEBYTE_STATE_DIR is already redirected into the fixture's
+    # own RD -- write: True is safe to fuzz freely, same as sweep/notify
+    # above, it can never touch the real box's /var/lib/byebyte.
+    {"cmd": "accounting"}, {"cmd": "accounting", "write": "yes"},
+    {"cmd": "accounting", "write": 1}, {"cmd": "accounting", "write": None},
+    {"cmd": "accounting", "write": []}, {"cmd": "accounting", "write": True},
+    {"cmd": "accounting", "extra": "garbage"},
     {"cmd": "wat"}, {"cmd": 123}, {"cmd": None}, {}, {"cmd": []},
 ]
 for msg in HOSTILE:
