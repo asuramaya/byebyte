@@ -17,6 +17,18 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Pill from './pill.js';
 
 const STATUS_PATH = '/run/byebyte/status.json';
+// Storage Sense (operator ruling 2026-09-05): read directly, not through
+// status.json's own `pill` digest — accounting/policy both write on their
+// own cadence (weekly, plus policy's own free-space-crossing trigger),
+// never every 30s poll like build_pill_summary()'s other fields, so
+// folding them into that digest would make byebyted recompute or re-read
+// them on every single poll tick for no reason. Both are mode 0640,
+// chowned to owner_uid by sutra.write_status — the same account this
+// extension itself runs as, so a plain file read needs no daemon round
+// trip, same as status.json.
+const STATE_DIR = '/var/lib/byebyte';
+const ACCOUNTING_PATH = `${STATE_DIR}/accounting.json`;
+const POLICY_RECEIPT_PATH = `${STATE_DIR}/policy_runs/latest.json`;
 const {PALETTE} = Pill;
 const {DIM, ACCENT, WARN} = PALETTE;
 
@@ -232,6 +244,59 @@ function readStatus() {
     return Pill.readStatusFile(STATUS_PATH, o => Array.isArray(o.mounts));
 }
 
+function readPolicyReceipt() {
+    return Pill.readStatusFile(POLICY_RECEIPT_PATH, o => Pill.isObj(o.totals));
+}
+
+function readAccounting() {
+    return Pill.readStatusFile(ACCOUNTING_PATH, o => Pill.isObj(o.totals));
+}
+
+// today / yesterday / a weekday name / an ISO date, whichever is coarsest
+// still useful — same instinct as fmtEta's own step-down, never a bare
+// timestamp.
+function relativeDay(ts) {
+    if (Pill.num(ts) == null)
+        return '';
+    const nowUnix = GLib.DateTime.new_now_local().to_unix();
+    const days = Math.floor((nowUnix - ts) / 86400);
+    if (days <= 0)
+        return 'today';
+    if (days === 1)
+        return 'yesterday';
+    const then = GLib.DateTime.new_from_unix_local(Math.floor(ts));
+    if (days < 7)
+        return then.format('%A');
+    return then.format('%Y-%m-%d');
+}
+
+// Findings ▸'s own label, the three (four, counting "nothing") shapes from
+// the proposal Alfred/the operator approved (msg 7133/7151) — a literal
+// JS port of byebyte CLI's own _accounting_headline priority, extended
+// with policy's own totals ahead of accounting's report-only ones: a
+// policy run's own freed/would-free total is a MORE CURRENT fact than
+// accounting's own (accounting only runs weekly and never acts at all).
+// Priority: a real run that actually freed something (the most current,
+// most actionable fact) > a dry run's own preview of what the NEXT run
+// would do > accounting's own named-but-unactionable unknown total > an
+// honest "nothing to do" — never a bare number, never silence.
+function findingsLabel(policyDoc, accountingDoc) {
+    if (Pill.isObj(policyDoc) && policyDoc.dry_run === false) {
+        const freed = Pill.num(policyDoc.totals?.bytes_freed) ?? 0;
+        if (freed > 0)
+            return `freed ${Pill.fmtBytes(freed)} ${relativeDay(policyDoc.ts)}`;
+    }
+    if (Pill.isObj(policyDoc) && policyDoc.dry_run !== false) {
+        const would = Pill.num(policyDoc.totals?.would_free_bytes) ?? 0;
+        if (would > 0)
+            return `next run would free ${Pill.fmtBytes(would)} (dry run)`;
+    }
+    const unknown = Pill.num(accountingDoc?.totals?.unknown_bytes) ?? 0;
+    if (unknown > 0)
+        return `${Pill.fmtBytes(unknown)} unknown, your call`;
+    return 'nothing to do';
+}
+
 // re-check cadence for the pill's own "update available" row — independent
 // of byebyte-update.timer (which only notifies/logs, never paints the UI).
 // GitHub's unauthenticated rate limit (60/h) has no trouble with this.
@@ -278,6 +343,13 @@ class ByeByteToggle extends QuickMenuToggle {
         this.menu.addMenuItem(this._moreMountsItem);
 
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+        // Findings ▸ — Storage Sense's own fold (operator ruling
+        // 2026-09-05, proposal msg 7133/7151). First landing: the label
+        // alone, read live from policy's own receipt and accounting's own
+        // report — no acts here yet, those land next.
+        this._findingsItem = new PopupMenu.PopupSubMenuMenuItem('Findings ▸');
+        this.menu.addMenuItem(this._findingsItem);
+
         // Advanced ▸ — now ONLY the true system-wide singletons: journal
         // cap, fstrim schedule. reserved% and tmp-size both moved into
         // each mount's own row (they're about a specific mount, not the
@@ -309,6 +381,8 @@ class ByeByteToggle extends QuickMenuToggle {
                 rec.item.destroy();
             this._mountItems.clear();
             this._moreMountsItem.visible = false;
+            this._findingsItem.menu.removeAll();
+            this._findingsItem.label.text = 'Findings ▸';
             this._advancedItem.menu.removeAll();
             this._advancedItem.label.text = 'Advanced ▸';
             if (this._offlinePlaceholder)
@@ -466,6 +540,7 @@ class ByeByteToggle extends QuickMenuToggle {
                 `${folded.length} more mount${folded.length === 1 ? '' : 's'} ▸`;
         }
 
+        this._renderFindings();
         this._renderControls(pill);
 
         const heroSub = hero ? this.subtitle : 'bytes at rest';
@@ -550,6 +625,26 @@ class ByeByteToggle extends QuickMenuToggle {
             `${Pill.esc(fmtBurn(m.burn_bps, m.burn_warming_up, pill?.burn_tau_seconds))} · ` +
             `full ${fmtEta(m.eta_seconds)}</span>` +
             quota + snap + reserved + pendingCap;
+    }
+
+    // ---- Findings ▸: Storage Sense's own fold (msg 7133/7151) ---------------
+    // First landing: label only. The label reads live from policy's own
+    // receipt (POLICY_RECEIPT_PATH) and accounting's own report
+    // (ACCOUNTING_PATH) — both plain file reads, no daemon round trip,
+    // since neither updates on the 30s poll cadence the rest of this pill
+    // does. The submenu itself stays a single pointer to the CLI for now;
+    // the act set (run policy now / open report) is the next landing, not
+    // this one — no per-category buttons and no policy editing in the
+    // pill either way, ever (the file is the contract).
+    _renderFindings() {
+        const policyDoc = readPolicyReceipt();
+        const accountingDoc = readAccounting();
+        this._findingsItem.label.text =
+            `Findings ▸  (${findingsLabel(policyDoc, accountingDoc)})`;
+        const menu = this._findingsItem.menu;
+        menu.removeAll();
+        menu.addMenuItem(new PopupMenu.PopupMenuItem(
+            'see: byebyte policy report', {reactive: false}));
     }
 
     // ---- Advanced ▸: the true system-wide singletons only ------------------
