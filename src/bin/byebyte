@@ -135,8 +135,18 @@ def human_dt(hours):
 # NO MEASUREMENT YET, and sharing "quiet"'s word with a genuinely settled,
 # real-window reading was the actual defect (ruling 60bc15db, Alfred's
 # finding msg 6385/6393): both used to print identically.
-def human_burn(bps, warming_up=False, tau_seconds=None):
+def human_burn(bps, warming_up=False, tau_seconds=None,
+              stale_bps=None, stale_age_seconds=None):
     if warming_up:
+        # msg 7371 item 5: a fresh restart shouldn't have to say nothing
+        # for a full tau when a real, if aging, rate exists -- basis
+        # named in the sentence (8adbfe6c) so it never reads as live.
+        if stale_bps is not None:
+            per_day = stale_bps * 86400
+            amt = "quiet" if abs(per_day) < 1024 * 1024 else f"{human_bytes(per_day)}/day"
+            age = f", {human_dt(stale_age_seconds / 3600)} ago" \
+                if stale_age_seconds is not None else ""
+            return f"{amt} (before restart{age})"
         return "warming up"
     per_day = bps * 86400
     tau_note = f" ({human_tau(tau_seconds)})" if tau_seconds else ""
@@ -170,7 +180,8 @@ def cmd_status(argv):
     tau_seconds = (doc.get("pill") or {}).get("burn_tau_seconds")
     for m in doc["mounts"]:
         flag = FLAGS.get(m["state"], "?")
-        burn_text = human_burn(m["burn_bps"], m.get("burn_warming_up", False), tau_seconds)
+        burn_text = human_burn(m["burn_bps"], m.get("burn_warming_up", False), tau_seconds,
+                               m.get("burn_bps_stale"), m.get("burn_stale_age_seconds"))
         line = (f" {flag} {m['mountpoint']:<12} "
                 f"{human_bytes(m['effective_free']):>8} free "
                 f"of {human_bytes(m['total']):>8}   "
@@ -605,7 +616,12 @@ def _accounting_context(item):
     growth = item.get("mount_daily_growth_bytes")
     if growth:
         days = item["bytes"] / growth
-        parts.append(f"{days:.1f}d of its current growth")
+        # basis-in-the-sentence (8adbfe6c, extended by msg 7371 item 5):
+        # a rate measured before the daemon's last restart is real, but
+        # it is not THIS run's own measurement -- say so, rather than
+        # let a stale number read as current.
+        basis = ", rate from before restart" if item.get("mount_growth_is_stale") else ""
+        parts.append(f"{days:.1f}d of its current growth{basis}")
     return f" — {', '.join(parts)}" if parts else ""
 
 

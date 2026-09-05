@@ -308,7 +308,12 @@ unless that segment is itself a dot\-dir \(em a container, not an owner
 never a guessed service name with no evidence behind it), its
 .B cost
 in context (what fraction of its mount it is, and how many days of that
-mount's current growth it represents), and a fixed, tier\-appropriate
+mount's current growth it represents \(em and, for the first
+.I burn_tau
+after every daemon restart, the last rate this daemon actually measured
+before it died rather than nothing at all, marked
+.RI \(dq "rate from before restart" \(dq
+so it never reads as a live one), and a fixed, tier\-appropriate
 .B remedy
 phrase. Nothing here is ever a specific claim of certainty or a
 recommendation past that placement. An item under

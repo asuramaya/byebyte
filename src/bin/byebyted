@@ -560,7 +560,7 @@ def _btrfs_notice_for_path(path):
 
 # --- polling ----------------------------------------------------------------
 
-def poll_mount(m, state, cfg, uid, now, first_seen):
+def poll_mount(m, state, cfg, uid, now, first_seen, burn_history=None):
     try:
         sv = os.statvfs(m["mountpoint"])
     except OSError:
@@ -626,6 +626,27 @@ def poll_mount(m, state, cfg, uid, now, first_seen):
         "eta_seconds": None if eta is None else int(eta),
         "state": classify(total, eff_free, eta, quota, cfg),
     }
+    # Alfred's finding (msg 7371 item 5): a citation's own "days of
+    # growth" context vanishes for a full tau after every restart, and a
+    # freshly-installed byebyte -- this release, going onto the
+    # operator's box -- has JUST restarted. `state`/`first_seen` reset in
+    # memory by design (the EWMA's own history has to reset with it), but
+    # the last CONVERGED rate this process measured before it died is a
+    # real fact worth keeping, with its own age disclosed, rather than
+    # silently omitting growth context every single restart. Persisted
+    # across restarts (unlike state/first_seen); an honest, disclosed
+    # fallback, never presented as live -- attached only while genuinely
+    # warming up, and only when one was ever actually measured (a
+    # brand-new mount with no history gets nothing to fall back on,
+    # correctly).
+    if burn_history is not None:
+        if not warming_up:
+            burn_history[mp] = {"bps": row["burn_bps"], "ts": now}
+        else:
+            stale = burn_history.get(mp)
+            if isinstance(stale, dict) and "bps" in stale and "ts" in stale:
+                row["burn_bps_stale"] = stale["bps"]
+                row["burn_stale_age_seconds"] = round(now - stale["ts"], 1)
     if m["fstype"] == "btrfs":
         row["btrfs"] = btrfs_info(m["mountpoint"])
     if m["fstype"] in _RESERVE_FSTYPES:
@@ -675,6 +696,17 @@ def write_status(doc, cfg):
 STATE_DIR = os.environ.get("BYEBYTE_STATE_DIR", "/var/lib/byebyte")
 DB_PATH = os.path.join(STATE_DIR, "index.db")
 ACCOUNTING_PATH = os.path.join(STATE_DIR, "accounting.json")
+BURN_HISTORY_PATH = os.path.join(STATE_DIR, "burn_history.json")
+
+
+def _load_burn_history():
+    doc = sutra.read_status(BURN_HISTORY_PATH)
+    return doc if isinstance(doc, dict) else {}
+
+
+def _save_burn_history(burn_history):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    sutra.write_status(BURN_HISTORY_PATH, burn_history)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS paths(
@@ -3071,9 +3103,19 @@ def _with_mount_context(item, mounts):
     item["mountpoint"] = m["mountpoint"] if m else None
     item["mount_total_bytes"] = m.get("total") if m else None
     growth = None
-    if m and not m.get("burn_warming_up") and m.get("burn_bps", 0) > 0:
-        growth = m["burn_bps"] * 86400
+    growth_is_stale = False
+    if m:
+        if not m.get("burn_warming_up") and m.get("burn_bps", 0) > 0:
+            growth = m["burn_bps"] * 86400
+        elif m.get("burn_warming_up") and m.get("burn_bps_stale", 0) > 0:
+            # msg 7371 item 5: a fresh restart must not silently drop
+            # growth context every single time -- the last CONVERGED
+            # rate this daemon measured before it died is a real,
+            # disclosed fallback, never presented as if it were live.
+            growth = m["burn_bps_stale"] * 86400
+            growth_is_stale = True
     item["mount_daily_growth_bytes"] = growth
+    item["mount_growth_is_stale"] = growth_is_stale
     return item
 
 
@@ -4309,6 +4351,9 @@ def main():
 
     state = {}
     first_seen = {}   # mountpoint -> when THIS daemon process first polled it
+    burn_history = _load_burn_history()   # mountpoint -> last CONVERGED
+                       # {"bps", "ts"} -- unlike state/first_seen, this
+                       # survives a restart on purpose (msg 7371 item 5)
     notify_mem = {}   # crossing-once memory for _compute_notify_queue, same
                        # in-memory/resets-on-restart lifetime as state/first_seen
     policy_mem = {"running": False, "severity": {}}  # same lifetime/shape,
@@ -4335,8 +4380,9 @@ def main():
 
     while not stop.is_set():
         now = time.time()
-        rows = [r for r in (poll_mount(m, state, cfg, uid, now, first_seen)
+        rows = [r for r in (poll_mount(m, state, cfg, uid, now, first_seen, burn_history)
                             for m in discover_mounts(cfg)) if r]
+        _save_burn_history(burn_history)
         doc = {
             "v": 1,
             "ts": now,

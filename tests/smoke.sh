@@ -2063,6 +2063,135 @@ print("burn warm-up ok: a transient burst inside one tau of daemon start "
       "first_seen clock, not just prev-is-None, matching Alfred's live repro")
 PY
 
+# --- V3.M7b: burn history survives a restart, with its basis disclosed
+# (msg 7371 item 5) -- a citation's own "days of growth" context used to
+# vanish for a full tau after EVERY restart, and a freshly-installed
+# byebyte has just restarted. burn_history persists the last CONVERGED
+# rate across the in-memory state/first_seen reset a restart causes on
+# purpose, and every consumer (accounting's _with_mount_context, the CLI's
+# human_burn/status line, the pill's own fmtBurn) must name it as "before
+# restart" rather than let it read as live.
+python3 - <<'PY'
+import importlib.util, os
+from importlib.machinery import SourceFileLoader
+
+loader = SourceFileLoader("byebyted_mod_burnhist", "src/bin/byebyted")
+spec = importlib.util.spec_from_loader("byebyted_mod_burnhist", loader)
+mod = importlib.util.module_from_spec(spec)
+loader.exec_module(mod)
+
+class FakeStatvfs:
+    f_blocks = 450_000_000
+    f_bavail = 107_000_000
+    f_frsize = 4096
+
+mod.os.statvfs = lambda p: FakeStatvfs()
+mod.quota_headroom = lambda mp, uid: None
+cfg = dict(mod.DEFAULTS)
+cfg["burn_tau"] = 10  # small tau -- this test only cares about the
+                      # history hand-off, not warm-up timing itself
+m = {"mountpoint": "/burnhist-fixture", "fstype": "ext4", "device": "/dev/fake-burnhist"}
+
+# "process 1": converges past tau with real, moving usage so the EWMA
+# settles on a nonzero rate -- a flat statvfs reading alone never earns
+# a rate worth persisting.
+class FakeStatvfsGrown(FakeStatvfs):
+    f_bavail = FakeStatvfs.f_bavail - int(2 * 1024**3 / FakeStatvfs.f_frsize)
+
+state, first_seen, history = {}, {}, {}
+mod.os.statvfs = lambda p: FakeStatvfs()
+mod.poll_mount(m, state, cfg, 1000, now=0.0, first_seen=first_seen, burn_history=history)
+mod.os.statvfs = lambda p: FakeStatvfsGrown()
+row_converged = mod.poll_mount(m, state, cfg, 1000, now=20.0, first_seen=first_seen,
+                               burn_history=history)
+assert row_converged["burn_warming_up"] is False, row_converged
+assert "/burnhist-fixture" in history, history
+assert history["/burnhist-fixture"]["bps"] == row_converged["burn_bps"], history
+print("burn history recorded once converged:", history)
+
+# "process 2" (a restart): fresh state/first_seen -- warming_up must
+# still be true (the EWMA's own history genuinely reset) -- but the
+# SAME history dict (as loaded from BURN_HISTORY_PATH on a real restart)
+# hands the last converged rate back, with its own age.
+state2, first_seen2 = {}, {}
+row_restart = mod.poll_mount(m, state2, cfg, 1000, now=50.0, first_seen=first_seen2,
+                             burn_history=history)
+assert row_restart["burn_warming_up"] is True, row_restart
+assert row_restart["burn_bps_stale"] == history["/burnhist-fixture"]["bps"], row_restart
+assert row_restart["burn_stale_age_seconds"] == 30.0, row_restart
+
+# a mount NEVER measured before (no history entry at all) gets nothing to
+# fall back on -- omit, never fabricate (Alfred's own "omit only when
+# there was never a rate").
+m_new = {"mountpoint": "/never-measured", "fstype": "ext4", "device": "/dev/fake-new"}
+row_new = mod.poll_mount(m_new, {}, cfg, 1000, now=50.0, first_seen={}, burn_history=history)
+assert row_new["burn_warming_up"] is True, row_new
+assert "burn_bps_stale" not in row_new, row_new
+
+# persistence round-trips through the real sutra.write_status/read_status
+tmp_state = os.path.join("/tmp", "byebyte-smoke-burnhist")
+os.makedirs(tmp_state, exist_ok=True)
+mod.STATE_DIR = tmp_state
+mod.BURN_HISTORY_PATH = os.path.join(tmp_state, "burn_history.json")
+mod._save_burn_history(history)
+loaded = mod._load_burn_history()
+assert loaded == history, (loaded, history)
+
+# _with_mount_context: the accounting citation's own growth-context field
+# uses the stale rate, WITH disclosure, exactly the same shape as a live
+# one -- never silently blended, never silently omitted when a real prior
+# rate exists.
+mounts = [dict(row_restart)]
+item = {"path": "/burnhist-fixture/x", "bytes": 1000}
+mod._with_mount_context(item, mounts)
+assert item["mount_growth_is_stale"] is True, item
+assert item["mount_daily_growth_bytes"] == row_restart["burn_bps_stale"] * 86400, item
+
+print("burn history ok: a converged rate survives byebyted's own restart, "
+      "attached only while genuinely warming up and only when one was "
+      "ever actually measured, round-trips through real sutra.write_status/"
+      "read_status, and feeds accounting's own growth-context field with "
+      "its staleness disclosed rather than presented as live")
+PY
+
+# --- V3.M7c: the CLI's own basis-in-the-sentence rendering for a stale
+# burn rate -- human_burn (byebyte status's burn column) and
+# _accounting_context (the citation's own growth-context clause) must
+# both say "before restart" rather than let a stale figure read as this
+# run's own measurement.
+python3 - <<'PY'
+import importlib.util
+from importlib.machinery import SourceFileLoader
+
+loader = SourceFileLoader("byebyte_cli_mod_burnhist", "src/bin/byebyte")
+spec = importlib.util.spec_from_loader("byebyte_cli_mod_burnhist", loader)
+cli = importlib.util.module_from_spec(spec)
+loader.exec_module(cli)
+
+# human_burn: warming up with no stale fallback -- unchanged behavior
+assert cli.human_burn(0.0, warming_up=True) == "warming up"
+# warming up WITH a stale fallback -- names the basis, names the age
+text = cli.human_burn(0.0, warming_up=True, stale_bps=100_000.0, stale_age_seconds=300.0)
+assert "before restart" in text and "5.0m ago" in text, text
+# genuinely never measured (stale_bps=None) falls back to the old text,
+# never fabricates an age from nothing
+assert cli.human_burn(0.0, warming_up=True, stale_bps=None) == "warming up"
+
+# _accounting_context: the growth clause discloses staleness inline
+stale_item = {"path": "/x", "bytes": 10 * 86400, "mount_total_bytes": 100,
+             "mountpoint": "/x", "mount_daily_growth_bytes": 10.0,
+             "mount_growth_is_stale": True}
+ctx = cli._accounting_context(stale_item)
+assert "rate from before restart" in ctx, ctx
+live_item = dict(stale_item, mount_growth_is_stale=False)
+ctx_live = cli._accounting_context(live_item)
+assert "rate from before restart" not in ctx_live, ctx_live
+
+print("CLI burn-history rendering ok: human_burn and _accounting_context "
+      "both name 'before restart' for a stale fallback, never for a live "
+      "reading, and never fabricate an age when no rate was ever measured")
+PY
+
 # --- V3.M8: notify -- the unprompted voice (ruling msg 6489/6501). Exercises
 # _compute_notify_queue directly (crossing-once per category, the
 # warming_up guard as defense in depth, fast_grower's reliability floor and

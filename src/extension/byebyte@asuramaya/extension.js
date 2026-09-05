@@ -175,14 +175,33 @@ function runByebyteJsonStdin(args, stdinText, cancellable, onDone) {
 // reading was the actual defect Alfred found live in the installed CLI
 // (msg 6385/6393) — the pill reads the identical status.json field, so it
 // carried the identical bug even though nobody had looked at it yet.
-function fmtBurn(bps, warmingUp, tauSeconds) {
-    if (warmingUp)
+function fmtBurn(bps, warmingUp, tauSeconds, staleBps, staleAgeSeconds) {
+    if (warmingUp) {
+        // msg 7371 item 5: a fresh restart shouldn't say nothing for a
+        // full tau when a real, if aging, rate exists -- basis named in
+        // the sentence (8adbfe6c) so it never reads as live.
+        if (staleBps != null) {
+            const perDay = staleBps * 86400;
+            const amt = Math.abs(perDay) < 1024 * 1024
+                ? 'quiet' : `${Pill.fmtBytes(perDay)}/day`;
+            const age = staleAgeSeconds != null ? `, ${fmtDt(staleAgeSeconds / 3600)} ago` : '';
+            return `${amt} (before restart${age})`;
+        }
         return 'warming up';
+    }
     const perDay = (bps ?? 0) * 86400;
     const tauNote = tauSeconds ? ` (${fmtTau(tauSeconds)})` : '';
     if (Math.abs(perDay) < 1024 * 1024)
         return 'quiet' + tauNote;
     return `${Pill.fmtBytes(perDay)}/day${tauNote}`;
+}
+function fmtDt(hours) {
+    const seconds = hours * 3600;
+    if (seconds < 60)
+        return `${Math.round(seconds)}s`;
+    if (seconds < 3600)
+        return `${(seconds / 60).toFixed(1)}m`;
+    return `${hours.toFixed(1)}h`;
 }
 function fmtTau(seconds) {
     if (seconds >= 3600)
@@ -775,7 +794,8 @@ class ByeByteToggle extends QuickMenuToggle {
             `${Pill.esc(m.mountpoint)}  ` +
             `<span foreground="${ACCENT}">${Pill.fmtBytes(m.effective_free)}</span>` +
             `<span foreground="${DIM}"> of ${Pill.fmtBytes(m.total)} · ` +
-            `${Pill.esc(fmtBurn(m.burn_bps, m.burn_warming_up, pill?.burn_tau_seconds))} · ` +
+            `${Pill.esc(fmtBurn(m.burn_bps, m.burn_warming_up, pill?.burn_tau_seconds,
+                                m.burn_bps_stale, m.burn_stale_age_seconds))} · ` +
             `full ${fmtEta(m.eta_seconds)}</span>` +
             quota + snap + reserved + pendingCap;
     }

@@ -226,6 +226,16 @@ copy that
 .I byebyte policy report
 reads.
 .TP
+.I /var/lib/byebyte/burn_history.json
+Per\-mountpoint last CONVERGED burn rate (bytes/sec) and when it was
+measured \(em survives a daemon restart on purpose, unlike the in\-memory
+EWMA state it's derived from. Used only while a mount is genuinely
+warming up after a restart, so a citation's own growth\-context clause
+doesn't vanish for a full
+.I burn_tau
+every single time \(em always rendered with its own age disclosed
+("rate from before restart"), never presented as a live reading.
+.TP
 .I /run/byebyte/status.json
 0640, owned by
 .IR owner_uid .
