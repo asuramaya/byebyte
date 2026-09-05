@@ -18,7 +18,7 @@ so it still answers even mid-daemon-restart. Every verb accepts --json.
   ballast [release]       show or release the pre-allocated emergency reserve
   kernels                 removable kernel packages, prints the apt line, never runs it
   advise                  one-line nudges: near-full mounts, fast growers, cold caches
-  accounting [--write]    the stock report: condemned/cold/unknown-large, report-only, never deletes
+  accounting [--write] [--notify]   fire-marshal report: owner/cost/remedy per finding, report-only, never deletes
   burn [--seconds N] [--limit N]   live per-process write rates
   sweep [--dry] [--history]   the unattended reclaim policy (double-consent)
   notify [--dry]          send any newly-worth-an-interruption finding as a desktop notification
@@ -49,6 +49,8 @@ del _os, _sys, _libdir, _PILL
 import sutra
 
 RUNTIME_DIR = os.environ.get("BYEBYTE_RUNTIME_DIR", "/run/byebyte")
+STATE_DIR = os.environ.get("BYEBYTE_STATE_DIR", "/var/lib/byebyte")
+ACCOUNTING_PATH = os.path.join(STATE_DIR, "accounting.json")
 
 PLANNED = {}
 
@@ -616,51 +618,116 @@ def _accounting_atime_note(item):
     return _ATIME_NOTE.get(item.get("atime_confidence"), "")
 
 
+# Fire-marshal ruling (d602032b): every finding names a remedy. Fixed per
+# tier, never a specific claim beyond the act itself -- the same "report,
+# never recommend past the plain fact" discipline as everything else here.
+_ACCOUNTING_REMEDY = {
+    "condemned": "empty Trash",
+    "cold": "drop this cache — regenerates on next use",
+    "unknown_large": "archive elsewhere, or investigate with: byebyte why <path> "
+                      "— byebyte cannot tell if this is needed",
+}
+
+
 def _fmt_condemned(item):
     oldest = item.get("oldest_deletion_ts")
     when = time.strftime("%Y-%m-%d", time.localtime(oldest)) if oldest else "unknown date"
     return (f"  {human_bytes(item['bytes'])} in {item['path']}, {item['items']} item(s),"
-            f" oldest {when}{_accounting_context(item)}")
+            f" oldest {when}{_accounting_context(item)}\n"
+            f"      remedy: {_ACCOUNTING_REMEDY['condemned']}")
 
 
 def _fmt_cold(item):
     age = int((time.time() - item["last_access_ts"]) / 86400)
-    return (f"  {item['category']}: {human_bytes(item['bytes'])} in {item['path']},"
-            f" last accessed {age}d ago{_accounting_context(item)}{_accounting_atime_note(item)}")
+    return (f"  {item['category']}: {human_bytes(item['bytes'])} in {item['path']}"
+            f" — owner: {item.get('owner', 'unclassified')}\n"
+            f"      last accessed {age}d ago{_accounting_context(item)}{_accounting_atime_note(item)}\n"
+            f"      remedy: {_ACCOUNTING_REMEDY['cold']}")
 
 
 def _fmt_unknown_large(item):
     age = int((time.time() - item["last_access_ts"]) / 86400)
-    return (f"  {human_bytes(item['bytes'])} in {item['path']},"
-            f" last accessed {age}d ago{_accounting_context(item)}{_accounting_atime_note(item)}"
-            f" — unknown: might be needed")
+    return (f"  {human_bytes(item['bytes'])} in {item['path']}"
+            f" — owner: {item.get('owner', 'unclassified')}\n"
+            f"      last accessed {age}d ago{_accounting_context(item)}{_accounting_atime_note(item)}\n"
+            f"      remedy: {_ACCOUNTING_REMEDY['unknown_large']}")
 
 
-def _print_accounting_tier(title, items, fmt):
+def _print_accounting_tier(title, tier, fmt):
+    items = tier.get("items", [])
     print(f"{title}:")
     if not items:
-        print("  (nothing)")
+        below = tier.get("below_floor") or {}
+        if below.get("count"):
+            print(f"  (nothing above the cite floor — {below['count']} smaller"
+                  f" item(s), {human_bytes(below['bytes'])} total)")
+        else:
+            print("  (nothing)")
         return
     for it in items:
         print(fmt(it))
+    below = tier.get("below_floor") or {}
+    if below.get("count"):
+        print(f"  +{below['count']} more below the cite floor,"
+              f" {human_bytes(below['bytes'])} total")
+
+
+def _accounting_headline(doc):
+    """The single most valuable fact in a run, shared with the pill's own
+    fold-label spec (8adbfe6c): the most actionable-and-confident thing
+    first (CONDEMNED+COLD together, since both are actable behind a
+    confirm), falling to the largest named-but-unactionable finding, else
+    an honest "nothing to report" -- never a bare number, never silence.
+    This is what --notify diffs across runs, and what a future pill build
+    reuses verbatim for its own fold label."""
+    totals = doc.get("totals") or {}
+    actionable = (totals.get("condemned_bytes") or 0) + (totals.get("cold_bytes") or 0)
+    if actionable > 0:
+        return f"{human_bytes(actionable)} reclaimable"
+    unknown = totals.get("unknown_bytes") or 0
+    if unknown > 0:
+        return f"{human_bytes(unknown)} unknown, your call"
+    return "nothing to report"
 
 
 def cmd_accounting(argv):
-    """The stock report — Alfred's ruling c9bdeb40: byebyte measures flow
-    and is blind to accumulated, unmoving material, so this reports what's
-    sitting on disk that could go, at three confidence levels, and never
-    deletes any of it. --write persists a copy for byebyte-accounting.timer
-    (monthly); an interactive run always computes fresh either way."""
+    """The stock report — Alfred's ruling c9bdeb40, sharpened by the
+    fire-marshal ruling d602032b: byebyte measures flow and is blind to
+    accumulated, unmoving material, so this reports what's sitting on
+    disk that could go, cited by owner/cost/remedy, at three confidence
+    levels, and never deletes any of it. --write persists a copy for
+    byebyte-accounting.timer (weekly); an interactive run always computes
+    fresh either way. --notify sends at most ONE summary toast, only when
+    the headline changed since the PREVIOUS accounting.json -- crossing-
+    once against the file itself, so a weekly cadence never becomes the
+    alert fatigue notify.timer's own no-repeat discipline exists to
+    avoid."""
     write = "--write" in argv
-    doc = request_or_die({"cmd": "accounting", "write": write}, timeout=60,
-                          as_json="--json" in argv)
-    if "--json" in argv:
+    do_notify = "--notify" in argv
+    as_json = "--json" in argv
+
+    old_headline = None
+    if do_notify:
+        old_doc = sutra.read_status(ACCOUNTING_PATH)
+        if old_doc is not None:
+            old_headline = _accounting_headline(old_doc)
+
+    doc = request_or_die({"cmd": "accounting", "write": write}, timeout=60, as_json=as_json)
+
+    if do_notify:
+        new_headline = _accounting_headline(doc)
+        if new_headline != old_headline:
+            status = request({"cmd": "status"})
+            uid = (status or {}).get("daemon", {}).get("owner_uid")
+            notify_owner(uid, f"accounting: {new_headline}", "see: byebyte accounting")
+
+    if as_json:
         print(json.dumps(doc, indent=2))
         return
     tiers = doc.get("tiers", {})
-    _print_accounting_tier("CONDEMNED (already in Trash)", tiers.get("condemned", []), _fmt_condemned)
-    _print_accounting_tier("COLD (probably reclaimable)", tiers.get("cold", []), _fmt_cold)
-    _print_accounting_tier("UNKNOWN — large & old (your call)", tiers.get("unknown_large", []), _fmt_unknown_large)
+    _print_accounting_tier("CONDEMNED (already in Trash)", tiers.get("condemned", {}), _fmt_condemned)
+    _print_accounting_tier("COLD (probably reclaimable)", tiers.get("cold", {}), _fmt_cold)
+    _print_accounting_tier("UNKNOWN — large & old (your call)", tiers.get("unknown_large", {}), _fmt_unknown_large)
 
 
 def cmd_burn(argv):

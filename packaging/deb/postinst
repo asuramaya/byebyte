@@ -38,10 +38,11 @@ case "$1" in
     # accounting.timer: the other default-enabled timer, for the same class
     # of reason -- report-only (Trash/cold-cache/large-and-old, condemned by
     # the operator or claiming no confidence), no --yes, no act path,
-    # nothing here to gate behind a second opt-in. Monthly, and it never
-    # pushes a desktop toast of its own -- --write only persists a passive
-    # record for `byebyte accounting` to read back later, so it can't
-    # become the same alert fatigue notify.timer is designed to avoid.
+    # nothing here to gate behind a second opt-in. Weekly (the fire-marshal
+    # ruling, d602032b: an inspection walks the building on a schedule);
+    # its own summary toast fires at most once per run, only when the
+    # headline changed since the prior write, so it can't become the same
+    # alert fatigue notify.timer is designed to avoid.
     #   sudo systemctl disable --now byebyte-accounting.timer
     systemctl enable --now byebyte-accounting.timer >/dev/null 2>&1 || true
     # The GNOME pill stages here (/usr/share/byebyte/extension/) but GNOME

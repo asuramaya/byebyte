@@ -256,7 +256,7 @@ the condition holds, never repeating every timer tick.
 prints what would be sent without sending it, and without consuming the
 notification opportunity it previewed \(em the next real run still sees it.
 .TP
-.B accounting " [\-\-write]"
+.B accounting " [\-\-write] [\-\-notify]"
 The stock report, distinct from every other verb here: everything else
 measures a RATE (burn, ETA, thresholds); this measures accumulated,
 unmoving material a rate can never trip an alarm for. Three tiers, always
@@ -292,12 +292,32 @@ tier never blurs the two (on a machine with real project trees, this is
 the longest and least useful section, by design).
 .RE
 .PP
-Every item is placed next to context the operator already has: what
-fraction of its mount it is, and how many days of that mount's current
-growth it represents \(em placed, never editorialized past that; no
-recommendation is ever printed. Last\-access is sampled (bounded, not a
-full recursive walk) and a mount's atime reliability is checked and
-disclosed:
+Every cited item (fire\-marshal ruling d602032b) carries a full citation,
+not a bare size: its
+.B owner
+(the nearest ancestor git repo's name, else the first path segment under
+.BR $HOME ,
+else
+.IR unclassified \(em
+never a guessed service name with no evidence behind it), its
+.B cost
+in context (what fraction of its mount it is, and how many days of that
+mount's current growth it represents), and a fixed, tier\-appropriate
+.B remedy
+phrase. Nothing here is ever a specific claim of certainty or a
+recommendation past that placement. An item under
+.I accounting_cite_floor_bytes
+still counts toward its tier's total but isn't individually cited \(em
+the report ends its
+.B cold
+/
+.B unknown
+sections with a "+N more below the cite floor, X total" line instead,
+so the sum stays honest without the noise of a kilobyte\-sized entry
+printed beside a real finding.
+.PP
+Last\-access is sampled (bounded, not a full recursive walk) and a
+mount's atime reliability is checked and disclosed:
 .I noatime
 marks a reading as unreliable, and
 .I relatime
@@ -313,7 +333,17 @@ persists the run to
 .IR /var/lib/byebyte/accounting.json
 (what
 .I byebyte\-accounting.timer
-calls, monthly); an interactive run always computes fresh either way.
+calls, weekly \(em the "fire marshal walks the building on a schedule,"
+not a monitor); an interactive run always computes fresh either way.
+.B \-\-notify
+sends at most ONE summary toast per run, and only when the report's own
+headline (the single most valuable finding: an actionable total when one
+exists, else the largest named\-but\-unactionable one, else an honest
+"nothing to report") differs from the previous
+.I accounting.json \(em
+crossing\-once against a FILE rather than in\-memory state, so a marshal
+who found nothing new stays silent instead of repeating itself every
+week.
 .TP
 .B update " [\-\-check] [\-\-json]"
 Delegates straight to

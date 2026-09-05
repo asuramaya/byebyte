@@ -263,10 +263,12 @@ systemctl enable --now byebyte-notify.timer
 
 # accounting.timer is the other exception: report-only (Trash, cold caches,
 # large-and-old dirs -- never deletes, no --yes, no act path at all), so
-# there's nothing here to gate behind a second opt-in either. Monthly, not
-# a poller -- it only writes a passive record to accounting.json, never a
-# desktop push, so it can't turn into the same alert fatigue notify.timer
-# is built to avoid (ruling, msg 6633/6643).
+# there's nothing here to gate behind a second opt-in either. Weekly --
+# the fire marshal walks the building on a schedule (ruling d602032b) --
+# and its own summary toast fires at most once per run, only when the
+# report's headline changed since the last write, so it can't turn into
+# the same alert fatigue notify.timer's no-repeat discipline exists to
+# avoid (ruling, msg 6633/6643).
 systemctl enable --now byebyte-accounting.timer
 
 # 4. verify perms
@@ -300,10 +302,11 @@ never deletes anything, never shares sweep's opt-in gate. Silence a category
 or turn it off entirely in /etc/byebyte/config.json's notify_categories, or:
   sudo systemctl disable --now byebyte-notify.timer
 
-accounting (the monthly stock report: what's already in Trash, what's a
-cold cache, what's large-and-old with no confidence claimed) is ALSO ON BY
-DEFAULT — report-only, never deletes, never pushes a desktop toast of its
-own. Read it any time: byebyte accounting
+accounting (the weekly fire-marshal inspection: what's already in Trash,
+what's a cold cache, what's large-and-old with no confidence claimed —
+each cited by owner and cost) is ALSO ON BY DEFAULT — report-only, never
+deletes. Its own summary toast fires at most once per run, only when
+something changed since last week. Read it any time: byebyte accounting
   sudo systemctl disable --now byebyte-accounting.timer
 
 >>> the GNOME pill is a separate, per-account, NO-ROOT step — as yourself: <<<

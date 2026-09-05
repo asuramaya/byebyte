@@ -119,6 +119,14 @@ DEFAULTS = {
                                      # -- purge_disabled's shape: silences a
                                      # tier-1/2 source from the report, can
                                      # never add one (registry invariant)
+    # accounting_cite_floor_bytes: below this, an item still counts toward
+    # its tier's total (never hidden from the sum) but isn't individually
+    # CITED -- the fire-marshal ruling (d602032b) found a 1.1K rotated log
+    # printed alongside a genuine 525M finding, each "0% of /": noise
+    # crowding a real citation. Never merged with accounting_large_bytes
+    # (tier-3's own, much larger, qualification gate) -- this is strictly
+    # about what's worth NAMING, not what qualifies as large.
+    "accounting_cite_floor_bytes": 50 * 1024 ** 2,
 }
 
 # The complete set notify_categories may name -- anything else is silently
@@ -143,6 +151,7 @@ CLAMPS = {
     "burn_path_lru": (64, 65536),
     "accounting_cold_days": (7, 3650),
     "accounting_large_bytes": (1 * 1024 ** 3, 1 << 40),
+    "accounting_cite_floor_bytes": (0, 1 << 40),
 }
 
 
@@ -3064,29 +3073,64 @@ def _collapse_nested(items):
 _ACCOUNTING_LARGE_LIMIT = 20
 
 
+def _accounting_owner(path, home):
+    """A cheap, honest ownership guess for a citation (fire-marshal ruling
+    d602032b: every finding names an owner) -- the nearest ancestor
+    directory that's a git repo (its own name), else the first path
+    segment directly under $HOME (its own name), else "unclassified".
+    Never a guessed service/package name: there's no data behind that
+    guess, and a wrong owner is worse than an honest "unclassified" --
+    same discipline as reserved_percent_unknown and atime_confidence."""
+    p = os.path.abspath(path)
+    cur = p
+    while True:
+        if os.path.isdir(os.path.join(cur, ".git")):
+            return os.path.basename(cur)
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    if home:
+        home = home.rstrip("/")
+        if p == home or p.startswith(home + "/"):
+            rest = p[len(home):].lstrip("/")
+            if rest:
+                return rest.split("/")[0]
+    return "unclassified"
+
+
 def accounting(cfg, status_doc, indexer):
-    """The full stock-accounting report: {"ts", "tiers": {"condemned",
-    "cold", "unknown_large"}}, each a list of raw-fact items -- the CLI
-    owns every human_* rendering, same split as advise/notify. On-demand
-    (byebyte accounting) or periodic (byebyte-accounting.timer, monthly),
-    never both an alarm and a monitor: this function is called, it never
-    calls out."""
+    """The full stock-accounting report: {"ts", "totals", "tiers":
+    {"condemned", "cold", "unknown_large"}}. Each tier is {"items": [...],
+    "below_floor": {"count", "bytes"}} -- an item below
+    accounting_cite_floor_bytes still counts toward the tier's total (never
+    hidden from the sum) but isn't individually cited, replacing noise
+    ("a 1.1K rotated log, 0% of /") with an honest tail count instead of
+    either printing it or silently dropping its bytes. `totals` gives the
+    CLI everything it needs for a headline/notify-diff without re-deriving
+    sums from nested below_floor math. The CLI owns every human_*
+    rendering, same split as advise/notify. On-demand (byebyte accounting)
+    or periodic (byebyte-accounting.timer, weekly) -- this function is
+    called, it never calls out."""
     mounts = (status_doc or {}).get("mounts") or []
     mount_opts = _mount_options_map()
+    home = _resolve_owner_home(cfg)
     disabled = set(cfg.get("accounting_disabled", []))
     cold_days = cfg["accounting_cold_days"]
     large_bytes = cfg["accounting_large_bytes"]
+    cite_floor = cfg["accounting_cite_floor_bytes"]
     now = time.time()
 
-    condemned = []
+    condemned_items = []
     covered = []  # trash + cold-cache paths, so tier 3 never re-reports them
     if "trash" not in disabled:
         t = _detect_trash(cfg)
         if t:
-            condemned.append(_with_mount_context(t, mounts))
+            condemned_items.append(_with_mount_context(t, mounts))
             covered.append(t["path"])
+    condemned = {"items": condemned_items, "below_floor": {"count": 0, "bytes": 0}}
 
-    cold = []
+    cold_items, cold_below = [], []
     for category in _ADVISE_COLD_CACHE_CATEGORIES:
         if category in disabled or category in cfg.get("purge_disabled", []):
             continue
@@ -3096,13 +3140,20 @@ def accounting(cfg, status_doc, indexer):
             last = _sample_atime(c["path"])
             if last is None or (now - last) < cold_days * 86400:
                 continue
+            if c["bytes"] < cite_floor:
+                cold_below.append(c)
+                continue
             item = {"category": category, "path": c["path"], "bytes": c["bytes"],
                      "last_access_ts": last,
-                     "atime_confidence": _atime_confidence(c["path"], mount_opts)}
-            cold.append(_with_mount_context(item, mounts))
-    cold.sort(key=lambda it: -it["bytes"])
+                     "atime_confidence": _atime_confidence(c["path"], mount_opts),
+                     "owner": _accounting_owner(c["path"], home)}
+            cold_items.append(_with_mount_context(item, mounts))
+    cold_items.sort(key=lambda it: -it["bytes"])
+    cold = {"items": cold_items,
+            "below_floor": {"count": len(cold_below),
+                             "bytes": sum(c["bytes"] for c in cold_below)}}
 
-    unknown_large = []
+    unknown_candidates = []
     for row in _index_latest_dirs(indexer):
         path, b = row["path"], row["bytes"]
         if b < large_bytes:
@@ -3114,14 +3165,33 @@ def accounting(cfg, status_doc, indexer):
         if last is None or (now - last) < cold_days * 86400:
             continue
         item = {"path": path, "bytes": b, "last_access_ts": last,
-                 "atime_confidence": _atime_confidence(path, mount_opts)}
-        unknown_large.append(_with_mount_context(item, mounts))
-    unknown_large = _collapse_nested(unknown_large)
-    unknown_large.sort(key=lambda it: -it["bytes"])
-    unknown_large = unknown_large[:_ACCOUNTING_LARGE_LIMIT]
+                 "atime_confidence": _atime_confidence(path, mount_opts),
+                 "owner": _accounting_owner(path, home)}
+        unknown_candidates.append(_with_mount_context(item, mounts))
+    unknown_candidates = _collapse_nested(unknown_candidates)
+    unknown_items = [it for it in unknown_candidates if it["bytes"] >= cite_floor]
+    unknown_below = [it for it in unknown_candidates if it["bytes"] < cite_floor]
+    unknown_items.sort(key=lambda it: -it["bytes"])
+    unknown_items = unknown_items[:_ACCOUNTING_LARGE_LIMIT]
+    unknown_large = {"items": unknown_items,
+                      "below_floor": {"count": len(unknown_below),
+                                       "bytes": sum(it["bytes"] for it in unknown_below)}}
 
-    return {"ts": now, "tiers": {"condemned": condemned, "cold": cold,
-                                  "unknown_large": unknown_large}}
+    totals = {
+        "condemned_bytes": sum(it["bytes"] for it in condemned_items),
+        "cold_bytes": sum(it["bytes"] for it in cold_items) + cold["below_floor"]["bytes"],
+        "unknown_bytes": (sum(it["bytes"] for it in unknown_candidates)),
+    }
+
+    # NOTE: tier PRINT ORDER stays CONDEMNED -> COLD -> UNKNOWN-LARGE
+    # (ruling 6643) -- the fire-marshal ruling's "headline, not footnote"
+    # question for UNKNOWN-LARGE is explicitly HELD pending the operator's
+    # own word (it reverses 6643's rationale and touches the pill's fold
+    # priority too); this dict's own key order is the single sort key
+    # Alfred asked for, so flipping it later is a one-line change here.
+    return {"ts": now, "totals": totals,
+            "tiers": {"condemned": condemned, "cold": cold,
+                      "unknown_large": unknown_large}}
 
 
 # --- burn: live per-process writes (stdlib route, v1) ------------------------

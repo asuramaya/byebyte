@@ -2193,10 +2193,21 @@ pip_pkg = os.path.join(pip_cache_dir, "pkg")
 os.makedirs(pip_pkg)
 pip_file = os.path.join(pip_pkg, "wheel.whl")
 with open(pip_file, "wb") as f:
-    f.write(b"y" * 1024)
+    f.write(b"y" * (200 * 1024))  # comfortably above the test's cite floor below
 os.utime(pip_file, (old_ts, old_ts))
 os.utime(pip_pkg, (old_ts, old_ts))
 os.utime(pip_cache_dir, (old_ts, old_ts))
+
+# --- tier 2: COLD, below the cite floor -- a real but tiny cold cache
+# (fire-marshal ruling d602032b: a 1.1K rotated log crowding a real
+# finding). Must still count toward cold's total but never be cited.
+uv_cache_dir = os.path.join(home, ".cache", "uv")
+os.makedirs(uv_cache_dir)
+uv_file = os.path.join(uv_cache_dir, "tiny")
+with open(uv_file, "wb") as f:
+    f.write(b"u" * 8)
+os.utime(uv_file, (old_ts, old_ts))
+os.utime(uv_cache_dir, (old_ts, old_ts))
 
 # --- tier 3: UNKNOWN-LARGE -- a hand-populated index row, no detector
 # covers it, real atime pushed old (bytes come from the index row, not
@@ -2207,6 +2218,16 @@ big_file = os.path.join(big_dir, "f")
 with open(big_file, "wb") as f:
     f.write(b"z" * 16)
 os.utime(big_file, (old_ts, old_ts))
+
+# a git repo elsewhere entirely (not under $HOME) -- proves the owner
+# heuristic's FIRST rule (nearest ancestor .git) fires ahead of, and
+# independent of, the $HOME-relative fallback.
+repo_dir = os.path.join(tmp, "gitrepo")
+os.makedirs(os.path.join(repo_dir, ".git"))
+repo_file = os.path.join(repo_dir, "afile")
+with open(repo_file, "wb") as f:
+    f.write(b"r" * 16)
+os.utime(repo_file, (old_ts, old_ts))
 
 # a child of big_dir that ALSO independently qualifies -- Alfred's real
 # finding (msg 6673): a parent and its own descendants both surfacing as
@@ -2238,7 +2259,8 @@ cur = con.execute("INSERT INTO scans(ts, root, status) VALUES(?,?,?)",
                    (now, tmp, "done"))
 scan_id = cur.lastrowid
 for p, b in ((big_dir, 10 * 1024**3), (nested_dir, 8 * 1024**3),
-             (small_parent, 1 * 1024**3), (child_only, 6 * 1024**3)):
+             (small_parent, 1 * 1024**3), (child_only, 6 * 1024**3),
+             (repo_dir, 7 * 1024**3)):
     con.execute("INSERT INTO paths(path) VALUES(?)", (p,))
     pid = con.execute("SELECT id FROM paths WHERE path=?", (p,)).fetchone()[0]
     con.execute("INSERT INTO dir_stats VALUES(?,?,?,?,?)",
@@ -2260,11 +2282,20 @@ indexer = FakeIndexer(db_path)
 status_doc = {"mounts": [{"mountpoint": "/", "total": 1000 * 1024**3,
                           "burn_bps": 1024, "burn_warming_up": False}]}
 cfg = dict(mod.DEFAULTS)
+# a small, deterministic cite floor for this fixture -- the real default
+# (50M) would need multi-hundred-KB throwaway files just to straddle it;
+# 100K cleanly separates the ~200K pip-cache fixture (cited) from the
+# single-block uv-cache fixture (below floor) regardless of block size.
+cfg["accounting_cite_floor_bytes"] = 100_000
 
 doc = mod.accounting(cfg, status_doc, indexer)
 tiers = doc["tiers"]
-assert len(tiers["condemned"]) == 1, tiers["condemned"]
-c = tiers["condemned"][0]
+condemned_items = tiers["condemned"]["items"]
+cold_items = tiers["cold"]["items"]
+unknown_items = tiers["unknown_large"]["items"]
+
+assert len(condemned_items) == 1, condemned_items
+c = condemned_items[0]
 assert c["bytes"] == 4096 and c["items"] == 1, c
 assert abs(c["oldest_deletion_ts"] - time.mktime(
     time.strptime("2018-01-16T10:23:45", "%Y-%m-%dT%H:%M:%S"))) < 1, \
@@ -2274,14 +2305,26 @@ assert abs(c["oldest_deletion_ts"] - time.mktime(
 assert c["mount_total_bytes"] == 1000 * 1024**3, c
 assert c["mount_daily_growth_bytes"] == 1024 * 86400, c
 
-cold_paths = {it["path"] for it in tiers["cold"]}
-assert pip_cache_dir in cold_paths, tiers["cold"]
-cold_item = next(it for it in tiers["cold"] if it["path"] == pip_cache_dir)
+cold_paths = {it["path"] for it in cold_items}
+assert pip_cache_dir in cold_paths, cold_items
+cold_item = next(it for it in cold_items if it["path"] == pip_cache_dir)
 assert cold_item["category"] == "pip-cache", cold_item
 assert cold_item["atime_confidence"] == "reliable", cold_item  # mount_opts={}
+# owner heuristic, $HOME-relative branch: pip_cache_dir has no .git
+# ancestor, so owner falls to the first path segment under $HOME.
+assert cold_item["owner"] == ".cache", cold_item
 
-large_paths = {it["path"] for it in tiers["unknown_large"]}
-assert big_dir in large_paths, tiers["unknown_large"]
+# cite floor (fire-marshal ruling d602032b): the tiny uv-cache entry is
+# real and cold but below accounting_cite_floor_bytes -- it must never be
+# individually cited, but its bytes must still land in below_floor so the
+# tier's total stays honest.
+assert uv_cache_dir not in cold_paths, \
+    "a below-cite-floor item must never be individually cited"
+cold_below = tiers["cold"]["below_floor"]
+assert cold_below["count"] >= 1 and cold_below["bytes"] > 0, cold_below
+
+large_paths = {it["path"] for it in unknown_items}
+assert big_dir in large_paths, unknown_items
 # Never double-reported: pip_cache_dir is already tier 2, must never ALSO
 # appear in tier 3 even though its own index row (if any) could qualify.
 assert pip_cache_dir not in large_paths, \
@@ -2294,18 +2337,38 @@ assert nested_dir not in large_paths, \
 # genuine finding -- collapsing must never demote it.
 assert child_only in large_paths, \
     "a child that qualifies on its own, under a parent that doesn't, must still be reported"
-assert small_parent not in large_paths, tiers["unknown_large"]
+assert small_parent not in large_paths, unknown_items
+
+# owner heuristic, .git branch: takes priority, independent of $HOME
+repo_item = next(it for it in unknown_items if it["path"] == repo_dir)
+assert repo_item["owner"] == "gitrepo", repo_item
+# owner heuristic, neither branch: big_dir has no .git ancestor and sits
+# outside $HOME entirely
+big_item = next(it for it in unknown_items if it["path"] == big_dir)
+assert big_item["owner"] == "unclassified", big_item
+
+# totals: the CLI's headline/notify-diff depend on these summing the WHOLE
+# tier (cited items + below-floor), never just what got individually named
+assert doc["totals"]["condemned_bytes"] == sum(it["bytes"] for it in condemned_items)
+assert doc["totals"]["cold_bytes"] == (sum(it["bytes"] for it in cold_items)
+                                        + cold_below["bytes"])
+assert doc["totals"]["unknown_bytes"] >= sum(it["bytes"] for it in unknown_items), \
+    "unknown_bytes must include below-floor/limit-truncated items too, never just what's cited"
 
 # accounting_disabled: names a source, never adds one -- silencing "trash"
 # and "pip-cache" must drop them from their tiers and nothing else.
 cfg_disabled = dict(cfg)
 cfg_disabled["accounting_disabled"] = ["trash", "pip-cache"]
 doc2 = mod.accounting(cfg_disabled, status_doc, indexer)
-assert doc2["tiers"]["condemned"] == [], doc2["tiers"]["condemned"]
-assert all(it["path"] != pip_cache_dir for it in doc2["tiers"]["cold"]), doc2["tiers"]["cold"]
+assert doc2["tiers"]["condemned"]["items"] == [], doc2["tiers"]["condemned"]
+assert all(it["path"] != pip_cache_dir for it in doc2["tiers"]["cold"]["items"]), \
+    doc2["tiers"]["cold"]
 
 # --- ordering: the report itself is condemned -> cold -> unknown_large,
-# fixed by the dict's own key order (the CLI renders in this order too)
+# fixed by the dict's own key order (the CLI renders in this order too) --
+# STILL condemned -> cold -> unknown_large: the fire-marshal ruling's
+# "headline, not footnote" question for unknown_large's PRIORITY is HELD
+# pending the operator's own word (msg 7078); this key order is untouched.
 assert list(doc["tiers"].keys()) == ["condemned", "cold", "unknown_large"]
 
 # --- _atime_confidence, direct: noatime/relatime/else, unit-level
@@ -2321,12 +2384,12 @@ mod.STATE_DIR = state_dir
 mod.ACCOUNTING_PATH = os.path.join(state_dir, "accounting.json")
 dispatch = mod._make_dispatch(cfg, indexer, get_status=lambda: status_doc)
 r = dispatch("accounting", {"write": True})
-assert r["tiers"]["condemned"][0]["bytes"] == 4096, r
+assert r["tiers"]["condemned"]["items"][0]["bytes"] == 4096, r
 assert os.path.exists(mod.ACCOUNTING_PATH), "write=True must persist accounting.json"
 import json as _json
 with open(mod.ACCOUNTING_PATH) as f:
     written = _json.load(f)
-assert written["tiers"]["condemned"][0]["bytes"] == 4096, written
+assert written["tiers"]["condemned"]["items"][0]["bytes"] == 4096, written
 
 print("accounting ok: three tiers never merge, tier 3 never re-reports a "
       "tier 1/2 source and collapses a qualifying child of an "
@@ -2337,6 +2400,74 @@ print("accounting ok: three tiers never merge, tier 3 never re-reports a "
       "silences by name only, atime_confidence reads "
       "noatime/relatime/strictatime correctly, and --write round-trips "
       "through the real dispatch layer")
+PY
+
+# --- V3.M10: accounting CLI -- the fire-marshal citation (owner/remedy)
+# and the --notify crossing-once diff (ruling d602032b). Loads src/bin/
+# byebyte directly (same technique as byebyted's own module-level tests)
+# and exercises _accounting_headline's priority order plus cmd_accounting's
+# --notify path against a REAL on-disk accounting.json -- a fresh CLI
+# process each timer tick has no in-memory state at all, so the crossing-
+# once memory has to be the file itself, not something held in the
+# process. Unconditional, not gated on root/sudo, same as V3.M7-M9.
+python3 - <<'PY'
+import importlib.util, json, os, tempfile
+from importlib.machinery import SourceFileLoader
+
+loader = SourceFileLoader("byebyte_cli_mod_accounting", "src/bin/byebyte")
+spec = importlib.util.spec_from_loader("byebyte_cli_mod_accounting", loader)
+cli = importlib.util.module_from_spec(spec)
+loader.exec_module(cli)
+
+# --- _accounting_headline: priority order, never a bare number/silence
+h = cli._accounting_headline({"totals": {"condemned_bytes": 10, "cold_bytes": 5, "unknown_bytes": 999}})
+assert h == f"{cli.human_bytes(15)} reclaimable", h
+h = cli._accounting_headline({"totals": {"condemned_bytes": 0, "cold_bytes": 0, "unknown_bytes": 5}})
+assert h == f"{cli.human_bytes(5)} unknown, your call", h
+h = cli._accounting_headline({"totals": {"condemned_bytes": 0, "cold_bytes": 0, "unknown_bytes": 0}})
+assert h == "nothing to report", h
+
+# --- --notify: fires once per genuine headline change, diffed against the
+# real file (never in-memory), since a fresh CLI invocation has no memory
+# of its own
+notify_dir = tempfile.mkdtemp(prefix="byebyte-smoke-cli-notify-")
+cli.ACCOUNTING_PATH = os.path.join(notify_dir, "accounting.json")
+notified = []
+cli.notify_owner = lambda uid, summary, body: notified.append((summary, body))
+cli.request = lambda payload, timeout=30: {"daemon": {"owner_uid": 1000}}
+
+doc_a = {"totals": {"condemned_bytes": 100, "cold_bytes": 0, "unknown_bytes": 0}, "tiers": {}}
+doc_b = dict(doc_a)  # same headline, different object -- must compare by VALUE
+doc_c = {"totals": {"condemned_bytes": 500, "cold_bytes": 0, "unknown_bytes": 0}, "tiers": {}}
+queue = [doc_a]
+cli.request_or_die = lambda payload, timeout=30, as_json=False: queue.pop(0)
+
+# no prior accounting.json at all -- a first-ever run is a genuine new
+# fact and must notify (same "first crossing from an unknown baseline
+# fires" shape as mount_alert's own severity_mem.get(mp, 0))
+cli.cmd_accounting(["--notify", "--json"])
+assert len(notified) == 1, "a first-ever run with no prior file must notify once"
+
+# simulate the daemon's own --write having persisted doc_a
+with open(cli.ACCOUNTING_PATH, "w") as f:
+    json.dump(doc_a, f)
+notified.clear()
+queue = [doc_b]
+cli.cmd_accounting(["--notify", "--json"])
+assert notified == [], "an unchanged headline must stay silent, not repeat itself weekly"
+
+with open(cli.ACCOUNTING_PATH, "w") as f:
+    json.dump(doc_b, f)
+queue = [doc_c]
+cli.cmd_accounting(["--notify", "--json"])
+assert len(notified) == 1, "a genuinely changed headline must notify exactly once"
+
+print("accounting CLI ok: headline priority (actionable total, then named "
+      "unknown, then honest nothing) never a bare number or silence; "
+      "--notify diffs against the real accounting.json file (not "
+      "in-memory state, which a fresh CLI process never has), fires once "
+      "on a genuine change, stays silent on a repeat, matching the "
+      "crossing-once discipline everywhere else in this family")
 PY
 
 # --- M4: make deb — builds a real .deb; contents include bins+units+man.

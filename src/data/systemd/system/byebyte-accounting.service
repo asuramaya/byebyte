@@ -1,5 +1,5 @@
 [Unit]
-Description=byebyte accounting — periodic stock report (condemned/cold/unknown-large)
+Description=byebyte accounting — the fire marshal's scheduled inspection (condemned/cold/unknown-large)
 Documentation=https://github.com/asuramaya/byebyte
 After=byebyted.service
 Requires=byebyted.service
@@ -8,12 +8,15 @@ Requires=byebyted.service
 Type=oneshot
 # Same shape as byebyte-notify.service: a thin socket client, root only so
 # the peercred gate connects unconditionally, byebyted does the actual
-# work (Trash/cache/index accounting) and this only asks for it. --write
-# persists the run to /var/lib/byebyte/accounting.json — a passive record
-# for `byebyte accounting` to show next time, never a desktop push: a
-# monthly popup for a standing report is noise, not signal, the same
-# failure mode the notify work exists to avoid (Alfred's ruling, msg 6643).
-ExecStart=/usr/local/bin/byebyte accounting --write
+# work (Trash/cache/index accounting, owner/citation, the headline) and
+# this only asks for it. --write persists the run to
+# /var/lib/byebyte/accounting.json. --notify sends at most ONE summary
+# toast, only when the headline changed since that file's last write --
+# crossing-once against the file itself, so a weekly cadence never becomes
+# the alert-fatigue failure mode notify.timer's own no-repeat discipline
+# exists to avoid (ruling msg 6643, extended by the fire-marshal ruling
+# d602032b which is why this timer now runs weekly instead of monthly).
+ExecStart=/usr/local/bin/byebyte accounting --write --notify
 TimeoutStartSec=120
 NoNewPrivileges=yes
 ProtectSystem=strict

@@ -94,6 +94,7 @@ ballast_gb@2@0\(en32 (0 = off)
 burn_path_lru@4096@64\(en65536 (pid/dir pairs kept)
 accounting_cold_days@60@7\(en3650 (days)
 accounting_large_bytes@5368709120@1073741824\(en2^40 (bytes)
+accounting_cite_floor_bytes@52428800@0\(en2^40 (bytes)
 .TE
 .PP
 List-typed keys (validated as a list of strings, never clamped):
@@ -136,9 +137,30 @@ report \(em same registry invariant as
 .IR purge_disabled :
 it can suppress a source, never add one. Unrelated to
 .IR sweep_categories / purge_disabled / notify_categories :
-accounting never deletes anything and never pushes a notification, so it
-has no double\-consent gate to share and no crossing\-once memory to
-configure.
+accounting never deletes anything, so it has no double\-consent gate to
+share; its own weekly summary toast
+.RI ( byebyte
+.B accounting \-\-notify )
+carries no config key of its own \(em it fires at most once per run, only
+when the headline changed since the previous
+.IR accounting.json ,
+the same crossing\-once shape as
+.IR notify_categories 's
+own categories, but compared against a file rather than in\-memory state.
+.PP
+.I accounting_cite_floor_bytes
+sets the size below which a
+.B cold
+or
+.B unknown\-large
+finding still counts toward its tier's total but is no longer
+individually named in the report \(em replacing noise (a kilobyte\-sized
+rotated log printed beside a real, multi\-hundred\-megabyte finding) with
+an honest tail count instead of either citing it or silently dropping its
+bytes from the sum. Distinct from
+.IR accounting_large_bytes ,
+which decides whether a directory qualifies for tier 3 at all; this
+decides only whether a qualifying item is worth NAMING.
 .SH FILES
 .TP
 .I /etc/byebyte/config.json
@@ -176,7 +198,10 @@ run, written when
 .I \-\-write
 is passed (only
 .I byebyte\-accounting.timer
-does this, monthly) \(em a passive record, never a trigger for anything.
+does this, weekly) \(em a passive record, and the one place
+.I \-\-notify
+compares against to decide whether this run's headline is worth a
+toast.
 .TP
 .I /var/lib/byebyte/ballast/
 Pre-allocated emergency-reserve slabs.

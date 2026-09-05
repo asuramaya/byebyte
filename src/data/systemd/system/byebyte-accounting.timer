@@ -1,18 +1,19 @@
 [Unit]
-Description=byebyte accounting — periodic stock report
+Description=byebyte accounting — the fire marshal's scheduled inspection
 
-# Enabled BY DEFAULT (postinst/install.sh): report-only, can't hurt. Monthly,
-# not a 5-minute poll like notify.timer — this is an ACCOUNTING, not a
-# monitor, and a once-a-month report that says something true beats a
-# frequent one that says nothing (Alfred's framing, msg 6633). Deliberately
-# does NOT push a desktop notification on its own — --write only persists
-# the run to /var/lib/byebyte/accounting.json for the next `byebyte
-# accounting` to show. A monthly popup for a standing report would train
-# the operator to dismiss byebyte toasts generally, which is exactly what
-# would cost notify.timer's own crossing/discovery categories their value
-# (ruling msg 6643).
+# Enabled BY DEFAULT (postinst/install.sh): report-only, can't hurt. Weekly,
+# not a 5-minute poll like notify.timer -- the operator's "fire marshal, not
+# firefighter" ruling (d602032b): the pill is an inspector that walks the
+# building on a schedule and cites what it finds, not a gauge watched for a
+# threshold. --notify (see byebyte-accounting.service) sends at most ONE
+# summary toast per run, and only when the report's own headline changed
+# since the last write -- crossing-once against accounting.json itself, the
+# same discipline notify.timer's own categories use against in-memory state.
+# A marshal who found nothing new stays silent; it does not repeat itself
+# every week, which is exactly what would cost notify.timer's own
+# crossing/discovery categories their value (ruling msg 6643).
 [Timer]
-OnCalendar=monthly
+OnCalendar=weekly
 Persistent=true
 
 [Install]
