@@ -2252,6 +2252,18 @@ with open(child_file, "wb") as f:
     f.write(b"h" * 16)
 os.utime(child_file, (old_ts, old_ts))
 
+# owner heuristic, dot-dir-under-$HOME branch (Alfred's fix, msg
+# 7085/7371): a bare dot-dir directly under $HOME (~/.neo, no .git
+# ancestor, no REGISTRY category_hint since this is UNKNOWN-LARGE, not
+# COLD) is a CONTAINER, not an owner -- must fall to "unclassified",
+# never name the dot-dir itself.
+dotdir_home = os.path.join(home, ".neo")
+dotdir_file = os.path.join(dotdir_home, "i")
+os.makedirs(dotdir_home)
+with open(dotdir_file, "wb") as f:
+    f.write(b"i" * 16)
+os.utime(dotdir_file, (old_ts, old_ts))
+
 db_path = os.path.join(tmp, "index.db")
 con = sqlite3.connect(db_path)
 con.executescript(mod._SCHEMA)
@@ -2260,7 +2272,7 @@ cur = con.execute("INSERT INTO scans(ts, root, status) VALUES(?,?,?)",
 scan_id = cur.lastrowid
 for p, b in ((big_dir, 10 * 1024**3), (nested_dir, 8 * 1024**3),
              (small_parent, 1 * 1024**3), (child_only, 6 * 1024**3),
-             (repo_dir, 7 * 1024**3)):
+             (repo_dir, 7 * 1024**3), (dotdir_home, 5 * 1024**3)):
     con.execute("INSERT INTO paths(path) VALUES(?)", (p,))
     pid = con.execute("SELECT id FROM paths WHERE path=?", (p,)).fetchone()[0]
     con.execute("INSERT INTO dir_stats VALUES(?,?,?,?,?)",
@@ -2310,9 +2322,11 @@ assert pip_cache_dir in cold_paths, cold_items
 cold_item = next(it for it in cold_items if it["path"] == pip_cache_dir)
 assert cold_item["category"] == "pip-cache", cold_item
 assert cold_item["atime_confidence"] == "reliable", cold_item  # mount_opts={}
-# owner heuristic, $HOME-relative branch: pip_cache_dir has no .git
-# ancestor, so owner falls to the first path segment under $HOME.
-assert cold_item["owner"] == ".cache", cold_item
+# owner heuristic, COLD-tier category_hint branch (Alfred's fix, msg
+# 7085/7371): pip_cache_dir has no .git ancestor, and its own first path
+# segment under $HOME (.cache) is a dot-dir CONTAINER, not an owner --
+# the cache's own compiled-in category name is the honest owner instead.
+assert cold_item["owner"] == "pip-cache", cold_item
 
 # cite floor (fire-marshal ruling d602032b): the tiny uv-cache entry is
 # real and cold but below accounting_cite_floor_bytes -- it must never be
@@ -2346,6 +2360,11 @@ assert repo_item["owner"] == "gitrepo", repo_item
 # outside $HOME entirely
 big_item = next(it for it in unknown_items if it["path"] == big_dir)
 assert big_item["owner"] == "unclassified", big_item
+# owner heuristic, dot-dir-under-$HOME branch: a bare dot-dir is a
+# container, never an owner, even directly under $HOME with no category
+# hint to fall back on (UNKNOWN-LARGE has none, only COLD does).
+dotdir_item = next(it for it in unknown_items if it["path"] == dotdir_home)
+assert dotdir_item["owner"] == "unclassified", dotdir_item
 
 # totals: the CLI's headline/notify-diff depend on these summing the WHOLE
 # tier (cited items + below-floor), never just what got individually named

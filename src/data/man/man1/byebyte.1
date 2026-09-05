@@ -295,9 +295,15 @@ the longest and least useful section, by design).
 Every cited item (fire\-marshal ruling d602032b) carries a full citation,
 not a bare size: its
 .B owner
-(the nearest ancestor git repo's name, else the first path segment under
+(the nearest ancestor git repo's name; else, for a
+.B COLD
+finding, the cache's own name \(em the same tier label already printed
+alongside it, e.g.
+.IR hf\-hub ;
+else the first path segment under
 .BR $HOME ,
-else
+unless that segment is itself a dot\-dir \(em a container, not an owner
+\(em in which case, like every other case with nothing to name,
 .IR unclassified \(em
 never a guessed service name with no evidence behind it), its
 .B cost

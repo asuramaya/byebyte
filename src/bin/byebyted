@@ -3106,14 +3106,24 @@ def _collapse_nested(items):
 _ACCOUNTING_LARGE_LIMIT = 20
 
 
-def _accounting_owner(path, home):
+def _accounting_owner(path, home, category_hint=None):
     """A cheap, honest ownership guess for a citation (fire-marshal ruling
     d602032b: every finding names an owner) -- the nearest ancestor
-    directory that's a git repo (its own name), else the first path
+    directory that's a git repo (its own name), else (for a COLD-tier
+    finding) the cache's own compiled-in name, else the first REAL path
     segment directly under $HOME (its own name), else "unclassified".
     Never a guessed service/package name: there's no data behind that
     guess, and a wrong owner is worse than an honest "unclassified" --
-    same discipline as reserved_percent_unknown and atime_confidence."""
+    same discipline as reserved_percent_unknown and atime_confidence.
+
+    Two live findings on the operator's own box (Alfred, msg 7085/7371):
+    every hf-hub item reported "owner: .cache" and ~/.neo reported
+    "owner: .neo" -- a dot-dir is a CONTAINER, not an owner, the same
+    false-specificity class this function exists to avoid. `category_hint`
+    (COLD tier only, its own REGISTRY category name, e.g. "hf-hub") is a
+    real, honest, more specific owner than a dot-dir ever was; absent
+    that, a first path segment that's itself a dot-dir now falls through
+    to "unclassified" rather than naming the container."""
     p = os.path.abspath(path)
     cur = p
     while True:
@@ -3123,12 +3133,15 @@ def _accounting_owner(path, home):
         if parent == cur:
             break
         cur = parent
+    if category_hint:
+        return category_hint
     if home:
         home = home.rstrip("/")
         if p == home or p.startswith(home + "/"):
             rest = p[len(home):].lstrip("/")
-            if rest:
-                return rest.split("/")[0]
+            first = rest.split("/")[0] if rest else ""
+            if first and not first.startswith("."):
+                return first
     return "unclassified"
 
 
@@ -3179,7 +3192,7 @@ def accounting(cfg, status_doc, indexer):
             item = {"category": category, "path": c["path"], "bytes": c["bytes"],
                      "last_access_ts": last,
                      "atime_confidence": _atime_confidence(c["path"], mount_opts),
-                     "owner": _accounting_owner(c["path"], home)}
+                     "owner": _accounting_owner(c["path"], home, category_hint=category)}
             cold_items.append(_with_mount_context(item, mounts))
     cold_items.sort(key=lambda it: -it["bytes"])
     cold = {"items": cold_items,
