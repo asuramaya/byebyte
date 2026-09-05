@@ -1,7 +1,7 @@
 {
   "uuid": "byebyte@asuramaya",
   "name": "byebyte",
-  "description": "Storage as a deadline, not a percentage — a Quick Settings pill showing free space, burn rate, and time-until-full per mount, including tmpfs quota headroom (the 'disk full while df says fine' killer). Requires the byebyted daemon (https://github.com/asuramaya/byebyte).",
+  "description": "Storage Sense for Linux — a Quick Settings pill showing free space, burn rate, and time-until-full per mount (including tmpfs quota headroom, the 'disk full while df says fine' killer), plus Findings ▸: what the written policy will clean up next, and a one-click confirm to run it now. Requires the byebyted daemon (https://github.com/asuramaya/byebyte).",
   "shell-version": ["46", "47", "48", "49", "50"],
   "url": "https://github.com/asuramaya/byebyte",
   "version": 1

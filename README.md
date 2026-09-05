@@ -4,29 +4,38 @@
 [![release](https://img.shields.io/github/v/release/asuramaya/byebyte?sort=semver)](https://github.com/asuramaya/byebyte/releases/latest)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
-Say bye to bytes. The storage sibling of [kast](https://github.com/asuramaya/kast)
-(casting), [coldspot](https://github.com/asuramaya/coldspot) (internet) and
+**Storage Sense for Linux** — a written policy applied on a timer, with receipts. The
+storage sibling of [kast](https://github.com/asuramaya/kast) (casting),
+[coldspot](https://github.com/asuramaya/coldspot) (internet) and
 [phanspeed](https://github.com/asuramaya/phanspeed) (power): a root daemon that owns the
 truth about your disks, a verb CLI over it, and a GNOME Quick Settings pill on top.
 
-Where `df` tells you a percentage, byebyte tells you a *deadline*: free space, burn rate,
-and time-until-full, including quota headroom on tmpfs, where "disk full" errors happen
-while `df` swears everything is fine.
+Linux desktops ship no janitor. byebyte senses (flow *and* stock — `status` for the
+deadline, `accounting` for what's just sitting there unmoving), then acts on its own
+schedule from a policy file you can actually read (`/etc/byebyte/policy.json`), never a
+path you type in. Where `df` tells you a percentage, byebyte tells you a *deadline*: free
+space, burn rate, and time-until-full, including quota headroom on tmpfs, where "disk
+full" errors happen while `df` swears everything is fine.
 
 ```
 byebyte status     # headroom, burn rate, ETA-to-full per mount
+byebyte accounting # what's cold, condemned, or large-and-unknown -- with an owner and a remedy
+byebyte policy     # apply the written policy; ships in dry-run until you flip one field
 ```
 
-That's the read-only half. The other half reclaims space, and only from a fixed, compiled-in
-list of things it's allowed to touch, never a path you type in:
+Every reclaim, scheduled or on-demand, only ever touches a fixed, compiled-in list of
+things it's allowed to touch:
 
 | | |
 |---|---|
 | `why` / `blame` | instant du-tree from a background index, and a "what grew since" diff |
+| `accounting` | the stock half: Trash, cold caches, and large-and-old dirs, each cited by owner and cost |
+| `policy` | Storage Sense's own actuator — trash/caches/journal/apt-cache/docker/snap, on a timer, on by default, `dry_run: true` until you say otherwise |
 | `purge <category>` | delete what a category detector positively matches: caches, old kernels, kondo-style dead project artifacts, rotated logs, and more. Dry-run by default |
 | `ghosts` | deleted-but-open files still holding disk blocks, and who's holding them |
 | `ballast` | a pre-allocated emergency reserve you can release even at 0 bytes free |
-| `sweep` | the same reclaim, unattended. Off unless you double opt in |
+| `sweep` | the same reclaim, unattended, category-armed by hand. Off unless you double opt in |
+| `notify` | a desktop toast for whatever's newly worth an interruption — on by default, never a bare number |
 | `burn` | live per-process write rates, with the writing directory named when running as root |
 
 On a btrfs mount, `why` and `blame` read the filesystem's own subvolume and snapshot

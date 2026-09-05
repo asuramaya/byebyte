@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""byebyte — verb CLI over the byebyted control socket.
+"""byebyte — Storage Sense for Linux: verb CLI over the byebyted control socket.
 
 Talks to the daemon's socket; `status` falls back to reading status.json
 so it still answers even mid-daemon-restart. Every verb accepts --json.

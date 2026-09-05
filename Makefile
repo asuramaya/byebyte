@@ -189,10 +189,11 @@ deb:
 	  echo "Suggests: $$DEB_SUGGESTS_GEN"; \
 	  echo "Maintainer: asuramaya <asuramaya@users.noreply.github.com>"; \
 	  echo "Homepage: https://github.com/asuramaya/byebyte"; \
-	  echo "Description: storage as a deadline, not a percentage"; \
+	  echo "Description: Storage Sense for Linux"; \
 	  echo " byebyte owns the truth about disks: statvfs+quota polling, burn rate,"; \
-	  echo " ETA-to-full, an index, purge/ghosts/ballast/kernels/advise, and a GNOME"; \
-	  echo " Quick Settings pill."; \
+	  echo " ETA-to-full, an index, accounting, a written policy applied on a timer"; \
+	  echo " with receipts, purge/ghosts/ballast/kernels/advise, and a GNOME Quick"; \
+	  echo " Settings pill."; \
 	} > $(DEBROOT)/DEBIAN/control
 	dpkg-deb --build --root-owner-group $(DEBROOT) $(DEBTMP)
 	mv -f $(DEBTMP) $(DEBFILE)
