@@ -21,7 +21,7 @@ so it still answers even mid-daemon-restart. Every verb accepts --json.
   accounting [--write] [--notify]   fire-marshal report: owner/cost/remedy per finding, report-only, never deletes
   burn [--seconds N] [--limit N]   live per-process write rates
   sweep [--dry] [--history]   the unattended reclaim policy (double-consent)
-  policy [report] [--dry-run]   Storage Sense: apply the written policy (/etc/byebyte/policy.json), on by default, obeys its own dry_run
+  policy [report] [--dry-run] [--apply]   Storage Sense: apply the written policy (/etc/byebyte/policy.json), on by default, obeys its own dry_run; --apply acts on exactly a matched-set JSON read from stdin, no re-detect
   notify [--dry]          send any newly-worth-an-interruption finding as a desktop notification
   update [--check]        delegates to byebyte-update
 
@@ -944,6 +944,36 @@ def cmd_policy(argv):
             print(json.dumps(doc, indent=2))
             return
         _print_policy_receipt(doc)
+        return
+
+    if "--apply" in argv:
+        # Act on EXACTLY a previously-shown dry pass's own matched lists
+        # (Alfred's amendment, msg 7134/7151) -- reads that JSON object
+        # from stdin (a `byebyte policy --dry-run --json` doc's own
+        # per-category "matched" arrays, keyed by category, plus a bare
+        # true/false per singleton category) rather than argv: this can
+        # be an arbitrarily long list of paths, not a handful of flags.
+        # There is no re-detect anywhere in this path -- what was read in
+        # is exactly what acts.
+        try:
+            matched = json.load(sys.stdin)
+        except ValueError as e:
+            sys.exit(f"byebyte policy --apply: malformed matched JSON on stdin: {e}")
+        doc = request_or_die({"cmd": "policy", "action": "apply", "matched": matched},
+                             timeout=180, as_json="--json" in argv)
+        if "--json" in argv:
+            print(json.dumps(doc, indent=2))
+            return
+        _print_policy_receipt(doc)
+        freed = doc.get("totals", {}).get("bytes_freed", 0)
+        if freed > 0:
+            status = request({"cmd": "status"})
+            uid = (status or {}).get("daemon", {}).get("owner_uid")
+            acted = [r for r in doc.get("results", []) if r.get("bytes_freed", 0) > 0]
+            cats = ", ".join(_POLICY_CATEGORY_LABEL.get(r["category"], r["category"])
+                             for r in acted)
+            notify_owner(uid, f"policy: freed {human_bytes(freed)}",
+                         f"acted on: {cats} — see: byebyte policy report")
         return
 
     force_dry = "--dry-run" in argv or "--dry" in argv

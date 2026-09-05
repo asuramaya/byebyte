@@ -253,6 +253,22 @@ HOSTILE = [
     {"cmd": "policy", "action": "report"},
     {"cmd": "policy", "action": "bogus"}, {"cmd": "policy", "action": None},
     {"cmd": "policy", "action": []}, {"cmd": "policy", "extra": "garbage"},
+    # apply: this fixture's redirected policy path has no file, so
+    # load_policy() falls back to DEFAULT_POLICY (dry_run: True) --
+    # every one of these is refused at the dry_run gate before any
+    # matched payload is ever touched, same read-only-by-construction
+    # argument as run's own force_dry fuzzing above.
+    {"cmd": "policy", "action": "apply"},
+    {"cmd": "policy", "action": "apply", "matched": {}},
+    {"cmd": "policy", "action": "apply", "matched": "not-an-object"},
+    {"cmd": "policy", "action": "apply", "matched": None},
+    {"cmd": "policy", "action": "apply", "matched": []},
+    {"cmd": "policy", "action": "apply",
+     "matched": {"trash": "not-a-list", "cold_cache": [1, 2, "x"],
+                 "snap_revisions": [{"name": 123, "revision": None}],
+                 "journal": "yes", "apt_cache": {}}},
+    {"cmd": "policy", "action": "apply",
+     "matched": {"trash": [{"path": "../../etc/passwd", "info_path": "x"}]}},
     {"cmd": "wat"}, {"cmd": 123}, {"cmd": None}, {}, {"cmd": []},
 ]
 for msg in HOSTILE:

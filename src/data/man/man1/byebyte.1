@@ -345,7 +345,7 @@ crossing\-once against a FILE rather than in\-memory state, so a marshal
 who found nothing new stays silent instead of repeating itself every
 week.
 .TP
-.B policy " [report] [\-\-dry\-run] [\-\-json]"
+.B policy " [report] [\-\-dry\-run] [\-\-apply] [\-\-json]"
 Storage Sense: applies the written policy in
 .I /etc/byebyte/policy.json
 and leaves a receipt. Unlike
@@ -464,7 +464,28 @@ and policy.json's own
 is
 .BR false )
 sends at most one desktop toast, only when something was actually
-freed.
+freed. The receipt's own
+.I policy_file_dry_run
+field always names policy.json's OWN configured value, distinct from
+.I dry_run
+(what THIS particular run actually did) only when a caller asked for a
+preview while the file itself says real \(em a reader can tell "this
+previews because the file is in dry run" from "this previews because
+someone asked for a fresh check first," never confusing the two.
+.B \-\-apply
+acts on EXACTLY a previously\-shown dry pass's own matched lists, read as
+JSON from stdin \(em never a fresh detect: build a
+.B \-\-dry\-run
+.B \-\-json
+doc first, then feed its per\-category
+.I matched
+arrays (plus a bare true/false per singleton category: journal,
+apt_cache, docker_dangling_images, docker_dangling_volumes) back in
+unchanged. Refused outright, before touching anything, while
+policy.json's own
+.I dry_run
+is
+.BR true .
 .TP
 .B update " [\-\-check] [\-\-json]"
 Delegates straight to

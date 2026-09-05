@@ -2680,6 +2680,68 @@ try:
 except ValueError:
     pass
 
+# --- apply: act on EXACTLY a confirmed match list, no re-detect (Alfred's
+# amendment, msg 7134/7151). A fresh dry pass's own "matched" list is the
+# apply payload verbatim; an item that appears BETWEEN the dry pass and
+# the apply call (simulating drift during the time a human reads the
+# confirm dialog) must never be swept in.
+drift_dir = os.path.join(tmp, "apply-drift")
+os.makedirs(drift_dir)
+apply_home = os.path.join(drift_dir, "home")
+os.makedirs(apply_home)
+os.environ["BYEBYTE_TEST_HOME"] = apply_home
+apply_trash_files = os.path.join(apply_home, ".local", "share", "Trash", "files")
+apply_trash_info = os.path.join(apply_home, ".local", "share", "Trash", "info")
+os.makedirs(apply_trash_files)
+os.makedirs(apply_trash_info)
+confirmed_file = os.path.join(apply_trash_files, "confirmed.txt")
+with open(confirmed_file, "wb") as f:
+    f.write(b"c" * 4096)
+confirmed_ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now - 40 * 86400))
+with open(os.path.join(apply_trash_info, "confirmed.txt.trashinfo"), "w") as f:
+    f.write(f"[Trash Info]\nPath=confirmed.txt\nDeletionDate={confirmed_ts}\n")
+
+apply_cfg = dict(cfg, scan_roots=[apply_home])
+real_policy = dict(policy_cfg, dry_run=False)
+preview = mod.policy_run(apply_cfg, dict(real_policy, dry_run=True), {"mounts": []}, None)
+confirmed_matched = [r for r in preview["results"] if r["category"] == "trash"][0]["matched"]
+assert len(confirmed_matched) == 1, confirmed_matched
+
+# drift: a second item shows up AFTER the confirm dialog would have been
+# built, before the apply call actually runs
+drift_file = os.path.join(apply_trash_files, "drift.txt")
+with open(drift_file, "wb") as f:
+    f.write(b"d" * 4096)
+drift_ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now - 50 * 86400))
+with open(os.path.join(apply_trash_info, "drift.txt.trashinfo"), "w") as f:
+    f.write(f"[Trash Info]\nPath=drift.txt\nDeletionDate={drift_ts}\n")
+
+applied = mod._policy_apply_matched(apply_cfg, real_policy, None,
+                                     {"trash": confirmed_matched})
+applied_trash = [r for r in applied["results"] if r["category"] == "trash"][0]
+assert applied_trash["bytes_freed"] == 4096, applied_trash
+assert not os.path.exists(confirmed_file), "the confirmed item must be gone"
+assert os.path.exists(drift_file), \
+    "an item that appeared AFTER confirm must survive an apply scoped to the old confirm"
+
+# dispatch-level refusal: policy.json's own dry_run always wins, even for apply
+dry_file_path = os.path.join(tmp, "still-dry-policy.json")
+with open(dry_file_path, "w") as f:
+    json.dump({"dry_run": True, "rules": []}, f)
+os.environ["BYEBYTE_TEST_POLICY_PATH"] = dry_file_path
+refused = dispatch("policy", {"action": "apply", "matched": {}})
+assert "error" in refused and "dry_run" in refused["error"], \
+    f"apply must refuse when policy.json says dry_run:true: {refused}"
+with open(dry_file_path, "w") as f:
+    json.dump({"dry_run": False, "rules": []}, f)
+allowed = dispatch("policy", {"action": "apply", "matched": {"trash": []}})
+assert "totals" in allowed, allowed
+os.environ["BYEBYTE_TEST_HOME"] = home  # restore for anything after this block
+print("policy apply ok: acts on exactly a confirmed match list (an item "
+      "that appears after the confirm dialog was built survives), and "
+      "the dispatch layer refuses to act at all while policy.json's own "
+      "dry_run is true, the same one-way latch as force_dry")
+
 print("policy ok: closed-enumeration validated (unknown_large can never "
       "load, there is no act() for it), merge-by-category preserves "
       "un-mentioned rules at their compiled default, trash deletes only "

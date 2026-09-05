@@ -3526,9 +3526,19 @@ def _policy_run_item_rule(category, items, dry_run, cfg, indexer, act, ledger_ta
     when a revision's own .snap file can't be found) -- its bytes never
     enter would_free_bytes/bytes_freed (a real number must never blend
     with a guess), and it's counted separately so the receipt can say "N
-    items, size unknown" instead of a confident, false 0B."""
+    items, size unknown" instead of a confident, false 0B.
+
+    `matched`'s per-item shape carries every JSON-safe identity field
+    _policy_apply_matched needs to act later WITHOUT a fresh detect() --
+    info_path (trash), category (cold_cache's own REGISTRY sub-category),
+    name/revision (snap_revisions) -- echoed straight through from
+    `items`, alongside path/bytes. The act-callable fields (_delete/
+    _revalidate/_verify) never leave this function; only their RESULT
+    (via `act`, already run above) and these plain identity fields do."""
+    _IDENTITY_KEYS = ("info_path", "category", "name", "revision")
     matched = [dict({"path": i["path"], "bytes": i["bytes"]},
-                    **({"bytes_unknown": True} if i.get("bytes_unknown") else {}))
+                    **({"bytes_unknown": True} if i.get("bytes_unknown") else {}),
+                    **{k: i[k] for k in _IDENTITY_KEYS if k in i})
                for i in items]
     known = [i for i in items if not i.get("bytes_unknown")]
     unknown_count = len(items) - len(known)
@@ -3760,13 +3770,26 @@ def _write_policy_receipt(doc, owner_uid):
     sutra.write_status(POLICY_RUNS_LATEST, doc, owner=(owner_uid, -1))
 
 
-def policy_run(cfg, policy_cfg, status_doc, indexer):
+def policy_run(cfg, policy_cfg, status_doc, indexer, file_dry_run=None):
     """Applies every ENABLED rule in policy_cfg. dry_run comes from
     policy_cfg itself, never a CLI flag alone -- the safety default lives
     in the auditable file (msg 7111 point 4): a caller MAY force dry
     (never force real -- see the dispatch wiring), policy.json's own
-    "dry_run": true always wins."""
+    "dry_run": true always wins.
+
+    `file_dry_run` is policy.json's OWN configured value, BEFORE any
+    force_dry override -- distinct from `dry_run` (what THIS run actually
+    did) only when a caller forced a preview while the file itself says
+    real. Recorded on the receipt as `policy_file_dry_run` so a reader
+    (the pill's fold label) can tell "this previews because the file
+    itself is in dry run" from "this previews because someone asked for a
+    fresh check before confirming a real run" -- Alfred's sharpening, msg
+    7154, basis-in-the-sentence (8adbfe6c). Defaults to `dry_run` itself
+    when the caller doesn't know the distinction applies (every call site
+    except the forced-preview one, and every existing test)."""
     dry_run = policy_cfg.get("dry_run", True)
+    if file_dry_run is None:
+        file_dry_run = dry_run
     mount_opts = _mount_options_map()
     rules_by_cat = {r["category"]: r for r in policy_cfg["rules"]}
     results = []
@@ -3837,8 +3860,96 @@ def policy_run(cfg, policy_cfg, status_doc, indexer):
     totals = {"bytes_freed": bytes_freed, "would_free_bytes": would_free_bytes}
     if unknown_count:
         totals["unknown_count"] = unknown_count
-    doc = {"ts": time.time(), "dry_run": dry_run, "results": results,
+    doc = {"ts": time.time(), "dry_run": dry_run,
+           "policy_file_dry_run": file_dry_run, "results": results,
            "totals": totals}
+    _write_policy_receipt(doc, cfg["owner_uid"])
+    return doc
+
+
+def _safe_int(v):
+    """`matched` arrives over the socket as untrusted client JSON -- a
+    stray string/None/float where a byte count belongs must never raise
+    or silently become a huge/negative number, just 0 (this is display/
+    bookkeeping data only, an act's real effect is what revalidate/
+    delete/verify actually did, not this figure)."""
+    return v if isinstance(v, int) and not isinstance(v, bool) else 0
+
+
+def _policy_apply_matched(cfg, policy_cfg, indexer, matched):
+    """Act on EXACTLY the confirmed match list, no re-detect (Alfred's
+    amendment, msg 7134/7151): `matched` is a fresh dry pass's own
+    per-category `matched` lists (see _policy_run_item_rule's own
+    docstring for the identity fields each carries), echoed straight back
+    by the caller unchanged -- what the operator confirmed IS what acts,
+    never a category re-derived at click time. The dispatch layer above
+    this already refused the whole call if policy.json's own dry_run is
+    still true; this function never checks that again."""
+    rules_by_cat = {r["category"]: r for r in policy_cfg["rules"]}
+    results = []
+
+    trash_raw = matched.get("trash") or []
+    if trash_raw and rules_by_cat["trash"]["enabled"]:
+        items = [{"path": i["path"], "info_path": i["info_path"],
+                  "bytes": _safe_int(i.get("bytes", 0))}
+                 for i in trash_raw
+                 if isinstance(i, dict) and isinstance(i.get("path"), str)
+                 and isinstance(i.get("info_path"), str) and i["path"] and i["info_path"]]
+        if items:
+            results.append(_policy_run_item_rule(
+                "trash", items, False, cfg, indexer, _act_trash, "policy:trash"))
+
+    cold_raw = matched.get("cold_cache") or []
+    if cold_raw and rules_by_cat["cold_cache"]["enabled"]:
+        items = []
+        for i in cold_raw:
+            if not isinstance(i, dict):
+                continue
+            cat = i.get("category")
+            if cat not in REGISTRY or not isinstance(i.get("path"), str) or not i["path"]:
+                continue
+            _, delete, revalidate, verify = REGISTRY[cat]
+            items.append({"path": i["path"], "bytes": _safe_int(i.get("bytes", 0)),
+                          "_delete": delete, "_revalidate": revalidate,
+                          "_verify": verify})
+        if items:
+            results.append(_policy_run_item_rule(
+                "cold_cache", items, False, cfg, indexer, _act_cold_cache,
+                "policy:cold_cache"))
+
+    snap_raw = matched.get("snap_revisions") or []
+    if snap_raw and rules_by_cat["snap_revisions"]["enabled"]:
+        _, delete, revalidate, verify = REGISTRY["snap-old"]
+        items = [{"path": i.get("path") or f"{i['name']} (revision {i['revision']})",
+                  "bytes": _safe_int(i.get("bytes", 0)),
+                  "bytes_unknown": bool(i.get("bytes_unknown")),
+                  "name": i["name"], "revision": i["revision"]}
+                 for i in snap_raw
+                 if isinstance(i, dict) and isinstance(i.get("name"), str)
+                 and isinstance(i.get("revision"), str) and i["name"] and i["revision"]]
+        if items:
+            results.append(_policy_run_item_rule(
+                "snap_revisions", items, False, cfg, indexer,
+                _make_registry_act(delete, revalidate, verify),
+                "policy:snap_revisions"))
+
+    if matched.get("journal") and rules_by_cat["journal"]["enabled"]:
+        results.append(_policy_run_journal(rules_by_cat["journal"], False, cfg))
+    if matched.get("apt_cache") and rules_by_cat["apt_cache"]["enabled"]:
+        results.append(_policy_run_apt_cache(rules_by_cat["apt_cache"], False))
+    if matched.get("docker_dangling_images") and rules_by_cat["docker_dangling_images"]["enabled"]:
+        results.append(_policy_run_docker("docker_dangling_images", "image", False))
+    if matched.get("docker_dangling_volumes") and rules_by_cat["docker_dangling_volumes"]["enabled"]:
+        results.append(_policy_run_docker("docker_dangling_volumes", "volume", False))
+
+    bytes_freed = sum(r.get("bytes_freed", 0) for r in results)
+    unknown_count = sum(r.get("count_freed_unknown", 0) for r in results)
+    totals = {"bytes_freed": bytes_freed, "would_free_bytes": 0}
+    if unknown_count:
+        totals["unknown_count"] = unknown_count
+    doc = {"ts": time.time(), "dry_run": False,
+           "policy_file_dry_run": policy_cfg["dry_run"], "applied_from_confirm": True,
+           "results": results, "totals": totals}
     _write_policy_receipt(doc, cfg["owner_uid"])
     return doc
 
@@ -4123,6 +4234,27 @@ def _make_dispatch(cfg, indexer, get_status, path_attr=None, notify_mem=None):
             if action == "report":
                 doc = sutra.read_status(POLICY_RUNS_LATEST)
                 return doc if doc is not None else {"error": "no policy run yet"}
+            if action == "apply":
+                # act-on-confirmed-set (Alfred's amendment, msg 7134/7151):
+                # the pill's "Run policy now" first runs a fresh dry pass
+                # (action="run", force_dry=True) and shows THAT verbatim in
+                # its confirm dialog -- `matched` here is exactly that
+                # dry pass's own per-category candidate lists, echoed back
+                # unchanged. No detect() runs in this action at all; only
+                # the named items act, each through the SAME TOCTOU-safe
+                # revalidate-then-delete-then-verify shape every other act
+                # path in this file already uses.
+                matched = req.get("matched")
+                if not isinstance(matched, dict):
+                    raise ValueError("matched must be an object")
+                try:
+                    policy_cfg = load_policy(_policy_path())
+                except ValueError as e:
+                    return {"error": str(e)}
+                if policy_cfg["dry_run"]:
+                    return {"error": "policy.json's own dry_run is true -- "
+                                     "flip it to false to allow a real run"}
+                return _policy_apply_matched(cfg, policy_cfg, indexer, matched)
             if action != "run":
                 raise ValueError("unknown policy action")
             force_dry = req.get("force_dry", False)
@@ -4132,13 +4264,15 @@ def _make_dispatch(cfg, indexer, get_status, path_attr=None, notify_mem=None):
                 policy_cfg = load_policy(_policy_path())
             except ValueError as e:
                 return {"error": str(e)}
+            file_dry_run = policy_cfg["dry_run"]
             # force_dry only ever NARROWS toward dry-run, same one-way
             # latch as sweep's own force_dry -- nothing here can force a
             # REAL run when policy.json itself says dry_run: true; the
             # safety default lives in the file, never in a CLI flag.
             if force_dry:
                 policy_cfg = dict(policy_cfg, dry_run=True)
-            return policy_run(cfg, policy_cfg, get_status(), indexer)
+            return policy_run(cfg, policy_cfg, get_status(), indexer,
+                              file_dry_run=file_dry_run)
         return None
     return dispatch
 
