@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "dry_run": true,
+  "rules": [
+    {
+      "category": "trash",
+      "enabled": true,
+      "params": {"older_than_days": 30}
+    },
+    {
+      "category": "cold_cache",
+      "enabled": true,
+      "params": {"idle_days": 90}
+    },
+    {
+      "category": "journal",
+      "enabled": true,
+      "params": {"cap_bytes": "500M"}
+    },
+    {
+      "category": "apt_cache",
+      "enabled": true,
+      "params": {"cap_bytes": "500M"}
+    },
+    {
+      "category": "docker_dangling_images",
+      "enabled": true,
+      "params": {}
+    },
+    {
+      "category": "docker_dangling_volumes",
+      "enabled": false,
+      "params": {},
+      "reason": "a dangling volume can be the only copy of real data; a dangling image is pure rebuildable build cache -- different risk profile, off until named on purpose"
+    },
+    {
+      "category": "snap_revisions",
+      "enabled": true,
+      "params": {}
+    }
+  ]
+}

@@ -51,6 +51,13 @@ env = dict(os.environ)
 env["BYEBYTE_RUNTIME_DIR"] = RD
 env["BYEBYTE_STATE_DIR"] = os.path.join(RD, "state")
 env["BYEBYTE_TEST_HOME"] = os.path.join(FIX, "home")
+# Same reason config.json's own path is redirected via --config: without
+# this, policy dispatch fuzzing below would fall through to whatever
+# policy.json (if any) sits at the real /etc/byebyte/policy.json on
+# whatever box this harness runs on. Absent entirely here is fine and
+# deliberate -- load_policy() falls back to DEFAULT_POLICY (dry_run:
+# True), so every dry-run fuzz case below stays read-only by construction.
+env["BYEBYTE_TEST_POLICY_PATH"] = os.path.join(RD, "policy.json")
 proc = subprocess.Popen(
     [sys.executable, os.path.join(HERE, "src", "bin", "byebyted"),
      "--config", os.path.join(RD, "config.json")],
@@ -231,6 +238,21 @@ HOSTILE = [
     {"cmd": "accounting", "write": 1}, {"cmd": "accounting", "write": None},
     {"cmd": "accounting", "write": []}, {"cmd": "accounting", "write": True},
     {"cmd": "accounting", "extra": "garbage"},
+    # policy: no policy.json at this fixture's redirected path, so every
+    # one of these falls back to DEFAULT_POLICY (dry_run: True) -- every
+    # "run" fuzz case below stays read-only by construction, same safety
+    # argument as accounting's write: True above. force_dry only narrows
+    # toward dry, never widens past what the file says, so fuzzing it with
+    # non-bool garbage must raise, never silently coerce.
+    {"cmd": "policy"}, {"cmd": "policy", "action": "run"},
+    {"cmd": "policy", "action": "run", "force_dry": True},
+    {"cmd": "policy", "action": "run", "force_dry": "yes"},
+    {"cmd": "policy", "action": "run", "force_dry": 1},
+    {"cmd": "policy", "action": "run", "force_dry": None},
+    {"cmd": "policy", "action": "run", "force_dry": []},
+    {"cmd": "policy", "action": "report"},
+    {"cmd": "policy", "action": "bogus"}, {"cmd": "policy", "action": None},
+    {"cmd": "policy", "action": []}, {"cmd": "policy", "extra": "garbage"},
     {"cmd": "wat"}, {"cmd": 123}, {"cmd": None}, {}, {"cmd": []},
 ]
 for msg in HOSTILE:

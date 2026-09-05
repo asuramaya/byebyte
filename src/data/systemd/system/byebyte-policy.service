@@ -1,0 +1,22 @@
+[Unit]
+Description=byebyte policy — Storage Sense's written policy, applied
+Documentation=https://github.com/asuramaya/byebyte
+After=byebyted.service
+Requires=byebyted.service
+
+[Service]
+Type=oneshot
+# Thin socket client, root only so the peercred gate connects
+# unconditionally -- byebyted reads /etc/byebyte/policy.json fresh on
+# every run (not cached at startup, unlike config.json) and does the
+# actual work; this only asks for it. Obeys policy.json's own "dry_run"
+# -- this unit never forces a real run past what the file itself says.
+ExecStart=/usr/local/bin/byebyte policy
+# Same measured-worst-case reasoning as byebyte-sweep.service's own
+# 240s: a real cold_cache pass can walk the same cache dirs sweep already
+# measured at up to 169.83s when armed, plus journal/apt/docker calls.
+TimeoutStartSec=240
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=no

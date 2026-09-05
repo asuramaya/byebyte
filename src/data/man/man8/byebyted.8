@@ -206,6 +206,26 @@ toast.
 .I /var/lib/byebyte/ballast/
 Pre-allocated emergency-reserve slabs.
 .TP
+.I /etc/byebyte/policy.json
+Storage Sense's written policy \(em seeded once at install, never
+overwritten on reinstall, same treatment as config.json. Read fresh on
+every
+.BR byebyte (1)
+.I policy
+run (never cached at daemon startup): editing it, including flipping its
+.I dry_run
+field, takes effect on the very next run.
+.TP
+.I /var/lib/byebyte/policy_runs/
+One JSON receipt per
+.I policy
+run \(em timestamp-named, capped at 500 files (oldest pruned first) \(em
+plus a
+.I latest.json
+copy that
+.I byebyte policy report
+reads.
+.TP
 .I /run/byebyte/status.json
 0640, owned by
 .IR owner_uid .

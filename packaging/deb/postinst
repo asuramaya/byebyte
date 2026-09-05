@@ -45,6 +45,15 @@ case "$1" in
     # alert fatigue notify.timer is designed to avoid.
     #   sudo systemctl disable --now byebyte-accounting.timer
     systemctl enable --now byebyte-accounting.timer >/dev/null 2>&1 || true
+    # policy.timer: Storage Sense (operator ruling 2026-09-05) -- ON by
+    # default for the same reason accounting/notify are: an opt-in janitor
+    # reproduces "byebyte feels useless." Safety lives in policy.json's own
+    # dry_run: true default (ships that way, seeded once below), not in
+    # this timer being off -- the first run only previews and writes a
+    # receipt. Also runs the instant a mount crosses into "hot", entirely
+    # inside byebyted, independent of this timer's own weekly cadence.
+    #   sudo systemctl disable --now byebyte-policy.timer
+    systemctl enable --now byebyte-policy.timer >/dev/null 2>&1 || true
     # The GNOME pill stages here (/usr/share/byebyte/extension/) but GNOME
     # Shell only ever scans /usr/share/gnome-shell/extensions/ (system-wide)
     # or ~/.local/share/gnome-shell/extensions/ (per-account) — this path is

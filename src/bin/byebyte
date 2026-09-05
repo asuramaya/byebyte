@@ -21,6 +21,7 @@ so it still answers even mid-daemon-restart. Every verb accepts --json.
   accounting [--write] [--notify]   fire-marshal report: owner/cost/remedy per finding, report-only, never deletes
   burn [--seconds N] [--limit N]   live per-process write rates
   sweep [--dry] [--history]   the unattended reclaim policy (double-consent)
+  policy [report] [--dry-run]   Storage Sense: apply the written policy (/etc/byebyte/policy.json), on by default, obeys its own dry_run
   notify [--dry]          send any newly-worth-an-interruption finding as a desktop notification
   update [--check]        delegates to byebyte-update
 
@@ -854,6 +855,107 @@ def cmd_sweep(argv):
                   "(apt install libnotify-bin)")
 
 
+# --- policy: Storage Sense (operator ruling 2026-09-05) ---------------------
+# Unlike sweep's double-consent (an unarmed category always only previews),
+# policy is ON by default -- byebyte-policy.timer is enabled out of the box,
+# same reasoning as notify.timer: the whole pitch is "Linux desktops ship no
+# janitor," and an opt-in janitor just reproduces "byebyte feels useless."
+# Safety instead lives in policy.json's own "dry_run": true default (see
+# byebyted's policy_run docstring) -- a CLI flag can only ever force a
+# preview, never force a real run past what the file itself says.
+
+_POLICY_CATEGORY_LABEL = {
+    "trash": "Trash", "cold_cache": "cold caches", "journal": "journald",
+    "apt_cache": "apt cache",
+    "docker_dangling_images": "docker (dangling images)",
+    "docker_dangling_volumes": "docker (dangling volumes)",
+    "snap_revisions": "snap (old revisions)",
+}
+
+
+def _print_policy_receipt(doc):
+    if "error" in doc and "results" not in doc:
+        print(f"policy: {doc['error']}")
+        return
+    dry = doc.get("dry_run", True)
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(doc["ts"]))
+    print(f"policy report ({when}{', DRY RUN' if dry else ''})")
+    for r in doc.get("results", []):
+        label = _POLICY_CATEGORY_LABEL.get(r["category"], r["category"])
+        if not r.get("enabled", True):
+            reason = f" -- {r['reason']}" if r.get("reason") else ""
+            print(f"  {label}: off{reason}")
+            continue
+        if r.get("error"):
+            print(f"  {label}: error -- {r['error']}")
+            continue
+        if r.get("note"):
+            print(f"  {label}: {r['note']}")
+            continue
+        if dry:
+            amt = r.get("would_free_bytes", 0)
+            count = r.get("count_would_free", 0)
+            if not amt and not count:
+                print(f"  {label}: nothing to do")
+            else:
+                tail = f" ({count} item(s))" if count else ""
+                print(f"  {label}: would free {human_bytes(amt)}{tail}")
+        else:
+            freed = r.get("bytes_freed", 0)
+            count = r.get("count_freed", 0)
+            errors = r.get("errors") or []
+            if not freed and not count:
+                print(f"  {label}: nothing to do")
+            else:
+                tail = f" ({count} item(s))" if count else ""
+                if errors:
+                    tail += f", {len(errors)} failed"
+                print(f"  {label}: freed {human_bytes(freed)}{tail}")
+        for ref in r.get("refused", []):
+            print(f"    refused: {ref['path']} -- {ref['reason']}")
+    totals = doc.get("totals", {})
+    if dry:
+        print(f"total: would free {human_bytes(totals.get('would_free_bytes', 0))}")
+    else:
+        print(f"total: freed {human_bytes(totals.get('bytes_freed', 0))}")
+
+
+def cmd_policy(argv):
+    if argv and argv[0] == "report":
+        doc = request_or_die({"cmd": "policy", "action": "report"},
+                             as_json="--json" in argv)
+        if "--json" in argv:
+            print(json.dumps(doc, indent=2))
+            return
+        _print_policy_receipt(doc)
+        return
+
+    force_dry = "--dry-run" in argv or "--dry" in argv
+    # Same measured-worst-case reasoning as sweep's own 180s timeout: a
+    # real cold_cache pass can walk the same cache dirs sweep already
+    # measured at up to 169.83s when armed.
+    doc = request_or_die({"cmd": "policy", "action": "run", "force_dry": force_dry},
+                         timeout=180, as_json="--json" in argv)
+    if "--json" in argv:
+        print(json.dumps(doc, indent=2))
+        return
+    _print_policy_receipt(doc)
+
+    if not doc.get("dry_run"):
+        freed = doc.get("totals", {}).get("bytes_freed", 0)
+        if freed > 0:
+            status = request({"cmd": "status"})
+            uid = (status or {}).get("daemon", {}).get("owner_uid")
+            acted = [r for r in doc.get("results", []) if r.get("bytes_freed", 0) > 0]
+            cats = ", ".join(_POLICY_CATEGORY_LABEL.get(r["category"], r["category"])
+                             for r in acted)
+            notify_owner(uid, f"policy: freed {human_bytes(freed)}",
+                         f"acted on: {cats} — see: byebyte policy report")
+            if shutil.which("notify-send") is None:
+                print("  note: desktop notifications unavailable "
+                      "(apt install libnotify-bin)")
+
+
 # --- notify: the unprompted voice (Alfred's ruling, msg 6489/6501) ----------
 # Runs from byebyte-notify.timer (its own unit, its own cadence, enabled by
 # default -- unlike sweep/update this one is meant to work out of the box,
@@ -971,7 +1073,7 @@ def main():
              "tmp-size": cmd_tmp_size,
              "ghosts": cmd_ghosts, "ballast": cmd_ballast, "kernels": cmd_kernels,
              "advise": cmd_advise, "accounting": cmd_accounting,
-             "burn": cmd_burn, "sweep": cmd_sweep,
+             "burn": cmd_burn, "sweep": cmd_sweep, "policy": cmd_policy,
              "notify": cmd_notify, "update": cmd_update}
     if verb in verbs:
         verbs[verb](rest)

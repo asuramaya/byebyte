@@ -155,8 +155,10 @@ deb:
 	install -m 0644 src/data/man/man1/byebyte.1 $(DEBROOT)/usr/share/man/man1/byebyte.1
 	install -m 0644 src/data/man/man8/byebyted.8 $(DEBROOT)/usr/share/man/man8/byebyted.8
 	install -m 0644 src/data/config/config.json $(DEBROOT)/etc/byebyte/config.json
+	install -m 0644 src/data/config/policy.json $(DEBROOT)/etc/byebyte/policy.json
 	install -m 0644 src/data/systemd/system/byebyte-update.timer src/data/systemd/system/byebyte-sweep.timer \
 	    src/data/systemd/system/byebyte-notify.timer src/data/systemd/system/byebyte-accounting.timer \
+	    src/data/systemd/system/byebyte-policy.timer \
 	    $(DEBROOT)/lib/systemd/system/
 	# The .service units' canonical ExecStart lines are written for
 	# install.sh's default PREFIX (/usr/local/bin/...) -- correct there,
@@ -166,7 +168,7 @@ deb:
 	# reference fix as coldspot's packaging/build-deb.sh: one canonical
 	# unit file, rewritten at deb-build time for the path this package
 	# actually uses, never a second file to keep in sync by hand.
-	for u in byebyted.service byebyte-update.service byebyte-sweep.service byebyte-notify.service byebyte-accounting.service; do \
+	for u in byebyted.service byebyte-update.service byebyte-sweep.service byebyte-notify.service byebyte-accounting.service byebyte-policy.service; do \
 	  sed 's#/usr/local/bin#/usr/bin#g' src/data/systemd/system/$$u \
 	      > $(DEBROOT)/lib/systemd/system/$$u; \
 	  chmod 0644 $(DEBROOT)/lib/systemd/system/$$u; \
@@ -174,7 +176,7 @@ deb:
 	install -m 0755 packaging/deb/postinst $(DEBROOT)/DEBIAN/postinst
 	install -m 0755 packaging/deb/prerm $(DEBROOT)/DEBIAN/prerm
 	install -m 0755 packaging/deb/postrm $(DEBROOT)/DEBIAN/postrm
-	echo /etc/byebyte/config.json > $(DEBROOT)/DEBIAN/conffiles
+	printf '/etc/byebyte/config.json\n/etc/byebyte/policy.json\n' > $(DEBROOT)/DEBIAN/conffiles
 	{ \
 	  echo "Package: byebyte"; \
 	  echo "Version: $(VERSION)"; \
@@ -210,7 +212,7 @@ deb:
 # window (Restart=on-failure means a crash can still read "active" an
 # instant after start -- a single is-active check misses exactly the
 # SIGSYS-under-seccomp class of bug this target exists to catch), and the
-# four oneshot units (byebyte-update, byebyte-sweep, byebyte-notify, byebyte-accounting) must actually run to
+# five oneshot units (byebyte-update, byebyte-sweep, byebyte-notify, byebyte-accounting, byebyte-policy) must actually run to
 # completion -- a timer unit that starts and immediately fails is exactly
 # as invisible to a daemon-only restart-poll as the ExecStart bug this
 # whole check exists to catch. Joint finding with ramstein's own version
@@ -247,7 +249,7 @@ check-systemd-live:
 	@echo "check-systemd-live: byebyted.service stable, active, 0 restarts, over 30s"
 	byebyte status
 	byebyte-healthcheck
-	@for u in byebyte-update.service byebyte-sweep.service byebyte-notify.service byebyte-accounting.service; do \
+	@for u in byebyte-update.service byebyte-sweep.service byebyte-notify.service byebyte-accounting.service byebyte-policy.service; do \
 	  systemctl start $$u; \
 	  result="$$(systemctl show $$u -p Result --value)"; \
 	  if [ "$$result" != "success" ]; then \
@@ -276,7 +278,7 @@ check-systemd-live:
 	# actually starting the timer: systemctl start fails outright on a
 	# dangling Unit=, and list-timers only ever shows a timer that both
 	# started AND has a real resolved NEXT/LEFT.
-	@for t in byebyte-update.timer byebyte-sweep.timer byebyte-notify.timer byebyte-accounting.timer; do \
+	@for t in byebyte-update.timer byebyte-sweep.timer byebyte-notify.timer byebyte-accounting.timer byebyte-policy.timer; do \
 	  out="$$(systemd-analyze verify $$t 2>&1)"; \
 	  if [ -n "$$out" ]; then \
 	    echo "FAIL: systemd-analyze verify found a problem in $$t:" >&2; \

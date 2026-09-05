@@ -35,6 +35,7 @@ echo "-- stopping service + timers"
 systemctl disable --now byebyted.service byebyte-update.timer byebyte-update.service \
   byebyte-sweep.timer byebyte-sweep.service byebyte-notify.timer byebyte-notify.service \
   byebyte-accounting.timer byebyte-accounting.service \
+  byebyte-policy.timer byebyte-policy.service \
   2>/dev/null || true
 
 echo "-- removing files"
@@ -51,7 +52,8 @@ rm -f "$BINDIR"/sutra.py "$BINDIR"/sutra.version "$BINDIR"/sutra.commit \
 rm -f "$UNITDIR/byebyted.service" "$UNITDIR/byebyte-update.service" "$UNITDIR/byebyte-update.timer" \
       "$UNITDIR/byebyte-sweep.service" "$UNITDIR/byebyte-sweep.timer" \
       "$UNITDIR/byebyte-notify.service" "$UNITDIR/byebyte-notify.timer" \
-      "$UNITDIR/byebyte-accounting.service" "$UNITDIR/byebyte-accounting.timer"
+      "$UNITDIR/byebyte-accounting.service" "$UNITDIR/byebyte-accounting.timer" \
+      "$UNITDIR/byebyte-policy.service" "$UNITDIR/byebyte-policy.timer"
 rm -rf "$SHAREDIR"
 rm -f "$PREFIX/share/man/man1/byebyte.1" "$PREFIX/share/man/man8/byebyted.8"
 systemctl daemon-reload

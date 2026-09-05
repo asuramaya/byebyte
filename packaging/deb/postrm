@@ -1,8 +1,9 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Only acts on purge, matching uninstall.sh --purge: config.json is a
-# conffile dpkg already removes on purge by itself, but /var/lib/byebyte
-# (index, ledger, ballast) is daemon-created state dpkg never knows about.
+# Only acts on purge, matching uninstall.sh --purge: config.json and
+# policy.json are both conffiles dpkg already removes on purge by itself,
+# but /var/lib/byebyte (index, ledger, ballast, policy_runs) is
+# daemon-created state dpkg never knows about.
 set -e
 
 case "$1" in

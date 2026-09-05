@@ -217,6 +217,19 @@ else
   chmod 0644 /etc/byebyte/config.json
 fi
 
+# 2b. policy: the same seed-once-never-overwrite treatment as config.json,
+# but no owner_uid to stamp -- a plain copy. Unlike config.json's sparse
+# style, policy.json ships with every rule spelled out in full: it exists
+# to be read as an honest "here is exactly what will happen" document,
+# and hiding its defaults behind an empty file would defeat that.
+if [[ -f /etc/byebyte/policy.json ]]; then
+  echo "-- /etc/byebyte/policy.json exists — keeping it untouched"
+else
+  echo "-- seeding /etc/byebyte/policy.json (dry_run: true)"
+  install -d -m 0755 /etc/byebyte
+  install -m 0644 "$SRC/src/data/config/policy.json" /etc/byebyte/policy.json
+fi
+
 # 3. systemd: daemon + daily update-CHECK timer + the sweep timer (both
 # opt-in) + the notify timer + the accounting timer (both ON by default —
 # see below). update.timer
@@ -236,6 +249,8 @@ install -m 0644 "$SRC/src/data/systemd/system/byebyte-notify.service" "$UNITDIR/
 install -m 0644 "$SRC/src/data/systemd/system/byebyte-notify.timer"   "$UNITDIR/byebyte-notify.timer"
 install -m 0644 "$SRC/src/data/systemd/system/byebyte-accounting.service" "$UNITDIR/byebyte-accounting.service"
 install -m 0644 "$SRC/src/data/systemd/system/byebyte-accounting.timer"   "$UNITDIR/byebyte-accounting.timer"
+install -m 0644 "$SRC/src/data/systemd/system/byebyte-policy.service"    "$UNITDIR/byebyte-policy.service"
+install -m 0644 "$SRC/src/data/systemd/system/byebyte-policy.timer"      "$UNITDIR/byebyte-policy.timer"
 systemctl daemon-reload
 systemctl enable byebyted.service
 # `enable --now` on an ALREADY-active unit is a no-op start — it would leave
@@ -271,12 +286,22 @@ systemctl enable --now byebyte-notify.timer
 # avoid (ruling, msg 6633/6643).
 systemctl enable --now byebyte-accounting.timer
 
+# policy.timer: Storage Sense's own weekly cadence (operator ruling
+# 2026-09-05) -- ON by default, same reasoning as notify/accounting
+# ("Linux desktops ship no janitor" is the whole pitch; an opt-in janitor
+# just reproduces "byebyte feels useless"). Safety lives in policy.json's
+# own dry_run: true default, not in this timer being off -- the first run
+# on a fresh install only ever previews and writes a receipt, never
+# deletes, until dry_run is flipped to false by hand after reading one.
+systemctl enable --now byebyte-policy.timer
+
 # 4. verify perms
 echo "-- verifying"
 verify() { local got; got="$(stat -c '%a' "$1" 2>/dev/null || echo '?')"
   [[ "$got" == "$2" ]] && echo "   OK   $1 ($got)" || echo "   WARN $1 is $got, expected $2"; }
 verify "$BINDIR/byebyted" 755
 verify /etc/byebyte/config.json 644
+verify /etc/byebyte/policy.json 644
 
 cat <<EOF
 
@@ -308,6 +333,18 @@ each cited by owner and cost) is ALSO ON BY DEFAULT — report-only, never
 deletes. Its own summary toast fires at most once per run, only when
 something changed since last week. Read it any time: byebyte accounting
   sudo systemctl disable --now byebyte-accounting.timer
+
+policy (Storage Sense: empties Trash past 30d, drops caches idle 90d,
+caps journald/apt cache, prunes dangling docker images, trims old snap
+revisions -- see /etc/byebyte/policy.json for the exact rules and their
+thresholds) is ALSO ON BY DEFAULT, weekly and on a free-space crossing,
+but SHIPS IN DRY-RUN: the first run only previews and writes a receipt,
+nothing is deleted until you read one (byebyte policy report) and flip
+"dry_run" to false in /etc/byebyte/policy.json yourself. Dangling docker
+VOLUMES stay off by default even after that (a volume can be the only
+copy of real data) -- flip its own "enabled" if you want it too.
+  byebyte policy report
+  sudo systemctl disable --now byebyte-policy.timer
 
 >>> the GNOME pill is a separate, per-account, NO-ROOT step — as yourself: <<<
   make pill

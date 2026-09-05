@@ -3184,14 +3184,691 @@ def accounting(cfg, status_doc, indexer):
     }
 
     # NOTE: tier PRINT ORDER stays CONDEMNED -> COLD -> UNKNOWN-LARGE
-    # (ruling 6643) -- the fire-marshal ruling's "headline, not footnote"
-    # question for UNKNOWN-LARGE is explicitly HELD pending the operator's
-    # own word (it reverses 6643's rationale and touches the pill's fold
-    # priority too); this dict's own key order is the single sort key
-    # Alfred asked for, so flipping it later is a one-line change here.
+    # (ruling 6643). The fire-marshal ruling's "headline, not footnote"
+    # question for UNKNOWN-LARGE, once HELD pending the operator's word, is
+    # now MOOT: the operator's Storage Sense ruling (2026-09-05) replaced
+    # "which tier leads the report" with "what the policy will act on next
+    # and what it will never touch" (see policy_run() below) -- this dict's
+    # key order stays as-is, nothing here needed to change.
     return {"ts": now, "totals": totals,
             "tiers": {"condemned": condemned, "cold": cold,
                       "unknown_large": unknown_large}}
+
+
+# --- policy: Storage Sense -- a written policy applied on a timer, with
+# receipts (operator ruling 2026-09-05, relayed msg 7109/7115) -----------
+#
+# coldspot and phanspeed work without effort because they're CONTROLLERS
+# (sensor, policy, actuator); byebyte was a gauge -- accounting sensed
+# (flow AND stock), sweep could act but shipped with no named policy and
+# stayed off by default (double-consent, docs/V2-SPEC.md M4). Storage
+# Sense is the third piece: a human-auditable policy file, applied
+# unattended, ON by default, every run leaving a receipt. It reuses
+# REGISTRY's existing detect/delete/revalidate/verify pairs and
+# journal_cap() directly rather than inventing a second actuator -- the
+# categories genuinely new here (trash, apt_cache, docker_dangling_*) get
+# the same TOCTOU-safe shape (revalidate immediately before delete, verify
+# after) as everything else in this file.
+#
+# THE CLOSED-ENUMERATION INVARIANT (promised in the proposal, msg 7111,
+# approved as written msg 7115): a policy rule can only ever name one of
+# _POLICY_CATEGORIES below -- load_policy() fails LOUD on anything else,
+# never silently ignores it (this file is meant to be read as ground
+# truth: a typo here must not run silently as if it said nothing, the
+# opposite of accounting_disabled's "config only narrows" latitude, since
+# a policy rule is a POSITIVE grant, not a silencer). UNKNOWN-LARGE
+# (accounting's tier 3, a generic directory-scan with no act() at all) has
+# no entry here and never will -- there is nothing to enable; you cannot
+# name a category that was never compiled in.
+
+_POLICY_CATEGORIES = {
+    "trash", "cold_cache", "journal", "apt_cache",
+    "docker_dangling_images", "docker_dangling_volumes", "snap_revisions",
+}
+
+# The same five cache categories accounting's COLD tier already samples --
+# project-artifacts stays out (its detect() is a live, unbounded scan_roots
+# walk, same reason sweep's _SWEEP_UNARMED_SKIP excludes it).
+_POLICY_COLD_CACHE_CATEGORIES = _ADVISE_COLD_CACHE_CATEGORIES
+
+# Mirrors config.json's own convention: this dict IS the compiled default,
+# and src/data/config/policy.json ships the same content spelled out in
+# full (unlike config.json's sparse-override style) -- policy.json exists
+# to be read as an honest "here is exactly what will happen" document, so
+# hiding its defaults behind an empty shipped file would defeat the point.
+# Keep the two in sync by hand; smoke.sh checks they match.
+DEFAULT_POLICY = {
+    "version": 1,
+    "dry_run": True,
+    "rules": [
+        {"category": "trash", "enabled": True,
+         "params": {"older_than_days": 30}},
+        {"category": "cold_cache", "enabled": True,
+         "params": {"idle_days": 90}},
+        {"category": "journal", "enabled": True,
+         "params": {"cap_bytes": "500M"}},
+        {"category": "apt_cache", "enabled": True,
+         "params": {"cap_bytes": "500M"}},
+        {"category": "docker_dangling_images", "enabled": True,
+         "params": {}},
+        {"category": "docker_dangling_volumes", "enabled": False,
+         "params": {},
+         "reason": "a dangling volume can be the only copy of real data; "
+                   "a dangling image is pure rebuildable build cache -- "
+                   "different risk profile, off until named on purpose"},
+        {"category": "snap_revisions", "enabled": True, "params": {}},
+    ],
+}
+
+_POLICY_PARAM_CLAMPS = {
+    "older_than_days": (0, 3650),
+    "idle_days": (0, 3650),
+}
+
+POLICY_PATH = "/etc/byebyte/policy.json"
+
+
+def _policy_path():
+    # Non-root-only test redirection, same class as BYEBYTE_TEST_HOME --
+    # root (the real daemon) always reads the real file. Unlike
+    # config.json (a root-required --config CLI flag, no env override at
+    # all), policy.json is read fresh on every run rather than cached at
+    # startup, so a harness needs to point it at a fixture the same way it
+    # already does for STATE_DIR/RUNTIME_DIR, or attack/smoke fuzzing of
+    # the policy dispatch would fall through to the real system file.
+    if os.getuid() != 0:
+        override = os.environ.get("BYEBYTE_TEST_POLICY_PATH")
+        if override:
+            return override
+    return POLICY_PATH
+
+
+POLICY_RUNS_DIR = os.path.join(STATE_DIR, "policy_runs")
+POLICY_RUNS_LATEST = os.path.join(POLICY_RUNS_DIR, "latest.json")
+# A janitor should sweep its own floor (Alfred's note, msg 7113): capped,
+# not "never deletes" -- a receipt a session can die at any instant still
+# needs a floor, same instinct as snapshot_ring capping index snapshots.
+_POLICY_RUNS_CAP = 500
+
+
+def _validate_policy_rule(rule):
+    """Returns (normalized_rule, error_or_None). Fails LOUD on anything
+    outside the closed enum or a malformed param -- never coerces or
+    drops. A policy rule is closer to declare()'s declared scope than to
+    a config.json tuning knob, so a mistake here should refuse to load,
+    not silently run some unintended thing."""
+    if not isinstance(rule, dict):
+        return None, "each rule must be an object"
+    category = rule.get("category")
+    if category not in _POLICY_CATEGORIES:
+        return None, f"unknown policy category: {category!r}"
+    enabled = rule.get("enabled", False)
+    if not isinstance(enabled, bool):
+        return None, f"{category}: enabled must be true/false"
+    params = rule.get("params", {})
+    if not isinstance(params, dict):
+        return None, f"{category}: params must be an object"
+    norm = {"category": category, "enabled": enabled, "params": dict(params)}
+    if "reason" in rule and isinstance(rule["reason"], str):
+        norm["reason"] = rule["reason"]
+    for key in ("older_than_days", "idle_days"):
+        if key in params:
+            v = params[key]
+            lo, hi = _POLICY_PARAM_CLAMPS[key]
+            if not isinstance(v, (int, float)) or isinstance(v, bool) or not (lo <= v <= hi):
+                return None, f"{category}: {key} must be a number {lo}-{hi}"
+    if "cap_bytes" in params:
+        v = params["cap_bytes"]
+        if not isinstance(v, str) or not _SIZE_RE.match(v):
+            return None, f"{category}: cap_bytes must look like 500M, 1G, 2G"
+    return norm, None
+
+
+def load_policy(path):
+    """Merge-by-category over DEFAULT_POLICY: a category the file doesn't
+    mention falls back to its compiled default rule (never silently
+    vanishes); a category it DOES mention fully replaces that default.
+    A name outside _POLICY_CATEGORIES, or any malformed rule, raises --
+    see the closed-enumeration note above. Read fresh on every policy run
+    rather than cached at daemon startup (unlike config.json): this file
+    exists to be edited without a `systemctl restart byebyted` in the
+    loop -- flipping dry_run to false after reading one real receipt is
+    meant to take effect on the very next run, weekly or crossing-
+    triggered, whichever comes first."""
+    if not os.path.exists(path):
+        return copy.deepcopy(DEFAULT_POLICY)
+    try:
+        with open(path) as f:
+            raw = json.load(f)
+    except (OSError, ValueError) as e:
+        raise ValueError(f"{path}: {e}")
+    if not isinstance(raw, dict):
+        raise ValueError(f"{path}: must be a JSON object")
+    dry_run = raw.get("dry_run", True)
+    if not isinstance(dry_run, bool):
+        raise ValueError(f"{path}: dry_run must be true/false")
+    rules_by_cat = {r["category"]: r for r in DEFAULT_POLICY["rules"]}
+    for rule in raw.get("rules", []):
+        norm, err = _validate_policy_rule(rule)
+        if err:
+            raise ValueError(f"{path}: {err}")
+        rules_by_cat[norm["category"]] = norm
+    order = [r["category"] for r in DEFAULT_POLICY["rules"]]
+    return {"version": 1, "dry_run": dry_run,
+            "rules": [rules_by_cat[c] for c in order]}
+
+
+_SIZE_UNITS = {"": 1, "K": 1024, "M": 1024 ** 2, "G": 1024 ** 3, "T": 1024 ** 4}
+
+
+def _parse_size_bytes(size):
+    if not isinstance(size, str) or not _SIZE_RE.match(size):
+        return None
+    digits = re.match(r"^\d+", size).group()
+    unit = size[len(digits):]
+    return int(digits) * _SIZE_UNITS.get(unit, 1)
+
+
+# -- trash: per-item, unlike accounting's single aggregate row --------------
+# _detect_trash (accounting's own) reports Trash as ONE verdict already
+# given (the freedesktop trash spec's own files/+info pair) -- right for a
+# citation, wrong for policy: emptying needs to know WHICH entries are past
+# their grace period, so this walks the same two directories but keeps
+# per-entry identity instead of collapsing to a single row.
+
+def _policy_trash_candidates(cfg, older_than_days):
+    home = _resolve_owner_home(cfg)
+    if not home:
+        return []
+    trash = os.path.join(home, ".local", "share", "Trash")
+    files_dir = os.path.join(trash, "files")
+    info_dir = os.path.join(trash, "info")
+    if not os.path.isdir(files_dir) or not os.path.isdir(info_dir):
+        return []
+    if not _verify_inside(trash, home):
+        return []
+    cutoff = time.time() - older_than_days * 86400
+    out = []
+    try:
+        info_entries = list(os.scandir(info_dir))
+    except OSError:
+        return []
+    for e in info_entries:
+        if not e.name.endswith(".trashinfo"):
+            continue
+        ts = _parse_trashinfo(e.path)
+        # No documented DeletionDate is "I don't know how old this is", not
+        # "old enough" -- same no-vs-I-don't-know discipline as everywhere
+        # else in this file (reserved_percent_unknown, atime_confidence).
+        if ts is None or ts > cutoff:
+            continue
+        target = os.path.join(files_dir, e.name[: -len(".trashinfo")])
+        try:
+            st = os.lstat(target)
+        except OSError:
+            continue
+        b = st.st_size if not os.path.isdir(target) else _dir_size(target)
+        out.append({"path": target, "info_path": e.path, "bytes": b,
+                    "deletion_ts": ts})
+    return out
+
+
+def _act_trash(item, cfg, indexer):
+    # revalidate immediately before delete: the operator may have restored
+    # this exact item between detect and act, same discipline REGISTRY's
+    # own revalidate() applies.
+    if not os.path.lexists(item["path"]):
+        return False
+    try:
+        if os.path.isdir(item["path"]) and not os.path.islink(item["path"]):
+            _rm_tree(item["path"])
+        else:
+            _rm_files([item["path"]])
+        _rm_files([item["info_path"]])
+        return not os.path.lexists(item["path"])
+    except (OSError, PermissionError):
+        return False
+
+
+# -- cold_cache: the same 5 REGISTRY categories accounting already samples,
+# gated by idle_days via _sample_atime -- but unlike accounting (report
+# only, atime_confidence merely DISCLOSED), an actuator must GATE on it: a
+# noatime mount can't tell idle from unknown, so this REFUSES to act there
+# and says why in the receipt, rather than guess (Alfred's note, msg 7113).
+
+def _policy_cold_cache_candidates(cfg, indexer, idle_days, mount_opts):
+    now = time.time()
+    out, refused = [], []
+    for category in _POLICY_COLD_CACHE_CATEGORIES:
+        if category in cfg.get("purge_disabled", []):
+            continue
+        detect, delete, revalidate, verify = REGISTRY[category]
+        for c in detect(cfg, indexer):
+            confidence = _atime_confidence(c["path"], mount_opts)
+            if confidence == "frozen":
+                refused.append({"path": c["path"], "bytes": c["bytes"],
+                                "reason": "mount is noatime -- cannot tell "
+                                          "idle from unknown, refusing to act"})
+                continue
+            last = _sample_atime(c["path"])
+            if last is None or (now - last) < idle_days * 86400:
+                continue
+            out.append({"category": category, "path": c["path"],
+                        "bytes": c["bytes"], "last_access_ts": last,
+                        "atime_confidence": confidence,
+                        "_delete": delete, "_revalidate": revalidate,
+                        "_verify": verify})
+    return out, refused
+
+
+def _act_cold_cache(item, cfg, indexer):
+    if not item["_revalidate"](item, cfg, indexer):
+        return False
+    try:
+        item["_delete"](item)
+        return item["_verify"](item)
+    except (OSError, PermissionError, subprocess.SubprocessError):
+        return False
+
+
+def _make_registry_act(delete, revalidate, verify):
+    def act(item, cfg, indexer):
+        if not revalidate(item, cfg, indexer):
+            return False
+        try:
+            delete(item)
+            return verify(item)
+        except (OSError, PermissionError, subprocess.SubprocessError):
+            return False
+    return act
+
+
+def _policy_run_item_rule(category, items, dry_run, cfg, indexer, act, ledger_tag):
+    """Generic runner for a per-item, TOCTOU-safe rule (trash, cold_cache,
+    snap_revisions) -- `act(item, cfg, indexer) -> bool` does its own
+    revalidate-then-delete-then-verify, same shape purge()/sweep() already
+    use for every REGISTRY category."""
+    matched = [{"path": i["path"], "bytes": i["bytes"]} for i in items]
+    total = sum(i["bytes"] for i in items)
+    if dry_run:
+        return {"category": category, "dry_run": True, "matched": matched,
+                "would_free_bytes": total, "count_would_free": len(items)}
+    _toctou_test_window(cfg)
+    freed, count, errors = 0, 0, []
+    for i in items:
+        ts = time.time()
+        ok = act(i, cfg, indexer)
+        if ok:
+            freed += i["bytes"]
+            count += 1
+        else:
+            errors.append(i["path"])
+        _ledger_append(ts, ledger_tag, i["path"], i["bytes"] if ok else 0,
+                       "ok" if ok else "error")
+    return {"category": category, "dry_run": False, "matched": matched,
+            "bytes_freed": freed, "count_freed": count, "errors": errors}
+
+
+# -- journal: journal_cap() already supports dry_run -- reused as-is, no
+# new actuator needed.
+
+def _policy_run_journal(rule, dry_run, cfg):
+    cap = rule["params"].get("cap_bytes", "500M")
+    doc = journal_cap(cap, dry_run, cfg)
+    if "error" in doc:
+        return {"category": "journal", "dry_run": dry_run, "error": doc["error"]}
+    if dry_run:
+        cap_bytes = _parse_size_bytes(cap) or 0
+        would_free = max(0, doc.get("usage_bytes", 0) - cap_bytes)
+        return {"category": "journal", "dry_run": True,
+                "would_free_bytes": would_free, "cap_bytes": cap}
+    return {"category": "journal", "dry_run": False,
+            "bytes_freed": max(doc.get("freed_bytes", 0), 0), "cap_bytes": cap}
+
+
+# -- apt_cache: new. apt has no partial-vacuum like journalctl
+# --vacuum-size -- `apt-get clean` empties the whole archive cache (every
+# .deb it holds is a re-downloadable copy of something the package index
+# can fetch again), so cap_bytes is a TRIGGER threshold ("clean once
+# you're over this"), not a partial trim target the way journal's cap is.
+
+_APT_CACHE_DIR = "/var/cache/apt/archives"
+
+
+def _apt_cache_dir():
+    # non-root-only test redirection, same class as BYEBYTE_TEST_HOME/
+    # _JOURNALD_DIR -- root (the real daemon) never honors it.
+    if os.getuid() != 0:
+        override = os.environ.get("BYEBYTE_TEST_APT_CACHE_DIR")
+        if override:
+            return override
+    return _APT_CACHE_DIR
+
+
+def _apt_testing():
+    return os.getuid() != 0 and bool(os.environ.get("BYEBYTE_TEST_APT_CACHE_DIR"))
+
+
+def _policy_apt_cache_candidate(cap_bytes_str):
+    d = _apt_cache_dir()
+    if not os.path.isdir(d):
+        return None
+    usage = _dir_size(d)
+    cap = _parse_size_bytes(cap_bytes_str)
+    if cap is None or usage <= cap:
+        return None
+    return {"path": d, "bytes": usage}
+
+
+def _policy_act_apt_cache():
+    d = _apt_cache_dir()
+    before = _dir_size(d)
+    if _apt_testing():
+        # file logic only -- same reason journal_cap's test mode never
+        # calls the real systemctl/journalctl: there is no "fake" apt to
+        # clean, and this must never touch the operator's real apt cache
+        # as a side effect of testing its own file logic.
+        _rm_tree(d, keep_top=True)
+    else:
+        subprocess.run(["apt-get", "clean"], capture_output=True,
+                       timeout=60, check=False)
+    after = _dir_size(d)
+    return max(before - after, 0)
+
+
+def _policy_run_apt_cache(rule, dry_run):
+    cap = rule["params"].get("cap_bytes", "500M")
+    cand = _policy_apt_cache_candidate(cap)
+    if dry_run:
+        return {"category": "apt_cache", "dry_run": True,
+                "would_free_bytes": cand["bytes"] if cand else 0, "cap_bytes": cap}
+    if cand is None:
+        return {"category": "apt_cache", "dry_run": False, "bytes_freed": 0,
+                "cap_bytes": cap}
+    freed = _policy_act_apt_cache()
+    _ledger_append(time.time(), "policy:apt_cache", _apt_cache_dir(), freed, "ok")
+    return {"category": "apt_cache", "dry_run": False, "bytes_freed": freed,
+            "cap_bytes": cap}
+
+
+# -- docker_dangling_{images,volumes}: new. Parsing kept separate from the
+# subprocess call (same split btrfs's own _parse_subvol_list/_run use) so
+# the parsing logic is testable without docker installed at all -- CI (and
+# most boxes byebyte runs on) has no docker, and shutil.which gates every
+# call the same way detect_snap_old already gates on the snap CLI.
+
+def _docker_available():
+    return shutil.which("docker") is not None
+
+
+def _parse_docker_ids(text):
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def detect_docker_dangling_images():
+    if not _docker_available():
+        return []
+    try:
+        out = subprocess.run(
+            ["docker", "image", "ls", "-f", "dangling=true", "-q"],
+            capture_output=True, text=True, timeout=15, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if out.returncode != 0:
+        return []
+    # docker doesn't cheaply report a dangling image's own size without a
+    # separate `docker image inspect` per id -- 0 is an honest "unknown",
+    # never a guess, same discipline as docker_dangling_volumes below.
+    return [{"path": f"docker image {i}", "bytes": 0, "id": i}
+            for i in _parse_docker_ids(out.stdout)]
+
+
+def detect_docker_dangling_volumes():
+    if not _docker_available():
+        return []
+    try:
+        out = subprocess.run(
+            ["docker", "volume", "ls", "-f", "dangling=true", "-q"],
+            capture_output=True, text=True, timeout=15, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if out.returncode != 0:
+        return []
+    return [{"path": f"docker volume {i}", "bytes": 0, "id": i}
+            for i in _parse_docker_ids(out.stdout)]
+
+
+_DOCKER_RECLAIMED_RE = re.compile(
+    r"Total reclaimed space:\s*([\d.]+)\s*([KMGT]?B)", re.IGNORECASE)
+_DOCKER_RECLAIMED_UNITS = {"B": 1, "KB": 1024, "MB": 1024 ** 2,
+                           "GB": 1024 ** 3, "TB": 1024 ** 4}
+
+
+def _parse_docker_reclaimed(text):
+    m = _DOCKER_RECLAIMED_RE.search(text)
+    if not m:
+        return 0
+    val, unit = m.groups()
+    return int(float(val) * _DOCKER_RECLAIMED_UNITS.get(unit.upper(), 1))
+
+
+def _policy_act_docker_prune(kind):
+    """kind: 'image' or 'volume'. `docker <kind> prune -f` only ever
+    touches DANGLING resources by definition -- prune's own -a flag
+    (which would widen to unused-but-not-dangling) is never passed here."""
+    try:
+        out = subprocess.run(["docker", kind, "prune", "-f"],
+                             capture_output=True, text=True, timeout=60, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    return _parse_docker_reclaimed(out.stdout)
+
+
+def _policy_run_docker(category, kind, dry_run):
+    if not _docker_available():
+        return {"category": category, "dry_run": dry_run,
+                "note": "docker CLI not found"}
+    detect = (detect_docker_dangling_images if kind == "image"
+              else detect_docker_dangling_volumes)
+    items = detect()
+    if dry_run:
+        return {"category": category, "dry_run": True,
+                "count_would_free": len(items)}
+    freed = _policy_act_docker_prune(kind)
+    _ledger_append(time.time(), f"policy:{category}", f"docker {kind} prune",
+                   freed or 0, "ok" if freed is not None else "error")
+    return {"category": category, "dry_run": False,
+            "bytes_freed": freed or 0, "count_freed": len(items)}
+
+
+def _write_policy_receipt(doc, owner_uid):
+    os.makedirs(POLICY_RUNS_DIR, exist_ok=True)
+    ts_name = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(doc["ts"]))
+    path = os.path.join(POLICY_RUNS_DIR, f"{ts_name}.json")
+    # sutra.write_status, not a raw open()+json.dump -- same atomic
+    # tmp-file+rename and owner_uid chown as accounting.json/status.json,
+    # so the operator can actually read their own receipts and a reader
+    # never sees a torn write.
+    sutra.write_status(path, doc, owner=(owner_uid, -1))
+    # cap at _POLICY_RUNS_CAP, oldest first -- a janitor sweeps its own
+    # floor (Alfred's note, msg 7113) rather than growing this forever.
+    try:
+        entries = sorted(e for e in os.listdir(POLICY_RUNS_DIR)
+                         if e.endswith(".json") and e != "latest.json")
+        excess = len(entries) - _POLICY_RUNS_CAP
+        for name in entries[:max(excess, 0)]:
+            os.unlink(os.path.join(POLICY_RUNS_DIR, name))
+    except OSError:
+        pass
+    # latest.json is a plain COPY, not a symlink -- this file already
+    # treats a symlink as untrustworthy indirection (declare() refuses to
+    # even touch one); one extra write costs nothing.
+    sutra.write_status(POLICY_RUNS_LATEST, doc, owner=(owner_uid, -1))
+
+
+def policy_run(cfg, policy_cfg, status_doc, indexer):
+    """Applies every ENABLED rule in policy_cfg. dry_run comes from
+    policy_cfg itself, never a CLI flag alone -- the safety default lives
+    in the auditable file (msg 7111 point 4): a caller MAY force dry
+    (never force real -- see the dispatch wiring), policy.json's own
+    "dry_run": true always wins."""
+    dry_run = policy_cfg.get("dry_run", True)
+    mount_opts = _mount_options_map()
+    rules_by_cat = {r["category"]: r for r in policy_cfg["rules"]}
+    results = []
+
+    r = rules_by_cat["trash"]
+    if r["enabled"]:
+        items = _policy_trash_candidates(cfg, r["params"].get("older_than_days", 30))
+        results.append(_policy_run_item_rule("trash", items, dry_run, cfg, indexer,
+                                             _act_trash, "policy:trash"))
+    else:
+        results.append({"category": "trash", "enabled": False})
+
+    r = rules_by_cat["cold_cache"]
+    if r["enabled"]:
+        items, refused = _policy_cold_cache_candidates(
+            cfg, indexer, r["params"].get("idle_days", 90), mount_opts)
+        res = _policy_run_item_rule("cold_cache", items, dry_run, cfg, indexer,
+                                    _act_cold_cache, "policy:cold_cache")
+        if refused:
+            res["refused"] = refused
+        results.append(res)
+    else:
+        results.append({"category": "cold_cache", "enabled": False})
+
+    r = rules_by_cat["journal"]
+    results.append(_policy_run_journal(r, dry_run, cfg) if r["enabled"]
+                   else {"category": "journal", "enabled": False})
+
+    r = rules_by_cat["apt_cache"]
+    results.append(_policy_run_apt_cache(r, dry_run) if r["enabled"]
+                   else {"category": "apt_cache", "enabled": False})
+
+    r = rules_by_cat["docker_dangling_images"]
+    results.append(
+        _policy_run_docker("docker_dangling_images", "image", dry_run)
+        if r["enabled"] else
+        {"category": "docker_dangling_images", "enabled": False})
+
+    r = rules_by_cat["docker_dangling_volumes"]
+    results.append(
+        _policy_run_docker("docker_dangling_volumes", "volume", dry_run)
+        if r["enabled"] else
+        {"category": "docker_dangling_volumes", "enabled": False,
+         "reason": r.get("reason")})
+
+    r = rules_by_cat["snap_revisions"]
+    if r["enabled"]:
+        detect, delete, revalidate, verify = REGISTRY["snap-old"]
+        items = detect(cfg, indexer)
+        results.append(_policy_run_item_rule(
+            "snap_revisions", items, dry_run, cfg, indexer,
+            _make_registry_act(delete, revalidate, verify), "policy:snap_revisions"))
+    else:
+        results.append({"category": "snap_revisions", "enabled": False})
+
+    for res in results:
+        res.setdefault("enabled", True)
+
+    bytes_freed = sum(r.get("bytes_freed", 0) for r in results)
+    would_free_bytes = sum(r.get("would_free_bytes", 0) for r in results)
+    doc = {"ts": time.time(), "dry_run": dry_run, "results": results,
+           "totals": {"bytes_freed": bytes_freed,
+                       "would_free_bytes": would_free_bytes}}
+    _write_policy_receipt(doc, cfg["owner_uid"])
+    return doc
+
+
+def _daemon_human_bytes(n):
+    """A minimal, local formatter -- byebyted never imports the CLI's own
+    human_bytes (separate process, daemon-computes/CLI-renders stays the
+    split for every timer-triggered path). Used ONLY by the one
+    notification byebyted ever sends on its own: the free-space-crossing
+    trigger below has no CLI process in its call path at all, unlike
+    every other notification in this file (all of them fired by a timer
+    invoking the CLI, which owns human_bytes already)."""
+    for unit in ("B", "K", "M", "G", "T"):
+        if abs(n) < 1024 or unit == "T":
+            return f"{n:.0f}{unit}" if unit == "B" else f"{n / 1024:.1f}{unit}"
+        n /= 1024
+    return f"{n:.1f}T"
+
+
+def _daemon_notify_owner(uid, summary, body):
+    """Same runuser+dbus mechanism as the CLI's notify_owner -- duplicated
+    narrowly for the one path that has no CLI process to call it from."""
+    if uid is None:
+        return
+    bus = f"/run/user/{uid}/bus"
+    if not os.path.exists(bus):
+        return
+    try:
+        name = pwd.getpwuid(uid).pw_name
+    except KeyError:
+        return
+    try:
+        subprocess.run(
+            ["runuser", "-u", name, "--",
+             "env", f"DBUS_SESSION_BUS_ADDRESS=unix:path={bus}",
+             "notify-send", "-a", "byebyte", "-u", "normal", summary, body],
+            capture_output=True, timeout=5, check=False)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def _maybe_run_policy_on_crossing(cfg, doc, indexer, policy_mem):
+    """Storage Sense's second cadence (Alfred's note, msg 7113/7115):
+    weekly is the floor, but a mount crossing into 'hot' (or worse)
+    shouldn't wait for the calendar. Reuses classify()'s own existing
+    hot_free_pct/hot_eta_hours threshold -- the SAME rank mount_alert
+    already crosses on (_NOTIFY_RANK) -- and the SAME crossing-once
+    in-memory pattern _compute_notify_queue uses: fires once per crossing
+    INTO >= hot, never again while it stays there, re-arms only after the
+    mount recovers below that rank or the daemon restarts (an honest,
+    disclosed gap, same as every other crossing-once memory here).
+    Runs in a background thread (guarded by policy_mem["running"]) so a
+    real policy run -- trash/cache deletes, journal vacuum, apt-get clean,
+    docker prune -- never blocks the poll loop's own tick."""
+    if policy_mem.get("running"):
+        return
+    mounts = (doc or {}).get("mounts") or []
+    severity = policy_mem.setdefault("severity", {})
+    crossed = False
+    for m in mounts:
+        if m.get("burn_warming_up"):
+            continue
+        mp = m["mountpoint"]
+        rank = _NOTIFY_RANK.get(m["state"], 0)
+        if rank >= 2 and rank > severity.get(mp, 0):
+            crossed = True
+        severity[mp] = rank
+    if not crossed:
+        return
+    policy_mem["running"] = True
+
+    def _run():
+        try:
+            policy_cfg = load_policy(_policy_path())
+            result = policy_run(cfg, policy_cfg, doc, indexer)
+            freed = result.get("totals", {}).get("bytes_freed", 0)
+            if not result.get("dry_run") and freed > 0:
+                _daemon_notify_owner(
+                    cfg["owner_uid"],
+                    f"policy: freed {_daemon_human_bytes(freed)} "
+                    "(free-space crossing)",
+                    "see: byebyte policy report")
+        except Exception:
+            # A free-space crossing must never take the daemon down with
+            # it -- same defensive shape build_pill_summary's own
+            # try/except already applies in the poll loop.
+            pass
+        finally:
+            policy_mem["running"] = False
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 # --- burn: live per-process writes (stdlib route, v1) ------------------------
@@ -3380,6 +4057,27 @@ def _make_dispatch(cfg, indexer, get_status, path_attr=None, notify_mem=None):
             if not isinstance(force_dry, bool):
                 raise ValueError("dry must be a bool")
             return sweep(force_dry, cfg, indexer)
+        if cmd == "policy":
+            action = req.get("action", "run")
+            if action == "report":
+                doc = sutra.read_status(POLICY_RUNS_LATEST)
+                return doc if doc is not None else {"error": "no policy run yet"}
+            if action != "run":
+                raise ValueError("unknown policy action")
+            force_dry = req.get("force_dry", False)
+            if not isinstance(force_dry, bool):
+                raise ValueError("force_dry must be a bool")
+            try:
+                policy_cfg = load_policy(_policy_path())
+            except ValueError as e:
+                return {"error": str(e)}
+            # force_dry only ever NARROWS toward dry-run, same one-way
+            # latch as sweep's own force_dry -- nothing here can force a
+            # REAL run when policy.json itself says dry_run: true; the
+            # safety default lives in the file, never in a CLI flag.
+            if force_dry:
+                policy_cfg = dict(policy_cfg, dry_run=True)
+            return policy_run(cfg, policy_cfg, get_status(), indexer)
         return None
     return dispatch
 
@@ -3405,6 +4103,8 @@ def main():
     first_seen = {}   # mountpoint -> when THIS daemon process first polled it
     notify_mem = {}   # crossing-once memory for _compute_notify_queue, same
                        # in-memory/resets-on-restart lifetime as state/first_seen
+    policy_mem = {"running": False, "severity": {}}  # same lifetime/shape,
+                       # for policy's own free-space-crossing trigger
     latest = {"doc": {"error": "no status yet"}}
     indexer = Indexer(cfg)
     ballast_build(cfg)
@@ -3451,6 +4151,7 @@ def main():
             doc["pill"] = None
         latest["doc"] = doc
         write_status(doc, cfg)
+        _maybe_run_policy_on_crossing(cfg, doc, indexer, policy_mem)
         # nightly scan: fires once inside the configured hour (20h guard
         # so a restart mid-hour doesn't double-walk the disk)
         if (not indexer.scanning

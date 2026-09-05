@@ -1,0 +1,21 @@
+[Unit]
+Description=byebyte policy — Storage Sense's own weekly cadence
+
+# ON by default (operator ruling 2026-09-05): "Linux desktops ship no
+# janitor" is the whole pitch, and an opt-in janitor just reproduces
+# "byebyte feels useless" -- same reasoning as notify.timer/
+# byebyte-accounting.timer, neither of which needs an opt-in either.
+# Safety lives in policy.json's own "dry_run": true default, not in this
+# timer being off: the first run only ever previews and writes a receipt.
+# Weekly is the FLOOR, not the whole story -- byebyted also runs the same
+# policy the instant a mount crosses into "hot" (the same threshold
+# mount_alert already uses), crossing-once, entirely inside the daemon;
+# this timer exists so a quiet box still gets swept even when nothing
+# ever gets that close to full.
+[Timer]
+OnBootSec=20min
+OnUnitActiveSec=1w
+Persistent=true
+
+[Install]
+WantedBy=timers.target

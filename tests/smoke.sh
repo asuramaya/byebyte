@@ -2470,6 +2470,198 @@ print("accounting CLI ok: headline priority (actionable total, then named "
       "crossing-once discipline everywhere else in this family")
 PY
 
+# --- V3.M11: policy -- Storage Sense (operator ruling 2026-09-05, msg
+# 7109/7115). Exercises load_policy's closed-enumeration validation, then
+# policy_run() end-to-end against a synthetic $HOME for the two per-item
+# rules (trash, cold_cache -- including the noatime-refuses-to-act gate)
+# plus the two new singleton actuators (apt_cache via its own test-env
+# redirection, journal reused as-is from journal_cap), the receipt file
+# and its 500-entry cap, the dispatch layer's run/report round-trip, and
+# the docker parsing helpers as PURE functions (no docker install needed
+# in CI -- same testability split as btrfs's own parse/run separation).
+# Unconditional, not gated on root/sudo, same as V3.M7-M10.
+python3 - <<'PY'
+import importlib.util, json, os, tempfile, time
+from importlib.machinery import SourceFileLoader
+
+loader = SourceFileLoader("byebyted_mod_policy", "src/bin/byebyted")
+spec = importlib.util.spec_from_loader("byebyted_mod_policy", loader)
+mod = importlib.util.module_from_spec(spec)
+loader.exec_module(mod)
+
+tmp = tempfile.mkdtemp(prefix="byebyte-smoke-policy-")
+home = os.path.join(tmp, "home")
+state = os.path.join(tmp, "state")
+os.makedirs(home)
+os.makedirs(state)
+os.environ["BYEBYTE_TEST_HOME"] = home
+mod.STATE_DIR = state
+mod.POLICY_RUNS_DIR = os.path.join(state, "policy_runs")
+mod.POLICY_RUNS_LATEST = os.path.join(mod.POLICY_RUNS_DIR, "latest.json")
+now = time.time()
+
+# --- load_policy: closed enumeration, fails LOUD, never silently ignored
+default_policy = mod.load_policy("/nonexistent/policy.json")
+assert default_policy["dry_run"] is True
+assert len(default_policy["rules"]) == 7
+bad_path = os.path.join(tmp, "bad_policy.json")
+with open(bad_path, "w") as f:
+    json.dump({"rules": [{"category": "unknown_large", "enabled": True}]}, f)
+try:
+    mod.load_policy(bad_path)
+    raise SystemExit("policy smoke FAIL: unknown_large must never load as a category")
+except ValueError:
+    pass
+# there is no act() for unknown_large at all -- not merely disabled
+assert "unknown_large" not in mod._POLICY_CATEGORIES
+
+# merge-by-category: a file naming ONE rule leaves every other category at
+# its compiled default, never silently vanished
+override_path = os.path.join(tmp, "policy.json")
+with open(override_path, "w") as f:
+    json.dump({"dry_run": False,
+               "rules": [{"category": "trash", "enabled": True,
+                          "params": {"older_than_days": 15}}]}, f)
+pc = mod.load_policy(override_path)
+assert pc["dry_run"] is False
+by_cat = {r["category"]: r for r in pc["rules"]}
+assert by_cat["trash"]["params"]["older_than_days"] == 15
+assert by_cat["cold_cache"]["enabled"] is True  # fell back to the default
+
+cfg = dict(mod.DEFAULTS)
+cfg["owner_uid"] = os.getuid()
+cfg["scan_roots"] = [home]
+cfg["purge_disabled"] = []
+
+# --- trash: an old entry (past the grace period) and a new one (inside
+# it) -- same DeletionDate-not-mtime discipline as accounting's tier 1
+trash_files = os.path.join(home, ".local", "share", "Trash", "files")
+trash_info = os.path.join(home, ".local", "share", "Trash", "info")
+os.makedirs(trash_files)
+os.makedirs(trash_info)
+old_trash = os.path.join(trash_files, "old.txt")
+new_trash = os.path.join(trash_files, "new.txt")
+with open(old_trash, "wb") as f:
+    f.write(b"o" * 4096)
+with open(new_trash, "wb") as f:
+    f.write(b"n" * 4096)
+old_ts_str = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now - 40 * 86400))
+new_ts_str = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now - 1 * 86400))
+with open(os.path.join(trash_info, "old.txt.trashinfo"), "w") as f:
+    f.write(f"[Trash Info]\nPath=old.txt\nDeletionDate={old_ts_str}\n")
+with open(os.path.join(trash_info, "new.txt.trashinfo"), "w") as f:
+    f.write(f"[Trash Info]\nPath=new.txt\nDeletionDate={new_ts_str}\n")
+
+# --- cold_cache: a pip-cache dir pushed idle, gated per-mount by atime
+# confidence -- reliable/coarse act, frozen (noatime) refuses and says why
+pip_cache_dir = os.path.join(home, ".cache", "pip")
+os.makedirs(pip_cache_dir)
+pip_file = os.path.join(pip_cache_dir, "wheel.whl")
+with open(pip_file, "wb") as f:
+    f.write(b"p" * (200 * 1024))
+idle_ts = now - 120 * 86400
+os.utime(pip_file, (idle_ts, idle_ts))
+
+policy_cfg = mod.load_policy("/nonexistent/policy.json")  # every rule enabled, dry_run True
+
+# dry-run first: nothing on disk touched, both rules report what they'd do
+doc = mod.policy_run(cfg, policy_cfg, {"mounts": []}, None)
+results = {r["category"]: r for r in doc["results"]}
+assert results["trash"]["dry_run"] is True
+assert results["trash"]["would_free_bytes"] == 4096, results["trash"]
+assert os.path.exists(old_trash), "dry-run must never delete"
+cold_paths = [i["path"] for i in results["cold_cache"].get("matched", [])]
+assert pip_cache_dir in cold_paths, results["cold_cache"]
+
+# noatime: cold_cache must REFUSE the mount, never guess idle-vs-unknown
+# (Alfred's note, msg 7113) -- accounting only DISCLOSES this, policy GATES
+frozen_items, frozen_refused = mod._policy_cold_cache_candidates(
+    cfg, None, 90, {home: "rw,noatime", "/": "rw,noatime"})
+assert pip_cache_dir not in [i["path"] for i in frozen_items]
+assert any(r["path"] == pip_cache_dir and "noatime" in r["reason"]
+           for r in frozen_refused), frozen_refused
+
+# real run: trash's old entry goes, the new one survives, receipt lands
+real_policy = dict(policy_cfg, dry_run=False)
+doc2 = mod.policy_run(cfg, real_policy, {"mounts": []}, None)
+results2 = {r["category"]: r for r in doc2["results"]}
+assert results2["trash"]["bytes_freed"] == 4096, results2["trash"]
+assert not os.path.exists(old_trash), "old.txt should be gone"
+assert os.path.exists(new_trash), "new.txt is inside its grace period"
+assert doc2["totals"]["bytes_freed"] >= 4096
+
+# receipt: latest.json matches the just-written run, and the runs dir
+# respects its own cap -- a janitor sweeps its own floor (msg 7113)
+assert os.path.exists(mod.POLICY_RUNS_LATEST)
+with open(mod.POLICY_RUNS_LATEST) as f:
+    latest = json.load(f)
+assert latest["totals"]["bytes_freed"] == doc2["totals"]["bytes_freed"]
+saved_cap = mod._POLICY_RUNS_CAP
+mod._POLICY_RUNS_CAP = 3
+for _ in range(6):
+    mod._write_policy_receipt({"ts": time.time(), "dry_run": True, "results": [],
+                                "totals": {"bytes_freed": 0, "would_free_bytes": 0}},
+                               os.getuid())
+    time.sleep(0.01)
+entries = [e for e in os.listdir(mod.POLICY_RUNS_DIR) if e != "latest.json"]
+assert len(entries) <= 3, f"receipt dir did not respect its cap: {len(entries)} files"
+mod._POLICY_RUNS_CAP = saved_cap
+
+# --- journal: reuses journal_cap() as-is, dry_run computes would-free
+os.environ["BYEBYTE_TEST_JOURNALD_DIR"] = os.path.join(tmp, "journal")
+os.environ["BYEBYTE_TEST_JOURNALD_DROPIN_DIR"] = os.path.join(tmp, "journald.conf.d")
+os.makedirs(os.environ["BYEBYTE_TEST_JOURNALD_DIR"])
+with open(os.path.join(os.environ["BYEBYTE_TEST_JOURNALD_DIR"], "j.journal"), "wb") as f:
+    f.write(b"j" * 4096)
+jr = mod._policy_run_journal({"params": {"cap_bytes": "1K"}}, dry_run=True, cfg=cfg)
+assert jr["would_free_bytes"] > 0, jr
+print("journal reuse ok:", jr)
+
+# --- apt_cache: cap-triggered full clean via the non-root test redirect
+apt_dir = os.path.join(tmp, "apt-archives")
+os.makedirs(apt_dir)
+with open(os.path.join(apt_dir, "pkg.deb"), "wb") as f:
+    f.write(b"d" * 8192)
+os.environ["BYEBYTE_TEST_APT_CACHE_DIR"] = apt_dir
+ar = mod._policy_run_apt_cache({"params": {"cap_bytes": "1K"}}, dry_run=False)
+assert ar["bytes_freed"] > 0, ar
+assert not os.listdir(apt_dir), "apt-get clean (test mode) should empty the dir"
+
+# --- docker: PURE parsing functions only -- no docker install assumed
+assert mod._parse_docker_ids("abc123\ndef456\n\n") == ["abc123", "def456"]
+assert mod._parse_docker_ids("") == []
+assert mod._parse_docker_reclaimed("Total reclaimed space: 1.5GB\n") == int(1.5 * 1024**3)
+assert mod._parse_docker_reclaimed("Total reclaimed space: 512MB\n") == 512 * 1024**2
+assert mod._parse_docker_reclaimed("nothing to reclaim") == 0
+
+# --- dispatch: run (force_dry, the one-way latch) + report round-trip.
+# Explicitly redirected to a nonexistent fixture path -- same discipline
+# as BYEBYTE_TEST_HOME everywhere else here, never relying on this dev
+# box's own /etc/byebyte/policy.json happening to be absent.
+os.environ["BYEBYTE_TEST_POLICY_PATH"] = os.path.join(tmp, "nonexistent-policy.json")
+dispatch = mod._make_dispatch(cfg, None, lambda: {"mounts": []}, None, None)
+d1 = dispatch("policy", {"action": "run", "force_dry": True})
+assert d1["dry_run"] is True, "force_dry must win even though policy.json says real"
+d2 = dispatch("policy", {"action": "report"})
+assert "totals" in d2 and d2["totals"] == d1["totals"], \
+    "policy report must read back exactly what run just wrote"
+try:
+    dispatch("policy", {"action": "bogus"})
+    raise SystemExit("policy smoke FAIL: an unknown action must raise")
+except ValueError:
+    pass
+
+print("policy ok: closed-enumeration validated (unknown_large can never "
+      "load, there is no act() for it), merge-by-category preserves "
+      "un-mentioned rules at their compiled default, trash deletes only "
+      "past its DeletionDate grace period, cold_cache both honors idle_days "
+      "and REFUSES to act on a noatime mount (never guesses idle-vs-unknown), "
+      "journal/apt_cache/docker actuators all wired and testable without "
+      "root or real docker, receipts write+cap+round-trip through dispatch, "
+      "and force_dry is a one-way latch toward preview, never past what "
+      "policy.json itself says")
+PY
+
 # --- M4: make deb — builds a real .deb; contents include bins+units+man.
 # Builds and inspects only — never installed. The log path is per-invocation
 # unique: a shared dev box runs concurrent smoke passes (root and
@@ -2504,8 +2696,10 @@ for want in usr/bin/byebyted usr/bin/byebyte usr/bin/byebyte-healthcheck \
             lib/systemd/system/byebyte-notify.timer \
             lib/systemd/system/byebyte-accounting.service \
             lib/systemd/system/byebyte-accounting.timer \
+            lib/systemd/system/byebyte-policy.service \
+            lib/systemd/system/byebyte-policy.timer \
             usr/share/man/man1/byebyte.1 usr/share/man/man8/byebyted.8 \
-            etc/byebyte/config.json; do
+            etc/byebyte/config.json etc/byebyte/policy.json; do
     echo "$CONTENTS" | grep -q "$want" \
         || { echo "SMOKE FAIL: deb missing $want"; exit 1; }
 done

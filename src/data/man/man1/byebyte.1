@@ -345,6 +345,124 @@ crossing\-once against a FILE rather than in\-memory state, so a marshal
 who found nothing new stays silent instead of repeating itself every
 week.
 .TP
+.B policy " [report] [\-\-dry\-run] [\-\-json]"
+Storage Sense: applies the written policy in
+.I /etc/byebyte/policy.json
+and leaves a receipt. Unlike
+.BR sweep ,
+this runs unattended
+.B ON BY DEFAULT
+via
+.IR byebyte\-policy.timer \(em
+"Linux desktops ship no janitor" is the pitch, and an opt-in janitor
+reproduces the exact "byebyte feels useless" problem
+.B notify
+already exists to avoid. Safety instead lives in policy.json's own
+.I dry_run
+field, read fresh on every run (never cached at daemon startup): it
+ships
+.BR true ,
+so the first run on a fresh install only previews and writes a receipt.
+.B \-\-dry\-run
+can only ever force a preview \(em it can never force a real run past
+what the file itself says.
+.PP
+The policy names one rule per category, each with its own
+.B enabled
+flag and
+.BR params :
+.RS
+.IP \(bu 2
+.B trash
+\(em empties Trash entries whose
+.I DeletionDate
+(the same freedesktop\-spec field
+.B accounting
+cites, never mtime) is older than
+.IR older_than_days " (default 30)."
+.IP \(bu 2
+.B cold_cache
+\(em drops the same five cache categories
+.B accounting
+samples, idle past
+.IR idle_days " (default 90)."
+Unlike accounting (which only DISCLOSES atime reliability), a
+.I noatime
+mount makes this rule REFUSE to act there at all \(em it cannot tell idle
+from unknown, and the receipt says so per item.
+.IP \(bu 2
+.B journal
+\(em caps journald via the same mechanism as
+.BR journal\-cap ,
+to
+.IR cap_bytes " (default 500M)."
+.IP \(bu 2
+.B apt_cache
+\(em runs
+.B apt\-get clean
+once
+.I /var/cache/apt/archives
+exceeds
+.IR cap_bytes " (default 500M);"
+apt has no partial vacuum, so this is a trigger threshold, not a trim
+target.
+.IP \(bu 2
+.B docker_dangling_images
+\(em
+.B docker image prune \-f
+(dangling only, never
+.BR \-a ).
+.IP \(bu 2
+.B docker_dangling_volumes
+\(em same, for volumes, but
+.B disabled by default
+even after
+.I dry_run
+is flipped: a dangling volume can be the only copy of real data, unlike
+a dangling image's pure rebuildable cache. Enable it deliberately.
+.IP \(bu 2
+.B snap_revisions
+\(em reuses
+.BR sweep 's
+own
+.I snap\-old
+detector as\-is (whatever
+.BR snap (8)
+itself already marked disabled).
+.RE
+.PP
+A category name outside this list fails the whole file to load, loudly
+\(em policy.json is meant to be read as ground truth, so a typo must
+never run silently as if it said nothing. There is no
+.I unknown_large
+category and never will be: accounting's tier 3 has no act() at all,
+by construction, not by policy.
+.PP
+Runs on two cadences: weekly
+.RI ( byebyte\-policy.timer ),
+and the instant any mount crosses into
+.B hot
+(the same threshold
+.B mount_alert
+uses), triggered from inside
+.BR byebyted (8)
+itself, crossing\-once. Every run \(em either cadence \(em writes a
+receipt to
+.IR /var/lib/byebyte/policy_runs/ ,
+capped at 500 files (oldest pruned first), plus a
+.I latest.json
+copy.
+.B policy report
+prints the latest receipt without running anything.
+A real run (not
+.BR \-\-dry\-run ,
+and policy.json's own
+.I dry_run
+is
+.BR false )
+sends at most one desktop toast, only when something was actually
+freed.
+.TP
 .B update " [\-\-check] [\-\-json]"
 Delegates straight to
 .BR byebyte\-update (8).
