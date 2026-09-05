@@ -143,6 +143,31 @@ function runByebyteJson(args, cancellable, onDone) {
     }
 }
 
+// Same shape as runByebyteJson, but writes `stdinText` to the child's
+// stdin first -- `policy --apply`'s own matched-set payload can be an
+// arbitrarily long list of paths, not a handful of argv-sized flags.
+function runByebyteJsonStdin(args, stdinText, cancellable, onDone) {
+    try {
+        const proc = Gio.Subprocess.new(
+            [byebyteCli(), ...args],
+            Gio.SubprocessFlags.STDIN_PIPE | Gio.SubprocessFlags.STDOUT_PIPE |
+            Gio.SubprocessFlags.STDERR_PIPE);
+        proc.communicate_utf8_async(stdinText, cancellable, (p, res) => {
+            let parsed = null;
+            try {
+                const [, stdout] = p.communicate_utf8_finish(res);
+                parsed = JSON.parse(stdout);
+            } catch (e) {
+                logError(e, 'byebyte: JSON parse failed');
+            }
+            onDone(parsed);
+        });
+    } catch (e) {
+        logError(e, 'byebyte: subprocess failed');
+        onDone(null);
+    }
+}
+
 // warmingUp/tauSeconds mirror byebyte CLI's own human_burn (src/bin/byebyte)
 // exactly, same fix, same reasoning: a freshly-seeded EWMA (prev=None in
 // poll_mount, byebyted's own state) is NOT a rate of zero, it's NO
@@ -288,13 +313,104 @@ function findingsLabel(policyDoc, accountingDoc) {
     }
     if (Pill.isObj(policyDoc) && policyDoc.dry_run !== false) {
         const would = Pill.num(policyDoc.totals?.would_free_bytes) ?? 0;
-        if (would > 0)
-            return `next run would free ${Pill.fmtBytes(would)} (dry run)`;
+        if (would > 0) {
+            // Alfred's sharpening (msg 7154, basis-in-the-sentence,
+            // 8adbfe6c): this receipt previews for one of two different
+            // reasons, and the parenthetical must name WHICH. If
+            // policy.json's own dry_run is true, the file itself is why
+            // nothing will act -- say so. If the file says real but THIS
+            // receipt still previews (a forced fresh-check-before-
+            // confirm, landing 2's own act flow), that's not a reason
+            // the next SCHEDULED/crossing-triggered run won't act, so no
+            // parenthetical claims one.
+            const basis = policyDoc.policy_file_dry_run !== false
+                ? ' (dry run — policy.json)' : '';
+            return `next run would free ${Pill.fmtBytes(would)}${basis}`;
+        }
     }
     const unknown = Pill.num(accountingDoc?.totals?.unknown_bytes) ?? 0;
     if (unknown > 0)
         return `${Pill.fmtBytes(unknown)} unknown, your call`;
     return 'nothing to do';
+}
+
+// Same labels as byebyte CLI's own _POLICY_CATEGORY_LABEL (src/bin/byebyte)
+// -- one vocabulary for how a category is named, CLI and pill alike.
+const POLICY_CATEGORY_LABEL = {
+    trash: 'Trash', cold_cache: 'cold caches', journal: 'journald',
+    apt_cache: 'apt cache', docker_dangling_images: 'docker (dangling images)',
+    docker_dangling_volumes: 'docker (dangling volumes)',
+    snap_revisions: 'snap (old revisions)',
+};
+
+// One report line per category -- a literal JS port of byebyte CLI's own
+// _print_policy_receipt per-category branch, read-only, no per-category
+// buttons (the operator's own ruling, msg 7133/7151: the file is the
+// contract, this is a report).
+function findingsCategoryText(r) {
+    const label = POLICY_CATEGORY_LABEL[r.category] ?? r.category;
+    if (r.enabled === false)
+        return `${label}: off${r.reason ? ` — ${Pill.esc(r.reason)}` : ''}`;
+    if (r.error)
+        return `${label}: error — ${Pill.esc(String(r.error))}`;
+    if (r.note)
+        return `${label}: ${Pill.esc(String(r.note))}`;
+    const dry = r.dry_run !== false;
+    const amt = Pill.num(dry ? r.would_free_bytes : r.bytes_freed) ?? 0;
+    const count = Pill.num(dry ? r.count_would_free : r.count_freed) ?? 0;
+    const unknown = Pill.num(dry ? r.count_unknown : r.count_freed_unknown) ?? 0;
+    const errors = !dry && Array.isArray(r.errors) ? r.errors.length : 0;
+    if (!amt && !count && !unknown)
+        return `${label}: nothing to do`;
+    const parts = [];
+    if (count) {
+        parts.push(dry ? `would free ${Pill.fmtBytes(amt)} (${count} item(s))`
+                       : `freed ${Pill.fmtBytes(amt)} (${count} item(s))`);
+    }
+    if (unknown)
+        parts.push(dry ? `${unknown} item(s), size unknown`
+                        : `${unknown} item(s) freed, size unknown`);
+    if (errors)
+        parts.push(`${errors} failed`);
+    return `${label}: ${parts.join('; ')}`;
+}
+
+// The categories a real detect() enumerates per item (trash/cold_cache/
+// snap_revisions) vs the singleton categories with no item identity at
+// all (journal/apt_cache/docker_dangling_*) -- the two need different
+// matched-payload shapes for policy --apply (a list of items, vs a bare
+// true).
+const POLICY_ITEM_CATEGORIES = ['trash', 'cold_cache', 'snap_revisions'];
+
+// Builds policy --apply's own `matched` payload straight from a fresh dry
+// pass's own results -- exactly what was just shown, nothing re-derived.
+// Per Alfred's amendment (msg 7134/7151) this is the ENTIRE confirmed
+// set: nothing here calls detect() again, ever.
+function extractMatched(dryDoc) {
+    const matched = {};
+    let totalBytes = 0;
+    const cats = [];
+    for (const r of dryDoc?.results ?? []) {
+        if (!Pill.isObj(r) || r.enabled === false || r.error)
+            continue;
+        if (POLICY_ITEM_CATEGORIES.includes(r.category)) {
+            const items = Array.isArray(r.matched) ? r.matched : [];
+            if (items.length === 0)
+                continue;
+            matched[r.category] = items;
+            totalBytes += Pill.num(r.would_free_bytes) ?? 0;
+            cats.push(POLICY_CATEGORY_LABEL[r.category] ?? r.category);
+        } else {
+            const amt = Pill.num(r.would_free_bytes) ?? 0;
+            const count = Pill.num(r.count_would_free) ?? 0;
+            if (amt > 0 || count > 0) {
+                matched[r.category] = true;
+                totalBytes += amt;
+                cats.push(POLICY_CATEGORY_LABEL[r.category] ?? r.category);
+            }
+        }
+    }
+    return {matched, totalBytes, cats};
 }
 
 // re-check cadence for the pill's own "update available" row — independent
@@ -344,10 +460,22 @@ class ByeByteToggle extends QuickMenuToggle {
 
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
         // Findings ▸ — Storage Sense's own fold (operator ruling
-        // 2026-09-05, proposal msg 7133/7151). First landing: the label
-        // alone, read live from policy's own receipt and accounting's own
-        // report — no acts here yet, those land next.
+        // 2026-09-05, proposal msg 7133/7151/7154). The header LABEL
+        // refreshes every poll (see _renderFindings, cheap file reads).
+        // The submenu CONTENT — the report lines and the two-step act —
+        // builds lazily on first open and then persists, same as the
+        // Reclaim ▸ fold's own `reclaim.built` pattern: a background poll
+        // must never wipe out an in-progress confirm just because 30
+        // seconds passed while the menu happened to be open.
         this._findingsItem = new PopupMenu.PopupSubMenuMenuItem('Findings ▸');
+        this._findingsBuilt = false;
+        this._findingsPendingApply = null;
+        this._findingsItem.menu.connect('open-state-changed', (_menu, open) => {
+            if (open && !this._findingsBuilt) {
+                this._findingsBuilt = true;
+                this._buildFindingsMenu();
+            }
+        });
         this.menu.addMenuItem(this._findingsItem);
 
         // Advanced ▸ — now ONLY the true system-wide singletons: journal
@@ -383,6 +511,8 @@ class ByeByteToggle extends QuickMenuToggle {
             this._moreMountsItem.visible = false;
             this._findingsItem.menu.removeAll();
             this._findingsItem.label.text = 'Findings ▸';
+            this._findingsBuilt = false;
+            this._findingsPendingApply = null;
             this._advancedItem.menu.removeAll();
             this._advancedItem.label.text = 'Advanced ▸';
             if (this._offlinePlaceholder)
@@ -627,24 +757,138 @@ class ByeByteToggle extends QuickMenuToggle {
             quota + snap + reserved + pendingCap;
     }
 
-    // ---- Findings ▸: Storage Sense's own fold (msg 7133/7151) ---------------
-    // First landing: label only. The label reads live from policy's own
-    // receipt (POLICY_RECEIPT_PATH) and accounting's own report
-    // (ACCOUNTING_PATH) — both plain file reads, no daemon round trip,
-    // since neither updates on the 30s poll cadence the rest of this pill
-    // does. The submenu itself stays a single pointer to the CLI for now;
-    // the act set (run policy now / open report) is the next landing, not
-    // this one — no per-category buttons and no policy editing in the
-    // pill either way, ever (the file is the contract).
+    // ---- Findings ▸: Storage Sense's own fold (msg 7133/7151/7154) ----------
+    // The header LABEL (this method) refreshes every poll — a plain read
+    // of policy's own receipt and accounting's own report, no daemon
+    // round trip, since neither file updates on the 30s poll cadence the
+    // rest of this pill does. The submenu's own content (report lines +
+    // the two-step act) is built lazily; see the open-state-changed
+    // listener wired in the constructor.
     _renderFindings() {
         const policyDoc = readPolicyReceipt();
         const accountingDoc = readAccounting();
         this._findingsItem.label.text =
             `Findings ▸  (${findingsLabel(policyDoc, accountingDoc)})`;
+    }
+
+    // "Open report" IS expanding this fold — the per-category lines below
+    // are the same report `byebyte policy report` prints, read-only, no
+    // per-category buttons (operator ruling 7133/7151: the file is the
+    // contract). Below them, ONE act row: a two-step confirm exactly like
+    // the Reclaim ▸ fold's own "tick then commit" idiom, just with a
+    // single always-fresh candidate set instead of a user-picked one.
+    _buildFindingsMenu() {
         const menu = this._findingsItem.menu;
         menu.removeAll();
-        menu.addMenuItem(new PopupMenu.PopupMenuItem(
-            'see: byebyte policy report', {reactive: false}));
+        this._findingsPendingApply = null;
+
+        const doc = readPolicyReceipt();
+        if (!doc || !Array.isArray(doc.results)) {
+            menu.addMenuItem(new PopupMenu.PopupMenuItem(
+                'no policy run yet', {reactive: false}));
+        } else {
+            for (const r of doc.results) {
+                if (!Pill.isObj(r))
+                    continue;
+                menu.addMenuItem(Pill.wrapRow(
+                    `<span size="small">${findingsCategoryText(r)}</span>`));
+                for (const ref of r.refused ?? []) {
+                    if (Pill.isObj(ref) && typeof ref.path === 'string') {
+                        menu.addMenuItem(Pill.wrapRow(
+                            `<span foreground="${DIM}" size="small">` +
+                            `  refused: ${Pill.esc(ref.path)} — ` +
+                            `${Pill.esc(String(ref.reason ?? ''))}</span>`));
+                    }
+                }
+            }
+        }
+        const refresh = new PopupMenu.PopupMenuItem('↻ refresh');
+        refresh.connect('activate', () => this._buildFindingsMenu());
+        menu.addMenuItem(refresh);
+
+        menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+        this._findingsActionItem = new PopupMenu.PopupMenuItem('');
+        this._findingsActionItem.connect('activate', () => this._onFindingsAction());
+        menu.addMenuItem(this._findingsActionItem);
+        this._setFindingsActionLabel();
+    }
+
+    // Step 1's own label reads policy.json's OWN configured dry_run (via
+    // the latest receipt's policy_file_dry_run, same field the fold
+    // label's own basis-in-the-sentence fix reads) — "Preview" when the
+    // file itself won't act, "Run" when it will. Step 2 (a pending
+    // confirm already computed) always shows the exact confirmed total.
+    _setFindingsActionLabel() {
+        if (!this._findingsActionItem)
+            return;
+        if (this._findingsPendingApply) {
+            const p = this._findingsPendingApply;
+            this._findingsActionItem.label.text =
+                `Confirm — free ${Pill.fmtBytes(p.totalBytes)} (${p.cats.join(', ')})`;
+            return;
+        }
+        const fileDryRun = readPolicyReceipt()?.policy_file_dry_run !== false;
+        this._findingsActionItem.label.text =
+            fileDryRun ? 'Preview policy run' : 'Run policy now';
+    }
+
+    // Step 1: a FRESH dry pass every single time (Alfred's amendment, msg
+    // 7134/7151) — never the stale receipt the report lines above are
+    // showing, which could be a week old. Step 2 (a second activate,
+    // handled by _applyFindings): act on EXACTLY that pass's own matched
+    // lists, no re-detect in between.
+    _onFindingsAction() {
+        if (this._findingsPendingApply) {
+            this._applyFindings(this._findingsPendingApply);
+            return;
+        }
+        this._findingsActionItem.reactive = false;
+        this._findingsActionItem.label.text = 'checking…';
+        runByebyteJson(['policy', '--dry-run', '--json'], this._cancellable, doc => {
+            this._findingsActionItem.reactive = true;
+            if (!doc || doc.error) {
+                this._setFindingsActionLabel();
+                Pill.notify('byebyte',
+                    doc?.error || 'policy check failed — daemon unreachable');
+                return;
+            }
+            const {matched, totalBytes, cats} = extractMatched(doc);
+            if (cats.length === 0) {
+                this._setFindingsActionLabel();
+                Pill.notify('byebyte', 'policy: nothing to do right now');
+                return;
+            }
+            this._findingsPendingApply = {matched, totalBytes, cats};
+            this._setFindingsActionLabel();
+        });
+    }
+
+    // Refused outright by the daemon itself if policy.json's own dry_run
+    // is true (never silently downgraded to a no-op preview here) —
+    // _setFindingsActionLabel already only offers "Run" (as opposed to
+    // "Preview") when a prior receipt says the file allows it, but the
+    // daemon is the actual gate, not this label.
+    _applyFindings(pending) {
+        this._findingsActionItem.reactive = false;
+        this._findingsActionItem.label.text = 'applying…';
+        runByebyteJsonStdin(['policy', '--apply', '--json'],
+            JSON.stringify(pending.matched), this._cancellable, doc => {
+                this._findingsPendingApply = null;
+                if (!doc || doc.error) {
+                    Pill.notify('byebyte',
+                        doc?.error || 'policy apply failed — daemon unreachable');
+                    this._buildFindingsMenu();
+                    return;
+                }
+                const freed = Pill.num(doc.totals?.bytes_freed) ?? 0;
+                Pill.notify('byebyte',
+                    `policy: freed ${Pill.fmtBytes(freed)} ` +
+                    `(${pending.cats.join(', ')}) — see: byebyte policy report`);
+                // refresh against reality, same as Reclaim ▸'s own
+                // post-commit refresh
+                this._buildFindingsMenu();
+                this._renderFindings();
+            });
     }
 
     // ---- Advanced ▸: the true system-wide singletons only ------------------
