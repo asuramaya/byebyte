@@ -386,9 +386,17 @@ const POLICY_ITEM_CATEGORIES = ['trash', 'cold_cache', 'snap_revisions'];
 // pass's own results -- exactly what was just shown, nothing re-derived.
 // Per Alfred's amendment (msg 7134/7151) this is the ENTIRE confirmed
 // set: nothing here calls detect() again, ever.
+// itemCount: a real count of discrete things going away, not just bytes
+// (Alfred's sharpening, msg 7159 — "6.3G" alone hides that a category
+// means 18 revisions leaving). trash/cold_cache/snap_revisions each
+// contribute their own matched.length; docker's own count_would_free
+// counts its dangling resources the same way. journal/apt_cache are a
+// single global operation with no enumerable items at all — they
+// contribute 0 to the count but still name themselves in `cats`.
 function extractMatched(dryDoc) {
     const matched = {};
     let totalBytes = 0;
+    let itemCount = 0;
     const cats = [];
     for (const r of dryDoc?.results ?? []) {
         if (!Pill.isObj(r) || r.enabled === false || r.error)
@@ -399,6 +407,7 @@ function extractMatched(dryDoc) {
                 continue;
             matched[r.category] = items;
             totalBytes += Pill.num(r.would_free_bytes) ?? 0;
+            itemCount += items.length;
             cats.push(POLICY_CATEGORY_LABEL[r.category] ?? r.category);
         } else {
             const amt = Pill.num(r.would_free_bytes) ?? 0;
@@ -406,11 +415,12 @@ function extractMatched(dryDoc) {
             if (amt > 0 || count > 0) {
                 matched[r.category] = true;
                 totalBytes += amt;
+                itemCount += count;
                 cats.push(POLICY_CATEGORY_LABEL[r.category] ?? r.category);
             }
         }
     }
-    return {matched, totalBytes, cats};
+    return {matched, totalBytes, itemCount, cats};
 }
 
 // re-check cadence for the pill's own "update available" row — independent
@@ -471,9 +481,22 @@ class ByeByteToggle extends QuickMenuToggle {
         this._findingsBuilt = false;
         this._findingsPendingApply = null;
         this._findingsItem.menu.connect('open-state-changed', (_menu, open) => {
-            if (open && !this._findingsBuilt) {
-                this._findingsBuilt = true;
-                this._buildFindingsMenu();
+            if (open) {
+                if (!this._findingsBuilt) {
+                    this._findingsBuilt = true;
+                    this._buildFindingsMenu();
+                }
+                return;
+            }
+            // Alfred's sharpening (msg 7159): a confirmed-but-not-yet-
+            // applied matched set is a SNAPSHOT of one moment. The menu
+            // being away is exactly the kind of elapsed time that snapshot
+            // can't account for -- closing it (however briefly) discards
+            // the pending confirm, so the very next click is always a
+            // fresh dry pass again, never a stale one-click act.
+            if (this._findingsPendingApply) {
+                this._findingsPendingApply = null;
+                this._setFindingsActionLabel();
             }
         });
         this.menu.addMenuItem(this._findingsItem);
@@ -823,8 +846,14 @@ class ByeByteToggle extends QuickMenuToggle {
             return;
         if (this._findingsPendingApply) {
             const p = this._findingsPendingApply;
+            // bytes AND item count AND categories (Alfred's sharpening,
+            // msg 7159) -- a byte figure alone hides that "snap" means 18
+            // revisions going.
+            const items = p.itemCount > 0
+                ? `, ${p.itemCount} item${p.itemCount === 1 ? '' : 's'}` : '';
             this._findingsActionItem.label.text =
-                `Confirm — free ${Pill.fmtBytes(p.totalBytes)} (${p.cats.join(', ')})`;
+                `Confirm — free ${Pill.fmtBytes(p.totalBytes)}${items} ` +
+                `(${p.cats.join(', ')})`;
             return;
         }
         const fileDryRun = readPolicyReceipt()?.policy_file_dry_run !== false;
@@ -852,13 +881,13 @@ class ByeByteToggle extends QuickMenuToggle {
                     doc?.error || 'policy check failed — daemon unreachable');
                 return;
             }
-            const {matched, totalBytes, cats} = extractMatched(doc);
+            const {matched, totalBytes, itemCount, cats} = extractMatched(doc);
             if (cats.length === 0) {
                 this._setFindingsActionLabel();
                 Pill.notify('byebyte', 'policy: nothing to do right now');
                 return;
             }
-            this._findingsPendingApply = {matched, totalBytes, cats};
+            this._findingsPendingApply = {matched, totalBytes, itemCount, cats};
             this._setFindingsActionLabel();
         });
     }
