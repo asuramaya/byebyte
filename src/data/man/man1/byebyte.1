@@ -266,9 +266,16 @@ rendered separately and in this order \(em CONDEMNED, COLD, UNKNOWN:
 .RS
 .IP \(bu 2
 .B CONDEMNED
-\(em currently just Trash
-.RI ( ~/.local/share/Trash ),
-sized and dated from the freedesktop trash spec's own
+\(em Trash, EVERY real can on the box, not just
+.RI ( ~/.local/share/Trash ):
+the freedesktop trash spec's own per\-mount trash directories too
+.RI ( <mount>/.Trash/<uid> ,
+only when
+.I .Trash
+itself has the sticky bit set and isn't a symlink \(em otherwise the
+spec's own fallback,
+.IR <mount>/.Trash\-<uid> ),
+one citation per real location. Sized and dated from the spec's own
 .I DeletionDate
 field (the RECORDED decision, not an inferred one from file mtime).
 .IP \(bu 2
@@ -387,11 +394,12 @@ flag and
 .RS
 .IP \(bu 2
 .B trash
-\(em empties Trash entries whose
-.I DeletionDate
-(the same freedesktop\-spec field
+\(em empties Trash entries, from every real trash can on the box (the
+same per\-mount locations
 .B accounting
-cites, never mtime) is older than
+cites), whose
+.I DeletionDate
+(the same freedesktop\-spec field, never mtime) is older than
 .IR older_than_days " (default 30)."
 .IP \(bu 2
 .B cold_cache

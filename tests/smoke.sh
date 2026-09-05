@@ -2550,6 +2550,105 @@ print("accounting ok: three tiers never merge, tier 3 never re-reports a "
       "through the real dispatch layer")
 PY
 
+# --- V3.M9b: trash on other mounts (Alfred, msg 7389 item 9) -- Storage
+# Sense treats every drive, and the freedesktop spec keeps a SEPARATE
+# trash at each non-home mount's own root: $topdir/.Trash/$uid (only when
+# .Trash itself has the sticky bit and isn't a symlink) or, failing that,
+# $topdir/.Trash-$uid. Neither of these functions calls os.path.ismount()
+# or anything mount-specific -- a plain directory stands in for a real
+# mountpoint with no loop-device fixture needed, unconditional, no root.
+python3 - <<'PY'
+import importlib.util, os, stat, tempfile, time
+from importlib.machinery import SourceFileLoader
+
+loader = SourceFileLoader("byebyted_mod_mounttrash", "src/bin/byebyted")
+spec = importlib.util.spec_from_loader("byebyted_mod_mounttrash", loader)
+mod = importlib.util.module_from_spec(spec)
+loader.exec_module(mod)
+
+tmp = tempfile.mkdtemp(prefix="byebyte-smoke-mounttrash-")
+home = os.path.join(tmp, "home")
+os.makedirs(home)
+os.environ["BYEBYTE_TEST_HOME"] = home
+uid = os.getuid()
+now = time.time()
+old_ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now - 40 * 86400))
+
+
+def make_trash(files_dir, info_dir, name, contents, deletion_ts_str):
+    os.makedirs(files_dir, exist_ok=True)
+    os.makedirs(info_dir, exist_ok=True)
+    with open(os.path.join(files_dir, name), "wb") as f:
+        f.write(contents)
+    with open(os.path.join(info_dir, f"{name}.trashinfo"), "w") as f:
+        f.write(f"[Trash Info]\nPath={name}\nDeletionDate={deletion_ts_str}\n")
+
+
+# fallback form: $topdir/.Trash-$uid (no shared .Trash at all)
+mount_a = os.path.join(tmp, "mount_a")
+os.makedirs(mount_a)
+trash_a = os.path.join(mount_a, f".Trash-{uid}")
+make_trash(os.path.join(trash_a, "files"), os.path.join(trash_a, "info"),
+           "old_on_a.bin", b"a" * 4096, old_ts)
+
+# shared form: $topdir/.Trash (sticky bit set) / $uid
+mount_b = os.path.join(tmp, "mount_b")
+os.makedirs(mount_b)
+shared_b = os.path.join(mount_b, ".Trash")
+os.makedirs(shared_b)
+os.chmod(shared_b, 0o1777)  # sticky bit, world-writable -- the spec's own shape
+trash_b = os.path.join(shared_b, str(uid))
+make_trash(os.path.join(trash_b, "files"), os.path.join(trash_b, "info"),
+           "old_on_b.bin", b"b" * 4096, old_ts)
+
+# unsafe shared form: .Trash WITHOUT the sticky bit -- must be refused
+# outright, never trusted, per the spec's own safety condition. No
+# .Trash-<uid> fallback exists either, so this mount must contribute
+# NOTHING, not silently fall through to some other guess.
+mount_c = os.path.join(tmp, "mount_c")
+os.makedirs(mount_c)
+shared_c = os.path.join(mount_c, ".Trash")
+os.makedirs(shared_c)
+os.chmod(shared_c, 0o0755)  # no sticky bit
+trash_c = os.path.join(shared_c, str(uid))
+make_trash(os.path.join(trash_c, "files"), os.path.join(trash_c, "info"),
+           "old_on_c.bin", b"c" * 4096, old_ts)
+
+cfg = dict(mod.DEFAULTS)
+cfg["owner_uid"] = uid
+mounts = [{"mountpoint": mount_a, "total": 1}, {"mountpoint": mount_b, "total": 1},
+          {"mountpoint": mount_c, "total": 1}]
+
+# _mount_trash_dirs: the three shapes directly
+found_a = mod._mount_trash_dirs(mount_a, uid)
+assert found_a is not None and found_a[0] == os.path.join(trash_a, "files"), found_a
+found_b = mod._mount_trash_dirs(mount_b, uid)
+assert found_b is not None and found_b[0] == os.path.join(trash_b, "files"), found_b
+found_c = mod._mount_trash_dirs(mount_c, uid)
+assert found_c is None, f"a non-sticky shared .Trash must never be trusted: {found_c}"
+print("_mount_trash_dirs ok: fallback form, sticky shared form, and the "
+      "non-sticky-shared refusal all correct")
+
+# accounting: every real trash can is its own CONDEMNED row, home included
+doc = mod.accounting(cfg, {"mounts": mounts}, None)
+condemned_paths = {it["path"] for it in doc["tiers"]["condemned"]["items"]}
+assert trash_a in condemned_paths, condemned_paths
+assert trash_b in condemned_paths, condemned_paths
+assert not any(p.startswith(mount_c) for p in condemned_paths), condemned_paths
+print("accounting mount-trash ok: both real per-mount cans cited, the "
+      "unsafe non-sticky one silently contributes nothing")
+
+# policy: per-item candidates come back from every location too, ready
+# to act on with the same DeletionDate discipline
+candidates = mod._policy_trash_candidates(cfg, 30, mounts)
+cand_paths = {c["path"] for c in candidates}
+assert os.path.join(trash_a, "files", "old_on_a.bin") in cand_paths, cand_paths
+assert os.path.join(trash_b, "files", "old_on_b.bin") in cand_paths, cand_paths
+assert not any(p.startswith(mount_c) for p in cand_paths), cand_paths
+print("policy mount-trash ok: per-mount trash entries are real act-able "
+      "candidates, the unsafe non-sticky mount contributes none")
+PY
+
 # --- V3.M10: accounting CLI -- the fire-marshal citation (owner/remedy)
 # and the --notify crossing-once diff (ruling d602032b). Loads src/bin/
 # byebyte directly (same technique as byebyted's own module-level tests)

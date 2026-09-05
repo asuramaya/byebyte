@@ -21,6 +21,7 @@ import select
 import shutil
 import signal
 import sqlite3
+import stat
 import subprocess
 import sys
 import threading
@@ -3017,21 +3018,77 @@ def _parse_trashinfo(info_path):
     return None
 
 
-def _detect_trash(cfg):
-    """~/.local/share/Trash -- tier 1's one source. A single aggregate
-    item, not one per entry: Trash is one verdict the operator already
-    gave (freedesktop trash spec's own files/+info/ pair), not a pile of
-    separate decisions to re-litigate."""
+def _mount_trash_dirs(mountpoint, uid):
+    """A non-home mount's own trash, per the freedesktop trash spec's
+    "trash directories" section (Alfred, msg 7389 item 9): a file trashed
+    from a filesystem other than $HOME's own can't move into
+    ~/.local/share/Trash without a device-crossing copy, so
+    implementations keep a separate can at each filesystem's own root.
+    Two candidate forms, tried in the spec's own preference order:
+    $topdir/.Trash/$uid (only when $topdir/.Trash itself has the sticky
+    bit set and is not a symlink -- the spec's own safety condition,
+    since a lax .Trash would let another user plant files this code
+    would otherwise attribute to this uid) else $topdir/.Trash-$uid
+    (implementation-created, owned outright by this uid, no shared-
+    directory risk to check). Returns (files_dir, info_dir) or None --
+    never creates either, byebyte only ever reads what already exists."""
+    mountpoint = mountpoint.rstrip("/") or "/"
+    shared = os.path.join(mountpoint, ".Trash")
+    try:
+        st = os.lstat(shared)
+        if (stat.S_ISDIR(st.st_mode) and not os.path.islink(shared)
+                and (st.st_mode & stat.S_ISVTX)):
+            candidate = os.path.join(shared, str(uid))
+            files_dir = os.path.join(candidate, "files")
+            info_dir = os.path.join(candidate, "info")
+            if os.path.isdir(files_dir) and os.path.isdir(info_dir):
+                return files_dir, info_dir
+    except OSError:
+        pass
+    fallback = os.path.join(mountpoint, f".Trash-{uid}")
+    files_dir = os.path.join(fallback, "files")
+    info_dir = os.path.join(fallback, "info")
+    if os.path.isdir(files_dir) and os.path.isdir(info_dir):
+        return files_dir, info_dir
+    return None
+
+
+def _trash_locations(cfg, mounts):
+    """Every real trash directory this box has, each as
+    (label, files_dir, info_dir) -- the home one
+    ($XDG_DATA_HOME/Trash, byebyte's original and only location before
+    msg 7389) plus, for every mount status_doc already knows about, its
+    own per-mount trash if one exists (see _mount_trash_dirs). `label`
+    is what a citation names -- the trash directory itself, never
+    files_dir/info_dir separately, so a reader sees one location per
+    finding, not two paths for the same can."""
+    locations = []
     home = _resolve_owner_home(cfg)
-    if not home:
-        return None
-    trash = os.path.join(home, ".local", "share", "Trash")
-    files_dir = os.path.join(trash, "files")
-    info_dir = os.path.join(trash, "info")
-    if not os.path.isdir(files_dir) or not os.path.isdir(info_dir):
-        return None
-    if not _verify_inside(trash, home):
-        return None
+    if home:
+        trash = os.path.join(home, ".local", "share", "Trash")
+        files_dir = os.path.join(trash, "files")
+        info_dir = os.path.join(trash, "info")
+        if (os.path.isdir(files_dir) and os.path.isdir(info_dir)
+                and _verify_inside(trash, home)):
+            locations.append((trash, files_dir, info_dir))
+    uid = cfg["owner_uid"]
+    for m in mounts:
+        mp = m.get("mountpoint")
+        if not mp:
+            continue
+        found = _mount_trash_dirs(mp, uid)
+        if found:
+            files_dir, info_dir = found
+            locations.append((os.path.dirname(files_dir), files_dir, info_dir))
+    return locations
+
+
+def _trash_aggregate(files_dir, info_dir):
+    """One aggregate row for ONE trash location -- same reasoning as
+    always: Trash is a verdict already given (freedesktop trash spec's
+    own files/+info pair), not a pile of separate decisions to
+    re-litigate, so a citation gets one row with an item count, never
+    one row per entry."""
     try:
         info_entries = list(os.scandir(info_dir))
     except OSError:
@@ -3054,8 +3111,7 @@ def _detect_trash(cfg):
             oldest = ts if oldest is None else min(oldest, ts)
     if count == 0:
         return None
-    return {"path": trash, "bytes": total, "items": count,
-            "oldest_deletion_ts": oldest}
+    return {"bytes": total, "items": count, "oldest_deletion_ts": oldest}
 
 
 def _index_latest_dirs(indexer):
@@ -3212,10 +3268,15 @@ def accounting(cfg, status_doc, indexer):
     condemned_items = []
     covered = []  # trash + cold-cache paths, so tier 3 never re-reports them
     if "trash" not in disabled:
-        t = _detect_trash(cfg)
-        if t:
-            condemned_items.append(_with_mount_context(t, mounts))
-            covered.append(t["path"])
+        # Every real trash can on the box, not just $HOME's -- Storage
+        # Sense treats every drive (msg 7389 item 9), and the freedesktop
+        # spec keeps a SEPARATE trash at each non-home mount's own root.
+        for label, files_dir, info_dir in _trash_locations(cfg, mounts):
+            agg = _trash_aggregate(files_dir, info_dir)
+            if agg:
+                agg["path"] = label
+                condemned_items.append(_with_mount_context(agg, mounts))
+                covered.append(label)
     condemned = {"items": condemned_items, "below_floor": {"count": 0, "bytes": 0}}
 
     cold_items, cold_below = [], []
@@ -3464,40 +3525,36 @@ def _parse_size_bytes(size):
 # their grace period, so this walks the same two directories but keeps
 # per-entry identity instead of collapsing to a single row.
 
-def _policy_trash_candidates(cfg, older_than_days):
-    home = _resolve_owner_home(cfg)
-    if not home:
-        return []
-    trash = os.path.join(home, ".local", "share", "Trash")
-    files_dir = os.path.join(trash, "files")
-    info_dir = os.path.join(trash, "info")
-    if not os.path.isdir(files_dir) or not os.path.isdir(info_dir):
-        return []
-    if not _verify_inside(trash, home):
-        return []
+def _policy_trash_candidates(cfg, older_than_days, mounts):
+    # Every real trash can on the box (msg 7389 item 9), the same
+    # locations accounting's CONDEMNED tier now cites -- a per-mount
+    # trash gets exactly the same DeletionDate discipline as the home
+    # one, no separate policy.
     cutoff = time.time() - older_than_days * 86400
     out = []
-    try:
-        info_entries = list(os.scandir(info_dir))
-    except OSError:
-        return []
-    for e in info_entries:
-        if not e.name.endswith(".trashinfo"):
-            continue
-        ts = _parse_trashinfo(e.path)
-        # No documented DeletionDate is "I don't know how old this is", not
-        # "old enough" -- same no-vs-I-don't-know discipline as everywhere
-        # else in this file (reserved_percent_unknown, atime_confidence).
-        if ts is None or ts > cutoff:
-            continue
-        target = os.path.join(files_dir, e.name[: -len(".trashinfo")])
+    for _label, files_dir, info_dir in _trash_locations(cfg, mounts):
         try:
-            st = os.lstat(target)
+            info_entries = list(os.scandir(info_dir))
         except OSError:
             continue
-        b = st.st_size if not os.path.isdir(target) else _dir_size(target)
-        out.append({"path": target, "info_path": e.path, "bytes": b,
-                    "deletion_ts": ts})
+        for e in info_entries:
+            if not e.name.endswith(".trashinfo"):
+                continue
+            ts = _parse_trashinfo(e.path)
+            # No documented DeletionDate is "I don't know how old this
+            # is", not "old enough" -- same no-vs-I-don't-know
+            # discipline as everywhere else in this file
+            # (reserved_percent_unknown, atime_confidence).
+            if ts is None or ts > cutoff:
+                continue
+            target = os.path.join(files_dir, e.name[: -len(".trashinfo")])
+            try:
+                st = os.lstat(target)
+            except OSError:
+                continue
+            b = st.st_size if not os.path.isdir(target) else _dir_size(target)
+            out.append({"path": target, "info_path": e.path, "bytes": b,
+                        "deletion_ts": ts})
     return out
 
 
@@ -3845,13 +3902,14 @@ def policy_run(cfg, policy_cfg, status_doc, indexer, file_dry_run=None):
     dry_run = policy_cfg.get("dry_run", True)
     if file_dry_run is None:
         file_dry_run = dry_run
+    mounts = (status_doc or {}).get("mounts") or []
     mount_opts = _mount_options_map()
     rules_by_cat = {r["category"]: r for r in policy_cfg["rules"]}
     results = []
 
     r = rules_by_cat["trash"]
     if r["enabled"]:
-        items = _policy_trash_candidates(cfg, r["params"].get("older_than_days", 30))
+        items = _policy_trash_candidates(cfg, r["params"].get("older_than_days", 30), mounts)
         results.append(_policy_run_item_rule("trash", items, dry_run, cfg, indexer,
                                              _act_trash, "policy:trash"))
     else:
