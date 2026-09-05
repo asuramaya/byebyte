@@ -65,3 +65,6 @@ jobs:
 
       - name: Install for real and poll all six units to completion
         run: sudo make check-systemd-live
+
+      - name: An operator-edited policy.json/receipt survives an upgrade
+        run: sudo make check-upgrade-safety

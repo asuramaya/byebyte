@@ -301,6 +301,63 @@ check-systemd-live:
 	  echo "check-systemd-live: $$t verified ($$line)"; \
 	done
 
+# Alfred's dispatch (msg 7389 item 8): the operator will flip policy.json's
+# own dry_run and add rules by hand once Storage Sense is live -- a release
+# that silently resets that edit is the worst thing this product could do.
+# Proves it two ways, requires an already-built .deb and real root (same
+# class as check-systemd-live, meant to run right after it in the same CI
+# job so both share one already-installed system instead of each paying
+# their own dpkg -i):
+#   (a) dpkg's own conffile semantics: policy.json is declared in
+#       DEBIAN/conffiles (see the deb: recipe above) -- an edited conffile
+#       survives a same-version reinstall (dpkg's own upgrade path) because
+#       dpkg compares the on-disk file's hash against the PACKAGED default,
+#       never against what a previous package version shipped, so an
+#       operator's own edit is never mistaken for "unchanged, safe to
+#       overwrite."
+#   (b) install.sh's own from-source path: a plain `if [ -f ... ]` check,
+#       tested directly by running it twice with an edit in between.
+# The receipts directory (/var/lib/byebyte/policy_runs/) is proven the same
+# way in both paths -- neither installer's own recipe touches it at all
+# (it's runtime state, not packaged), but a real installer script has
+# broken this invariant elsewhere in this family before by being too
+# eager with a stray rm -rf, so this proves the CURRENT scripts specifically,
+# not just cites the general shape of the argument.
+.PHONY: check-upgrade-safety
+check-upgrade-safety:
+	@test "$$(id -u)" = "0" || { echo "check-upgrade-safety: needs root (dpkg -i)" >&2; exit 1; }
+	@test -f $(DEBFILE) || { echo "check-upgrade-safety: build the deb first (make deb)" >&2; exit 1; }
+	dpkg -i $(DEBFILE)
+	@test -f /etc/byebyte/policy.json || { echo "FAIL: policy.json was not seeded by the first install" >&2; exit 1; }
+	@mkdir -p /var/lib/byebyte/policy_runs
+	@echo '{"marker": "check-upgrade-safety-receipt"}' > /var/lib/byebyte/policy_runs/zzz-upgrade-safety-marker.json
+	@MARKER="upgrade-safety-marker-$$$$"; \
+	python3 -c "import json,sys; p='/etc/byebyte/policy.json'; d=json.load(open(p)); d['dry_run']=False; d['_operator_marker']=sys.argv[1]; json.dump(d, open(p,'w'), indent=2)" "$$MARKER"; \
+	echo "$$MARKER" > /tmp/byebyte-upgrade-safety-marker; \
+	echo "check-upgrade-safety: seeded operator edit ($$MARKER) and a receipt marker"
+	dpkg -i $(DEBFILE)
+	@MARKER="$$(cat /tmp/byebyte-upgrade-safety-marker)"; \
+	grep -q "$$MARKER" /etc/byebyte/policy.json \
+	    || { echo "FAIL: a dpkg reinstall OVERWROTE the operator's own policy.json edit" >&2; \
+	         cat /etc/byebyte/policy.json >&2; exit 1; }
+	@echo "check-upgrade-safety: dpkg reinstall (conffile semantics) preserved the operator's edit"
+	@# install.sh's own systemd calls fail in a bare container/CI runner
+	@# with no real systemd as PID 1 -- expected there, irrelevant here:
+	@# by the time that happens, the config-preservation check this
+	@# target exists for has already run (install.sh prints "keeping it
+	@# untouched" before ever touching systemctl). `|| true` tolerates
+	@# ONLY that environment mismatch; the actual proof is the grep below.
+	./install.sh >/dev/null 2>&1 || true
+	@MARKER="$$(cat /tmp/byebyte-upgrade-safety-marker)"; \
+	grep -q "$$MARKER" /etc/byebyte/policy.json \
+	    || { echo "FAIL: install.sh (from-source path) OVERWROTE the operator's own policy.json edit" >&2; \
+	         cat /etc/byebyte/policy.json >&2; exit 1; }
+	@echo "check-upgrade-safety: install.sh's own idempotent seeding also preserved the operator's edit"
+	@test -f /var/lib/byebyte/policy_runs/zzz-upgrade-safety-marker.json \
+	    || { echo "FAIL: the receipts directory lost a real receipt across reinstall/install.sh" >&2; exit 1; }
+	@echo "check-upgrade-safety: /var/lib/byebyte/policy_runs/ survived both install paths untouched"
+	@rm -f /tmp/byebyte-upgrade-safety-marker /var/lib/byebyte/policy_runs/zzz-upgrade-safety-marker.json
+
 # signing anchor rebuild is centralized in mudra now, not a per-repo target:
 #   ~/code/REPOS/mudra/bin/mudra sync-signers byebyte
 
