@@ -428,7 +428,10 @@ own
 .I snap\-old
 detector as\-is (whatever
 .BR snap (8)
-itself already marked disabled).
+itself already marked disabled). Each disabled revision is sized from
+its own squashfs image file, one stat, never a directory walk; a
+revision whose image can't be found is reported as its own count with
+size UNKNOWN, never blended into the total as a false 0 bytes.
 .RE
 .PP
 A category name outside this list fails the whole file to load, loudly

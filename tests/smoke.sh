@@ -2634,6 +2634,35 @@ assert mod._parse_docker_reclaimed("Total reclaimed space: 1.5GB\n") == int(1.5 
 assert mod._parse_docker_reclaimed("Total reclaimed space: 512MB\n") == 512 * 1024**2
 assert mod._parse_docker_reclaimed("nothing to reclaim") == 0
 
+# --- snap_revisions: a revision's own .snap file is ONE stat, and a
+# missing one is "I don't know", never "0 bytes" (60bc15db -- found live
+# on the operator's box, Alfred msg 7131: "would free 0B (18 items)" is a
+# confident FALSE claim, 18 old revisions cannot weigh nothing).
+snap_dir = os.path.join(tmp, "snapd-snaps")
+os.makedirs(snap_dir)
+with open(os.path.join(snap_dir, "core20_1828.snap"), "wb") as f:
+    f.write(b"s" * 4096)
+assert mod._snap_revision_size("core20", "1828", snap_dir) == 4096
+assert mod._snap_revision_size("ghost", "9999", snap_dir) is None
+
+known_item = {"path": "core20 (revision 1828)", "bytes": 4096, "bytes_unknown": False}
+unknown_item = {"path": "ghost (revision 9999)", "bytes": 0, "bytes_unknown": True}
+snap_dry = mod._policy_run_item_rule(
+    "snap_revisions", [known_item, unknown_item], True, cfg, None,
+    lambda i, cfg, indexer: True, "policy:snap_revisions")
+assert snap_dry["would_free_bytes"] == 4096, snap_dry
+assert snap_dry["count_would_free"] == 1, snap_dry
+assert snap_dry["count_unknown"] == 1, snap_dry
+snap_real = mod._policy_run_item_rule(
+    "snap_revisions", [known_item, unknown_item], False, cfg, None,
+    lambda i, cfg, indexer: True, "policy:snap_revisions")
+assert snap_real["bytes_freed"] == 4096, snap_real
+assert snap_real["count_freed"] == 2, snap_real
+assert snap_real["count_freed_unknown"] == 1, snap_real
+print("snap_revisions sizing ok: a real .snap file is stat'd for its "
+      "exact size, a missing one stays honestly unknown (never blended "
+      "into the known total as a false 0B), matching 60bc15db")
+
 # --- dispatch: run (force_dry, the one-way latch) + report round-trip.
 # Explicitly redirected to a nonexistent fixture path -- same discipline
 # as BYEBYTE_TEST_HOME everywhere else here, never relying on this dev
@@ -2660,6 +2689,32 @@ print("policy ok: closed-enumeration validated (unknown_large can never "
       "root or real docker, receipts write+cap+round-trip through dispatch, "
       "and force_dry is a one-way latch toward preview, never past what "
       "policy.json itself says")
+
+# --- CLI rendering: the exact defect Alfred caught live (msg 7131) --
+# "0B (18 items)" must never print; a known amount and an unknown count
+# render as separate clauses, never blended into one number.
+import contextlib, io
+cli_loader = SourceFileLoader("byebyte_cli_mod_policy", "src/bin/byebyte")
+cli_spec = importlib.util.spec_from_loader("byebyte_cli_mod_policy", cli_loader)
+cli = importlib.util.module_from_spec(cli_spec)
+cli_loader.exec_module(cli)
+
+mixed_doc = {
+    "ts": time.time(), "dry_run": True,
+    "results": [{"category": "snap_revisions", "dry_run": True,
+                 "would_free_bytes": 0, "count_would_free": 0,
+                 "count_unknown": 18, "matched": []}],
+    "totals": {"would_free_bytes": 0, "unknown_count": 18},
+}
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    cli._print_policy_receipt(mixed_doc)
+rendered = buf.getvalue()
+assert "18 item(s), size unknown" in rendered, rendered
+assert "unknown size" in rendered.splitlines()[-1], \
+    f"the total line must disclose the unknown count alongside 0B, not print a bare 0B: {rendered!r}"
+print("policy CLI rendering ok: an all-unknown snap_revisions result never "
+      "prints a bare 0B, says 'size unknown' instead")
 PY
 
 # --- M4: make deb — builds a real .deb; contents include bins+units+man.

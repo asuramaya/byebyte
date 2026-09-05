@@ -1195,6 +1195,35 @@ def detect_journald(cfg, indexer):
              "vacuum_size": cfg["journald_vacuum_size"]}]
 
 
+_SNAP_DIR = "/var/lib/snapd/snaps"
+
+
+def _snap_dir():
+    # Non-root-only test redirection, same class as BYEBYTE_TEST_HOME.
+    if os.getuid() != 0:
+        override = os.environ.get("BYEBYTE_TEST_SNAP_DIR")
+        if override:
+            return override
+    return _SNAP_DIR
+
+
+def _snap_revision_size(name, revision, snap_dir):
+    """A disabled revision's own squashfs image is ONE file
+    (<snap_dir>/<name>_<revision>.snap) -- a single stat, never a
+    directory walk. Returns None, never 0, when it can't be found: a
+    missing size is "I don't know", not "zero bytes" (60bc15db -- the
+    same no-vs-I-don't-know cut as reserved_percent_unknown and
+    atime_confidence). Found live on the operator's own box (Alfred, msg
+    7131): every prior detect_snap_old candidate hardcoded bytes=0,
+    which the Storage Sense receipt then rendered as "would free 0B (18
+    items)" -- a confident FALSE claim (18 old revisions cannot weigh
+    nothing), not an honest unknown."""
+    try:
+        return os.stat(os.path.join(snap_dir, f"{name}_{revision}.snap")).st_size
+    except OSError:
+        return None
+
+
 def detect_snap_old(cfg, indexer):
     if shutil.which("snap") is None:
         return []
@@ -1205,6 +1234,7 @@ def detect_snap_old(cfg, indexer):
         return []
     if out.returncode != 0:
         return []
+    snap_dir = _snap_dir()
     candidates = []
     for line in out.stdout.splitlines()[1:]:
         parts = line.split()
@@ -1212,7 +1242,10 @@ def detect_snap_old(cfg, indexer):
             continue
         name, rev, notes = parts[0], parts[2], parts[-1]
         if "disabled" in notes:
-            candidates.append({"path": f"{name} (revision {rev})", "bytes": 0,
+            size = _snap_revision_size(name, rev, snap_dir)
+            candidates.append({"path": f"{name} (revision {rev})",
+                                "bytes": size if size is not None else 0,
+                                "bytes_unknown": size is None,
                                 "name": name, "revision": rev})
     return candidates
 
@@ -3487,26 +3520,45 @@ def _policy_run_item_rule(category, items, dry_run, cfg, indexer, act, ledger_ta
     """Generic runner for a per-item, TOCTOU-safe rule (trash, cold_cache,
     snap_revisions) -- `act(item, cfg, indexer) -> bool` does its own
     revalidate-then-delete-then-verify, same shape purge()/sweep() already
-    use for every REGISTRY category."""
-    matched = [{"path": i["path"], "bytes": i["bytes"]} for i in items]
-    total = sum(i["bytes"] for i in items)
+    use for every REGISTRY category.
+
+    An item may carry `bytes_unknown: True` (currently only snap_revisions,
+    when a revision's own .snap file can't be found) -- its bytes never
+    enter would_free_bytes/bytes_freed (a real number must never blend
+    with a guess), and it's counted separately so the receipt can say "N
+    items, size unknown" instead of a confident, false 0B."""
+    matched = [dict({"path": i["path"], "bytes": i["bytes"]},
+                    **({"bytes_unknown": True} if i.get("bytes_unknown") else {}))
+               for i in items]
+    known = [i for i in items if not i.get("bytes_unknown")]
+    unknown_count = len(items) - len(known)
+    total = sum(i["bytes"] for i in known)
     if dry_run:
-        return {"category": category, "dry_run": True, "matched": matched,
-                "would_free_bytes": total, "count_would_free": len(items)}
+        res = {"category": category, "dry_run": True, "matched": matched,
+               "would_free_bytes": total, "count_would_free": len(known)}
+        if unknown_count:
+            res["count_unknown"] = unknown_count
+        return res
     _toctou_test_window(cfg)
-    freed, count, errors = 0, 0, []
+    freed, count, unknown_freed, errors = 0, 0, 0, []
     for i in items:
         ts = time.time()
         ok = act(i, cfg, indexer)
         if ok:
-            freed += i["bytes"]
             count += 1
+            if i.get("bytes_unknown"):
+                unknown_freed += 1
+            else:
+                freed += i["bytes"]
         else:
             errors.append(i["path"])
         _ledger_append(ts, ledger_tag, i["path"], i["bytes"] if ok else 0,
                        "ok" if ok else "error")
-    return {"category": category, "dry_run": False, "matched": matched,
-            "bytes_freed": freed, "count_freed": count, "errors": errors}
+    res = {"category": category, "dry_run": False, "matched": matched,
+           "bytes_freed": freed, "count_freed": count, "errors": errors}
+    if unknown_freed:
+        res["count_freed_unknown"] = unknown_freed
+    return res
 
 
 # -- journal: journal_cap() already supports dry_run -- reused as-is, no
@@ -3775,9 +3827,18 @@ def policy_run(cfg, policy_cfg, status_doc, indexer):
 
     bytes_freed = sum(r.get("bytes_freed", 0) for r in results)
     would_free_bytes = sum(r.get("would_free_bytes", 0) for r in results)
+    # Unknown-sized items (currently only snap_revisions, when a
+    # revision's .snap file can't be found) never blend into the byte
+    # totals above -- counted here instead, so the headline total can say
+    # "N items of unknown size" rather than silently rounding them into
+    # an all-zero, confidently false total (60bc15db, msg 7131).
+    unknown_count = (sum(r.get("count_unknown", 0) for r in results)
+                     + sum(r.get("count_freed_unknown", 0) for r in results))
+    totals = {"bytes_freed": bytes_freed, "would_free_bytes": would_free_bytes}
+    if unknown_count:
+        totals["unknown_count"] = unknown_count
     doc = {"ts": time.time(), "dry_run": dry_run, "results": results,
-           "totals": {"bytes_freed": bytes_freed,
-                       "would_free_bytes": would_free_bytes}}
+           "totals": totals}
     _write_policy_receipt(doc, cfg["owner_uid"])
     return doc
 

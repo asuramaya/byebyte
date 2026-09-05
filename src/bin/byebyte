@@ -895,29 +895,45 @@ def _print_policy_receipt(doc):
         if dry:
             amt = r.get("would_free_bytes", 0)
             count = r.get("count_would_free", 0)
-            if not amt and not count:
+            unknown = r.get("count_unknown", 0)
+            if not amt and not count and not unknown:
                 print(f"  {label}: nothing to do")
             else:
-                tail = f" ({count} item(s))" if count else ""
-                print(f"  {label}: would free {human_bytes(amt)}{tail}")
+                # A known amount and an unknown count are never blended
+                # into one number (60bc15db) -- "0B (18 items)" is a
+                # confident, false claim; "18 items, size unknown" is the
+                # honest one.
+                parts = []
+                if count:
+                    parts.append(f"would free {human_bytes(amt)} ({count} item(s))")
+                if unknown:
+                    parts.append(f"{unknown} item(s), size unknown")
+                print(f"  {label}: " + "; ".join(parts))
         else:
             freed = r.get("bytes_freed", 0)
             count = r.get("count_freed", 0)
+            unknown = r.get("count_freed_unknown", 0)
             errors = r.get("errors") or []
-            if not freed and not count:
+            if not freed and not count and not unknown:
                 print(f"  {label}: nothing to do")
             else:
-                tail = f" ({count} item(s))" if count else ""
+                parts = []
+                if count:
+                    parts.append(f"freed {human_bytes(freed)} ({count} item(s))")
+                if unknown:
+                    parts.append(f"{unknown} item(s) freed, size unknown")
                 if errors:
-                    tail += f", {len(errors)} failed"
-                print(f"  {label}: freed {human_bytes(freed)}{tail}")
+                    parts.append(f"{len(errors)} failed")
+                print(f"  {label}: " + "; ".join(parts))
         for ref in r.get("refused", []):
             print(f"    refused: {ref['path']} -- {ref['reason']}")
     totals = doc.get("totals", {})
+    unknown_count = totals.get("unknown_count", 0)
+    tail = f" (+{unknown_count} item(s) of unknown size)" if unknown_count else ""
     if dry:
-        print(f"total: would free {human_bytes(totals.get('would_free_bytes', 0))}")
+        print(f"total: would free {human_bytes(totals.get('would_free_bytes', 0))}{tail}")
     else:
-        print(f"total: freed {human_bytes(totals.get('bytes_freed', 0))}")
+        print(f"total: freed {human_bytes(totals.get('bytes_freed', 0))}{tail}")
 
 
 def cmd_policy(argv):
