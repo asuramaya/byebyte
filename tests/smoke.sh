@@ -2842,18 +2842,25 @@ done
 
 # control fields: the family-wide dependency ruling (operator 2cd900ce) --
 # the artifact must actually emit what packages.txt documents, not just
-# describe a tier that was never wired into the control stanza. Depends
-# stays at the floor unchanged; Suggests carries every optional package
-# (never Recommends -- apt installs those by default, and nothing here
-# should arrive unasked).
+# describe a tier that was never wired into the control stanza. Since
+# Alfred's pre-tag checklist (thread a14e59da) this is no longer a
+# hardcoded parallel copy compared against packages.txt after the fact --
+# the Makefile's own deb: recipe now GENERATES Depends/Suggests straight
+# from packages.txt via sutra.mk's own check-packages generator
+# (--depends/--suggests), so the two cannot drift by construction. This
+# assertion derives its own expected values the SAME way, proving the
+# generation actually happened rather than re-encoding a second copy of
+# the family doctrine that could itself go stale.
+EXPECTED_DEPENDS=$(printf '%s\n' "$(sed -n '/^define _SUTRA_CHECK_PACKAGES_PY$/,/^endef$/p' src/share/byebyte/lib/sutra.mk | sed '1d;$d')" \
+    | python3 - packaging/packages.txt --depends)
+EXPECTED_SUGGESTS=$(printf '%s\n' "$(sed -n '/^define _SUTRA_CHECK_PACKAGES_PY$/,/^endef$/p' src/share/byebyte/lib/sutra.mk | sed '1d;$d')" \
+    | python3 - packaging/packages.txt --suggests)
 DEB_DEPENDS=$(dpkg-deb -f "$DEBFILE" Depends)
-[ "$DEB_DEPENDS" = "python3 (>= 3.8), systemd, openssh-client" ] \
-    || { echo "SMOKE FAIL: deb Depends changed unexpectedly: $DEB_DEPENDS"; exit 1; }
+[ "$DEB_DEPENDS" = "$EXPECTED_DEPENDS" ] \
+    || { echo "SMOKE FAIL: deb Depends ($DEB_DEPENDS) != packages.txt's own hard tier ($EXPECTED_DEPENDS)"; exit 1; }
 DEB_SUGGESTS=$(dpkg-deb -f "$DEBFILE" Suggests)
-for want in btrfs-progs snapd libnotify-bin gnome-shell; do
-    echo "$DEB_SUGGESTS" | grep -q "$want" \
-        || { echo "SMOKE FAIL: deb Suggests missing $want (got: $DEB_SUGGESTS)"; exit 1; }
-done
+[ "$DEB_SUGGESTS" = "$EXPECTED_SUGGESTS" ] \
+    || { echo "SMOKE FAIL: deb Suggests ($DEB_SUGGESTS) != packages.txt's own optional tier ($EXPECTED_SUGGESTS)"; exit 1; }
 DEB_RECOMMENDS=$(dpkg-deb -f "$DEBFILE" Recommends)
 [ -z "$DEB_RECOMMENDS" ] \
     || { echo "SMOKE FAIL: deb carries a Recommends field, ruling says Suggests only: $DEB_RECOMMENDS"; exit 1; }

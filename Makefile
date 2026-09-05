@@ -178,13 +178,15 @@ deb:
 	install -m 0755 packaging/deb/postrm $(DEBROOT)/DEBIAN/postrm
 	printf '/etc/byebyte/config.json\n/etc/byebyte/policy.json\n' > $(DEBROOT)/DEBIAN/conffiles
 	{ \
+	  DEB_DEPENDS_GEN="$$(printf '%s\n' "$$_SUTRA_CHECK_PACKAGES_PY" | python3 - $(SUTRA_PACKAGES_TXT) --depends)"; \
+	  DEB_SUGGESTS_GEN="$$(printf '%s\n' "$$_SUTRA_CHECK_PACKAGES_PY" | python3 - $(SUTRA_PACKAGES_TXT) --suggests)"; \
 	  echo "Package: byebyte"; \
 	  echo "Version: $(VERSION)"; \
 	  echo "Section: admin"; \
 	  echo "Priority: optional"; \
 	  echo "Architecture: all"; \
-	  echo "Depends: python3 (>= 3.8), systemd, openssh-client"; \
-	  echo "Suggests: btrfs-progs, snapd, libnotify-bin, gnome-shell"; \
+	  echo "Depends: $$DEB_DEPENDS_GEN"; \
+	  echo "Suggests: $$DEB_SUGGESTS_GEN"; \
 	  echo "Maintainer: asuramaya <asuramaya@users.noreply.github.com>"; \
 	  echo "Homepage: https://github.com/asuramaya/byebyte"; \
 	  echo "Description: storage as a deadline, not a percentage"; \
