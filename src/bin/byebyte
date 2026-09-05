@@ -903,7 +903,15 @@ def _print_policy_receipt(doc):
             print(f"  {label}: off{reason}")
             continue
         if r.get("error"):
-            print(f"  {label}: error -- {r['error']}")
+            # A category error renders as ONE line here no matter how
+            # many lines the underlying failure produced (msg 7407 item
+            # 11 -- journald's "systemctl reload failed" can carry a
+            # second stderr line, e.g. "Failed to connect to bus", which
+            # broke the one-line-per-category shape). The full text still
+            # rides untouched in the JSON receipt -- only this
+            # human-readable line is trimmed to its first line.
+            first_line = str(r["error"]).splitlines()[0] if r["error"] else r["error"]
+            print(f"  {label}: error -- {first_line}")
             continue
         if r.get("note"):
             print(f"  {label}: {r['note']}")

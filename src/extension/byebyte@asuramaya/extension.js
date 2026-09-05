@@ -370,8 +370,13 @@ function findingsCategoryText(r) {
     const label = POLICY_CATEGORY_LABEL[r.category] ?? r.category;
     if (r.enabled === false)
         return `${label}: off${r.reason ? ` — ${Pill.esc(r.reason)}` : ''}`;
-    if (r.error)
-        return `${label}: error — ${Pill.esc(String(r.error))}`;
+    if (r.error) {
+        // One line here no matter how many lines the failure produced
+        // (msg 7407 item 11) -- the JSON receipt on disk keeps the full
+        // text untouched; only this rendered line is trimmed.
+        const firstLine = String(r.error).split('\n')[0];
+        return `${label}: error — ${Pill.esc(firstLine)}`;
+    }
     if (r.note)
         return `${label}: ${Pill.esc(String(r.note))}`;
     const dry = r.dry_run !== false;

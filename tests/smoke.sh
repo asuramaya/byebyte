@@ -3024,6 +3024,36 @@ assert "unknown size" in rendered.splitlines()[-1], \
     f"the total line must disclose the unknown count alongside 0B, not print a bare 0B: {rendered!r}"
 print("policy CLI rendering ok: an all-unknown snap_revisions result never "
       "prints a bare 0B, says 'size unknown' instead")
+
+# --- CLI rendering: a category error is ONE line, always (msg 7407 item
+# 11) -- the real journald failure that prompted this had a two-line
+# stderr ("systemctl reload failed: Failed to connect to bus: No such "
+# "file or directory\nFailed to connect to bus: No such file or "
+# "directory"), which broke the one-line-per-category shape. Only the
+# rendered line is trimmed to its first line; the JSON receipt keeps the
+# full text untouched.
+error_doc = {
+    "ts": time.time(), "dry_run": False,
+    "results": [{"category": "journal", "dry_run": False,
+                 "error": "systemctl reload failed: Failed to connect to "
+                          "bus: No such file or directory\nFailed to "
+                          "connect to bus: No such file or directory"}],
+    "totals": {"bytes_freed": 0},
+}
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    cli._print_policy_receipt(error_doc)
+rendered = buf.getvalue()
+category_lines = [ln for ln in rendered.splitlines() if ln.startswith("  ")]
+assert len(category_lines) == 1, \
+    f"a category error must render as exactly one line: {rendered!r}"
+assert "Failed to connect to bus" in category_lines[0]
+assert category_lines[0].count("Failed to connect to bus") == 1, \
+    f"only the first line of a multi-line error may print: {rendered!r}"
+assert error_doc["results"][0]["error"].count("Failed to connect to bus") == 2, \
+    "the source doc (what a --json receipt would show) must keep the full text"
+print("policy CLI rendering ok: a multi-line category error prints as one "
+      "line; the JSON receipt keeps the full text")
 PY
 
 # --- M4: make deb — builds a real .deb; contents include bins+units+man.
